@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
+import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -223,13 +225,66 @@ final wenku8ClientProvider = Provider<Wenku8Client>((ref) {
   return client;
 });
 
-/// 图片专用的 Dio：和请求页面一样走所选代理，并带上浏览器 UA 和 Referer（图片服务器会检查）。
+typedef ImageChallengeFallback = Future<Uint8List?> Function(String url);
+
+/// 图床专用 cookie jar：与主站分开存放，切换账号或清理登录 cookie 时不影响图床已通过验证的 `cf_clearance`。
+final imageCookieJarProvider = Provider<CookieJar>((ref) => CookieJar());
+
+/// 图床遇到 Cloudflare 拦截时，用无头网页过一次盾并把图床 cookie / UA 写回给后续并发下载复用。
+final imageChallengeProvider = Provider<ImageChallengeFallback?>((ref) {
+  if (kIsWeb) return null;
+  return (url) {
+    final store = ref.read(sessionStoreProvider);
+    final node = ref.read(nodeProvider);
+    final jar = ref.read(imageCookieJarProvider);
+    final origin = 'https://${Uri.parse(url).host}';
+    return webFetchImage(
+      url,
+      referer: '${siteBase(node)}/',
+      proxy: ref.read(proxyProvider),
+      onSession: (cookies, ua) async {
+        await store.setCfCookie(origin, cookies);
+        await jar.saveFromResponse(Uri.parse(origin), Wenku8Client.parseCookieString(cookies));
+        if (ua != null && ua.isNotEmpty && ua != store.userAgent) {
+          await store.setUserAgent(ua);
+          ref.read(wenku8ClientProvider).dio.options.headers['User-Agent'] = ua;
+          ref.read(imageDioProvider).options.headers['User-Agent'] = ua;
+        }
+      },
+    );
+  };
+});
+
+/// 图片专用的 Dio：和请求页面一样走所选代理，并带上浏览器 UA、Referer 与各图床保存的 Cloudflare cookie。
 final imageDioProvider = Provider<Dio>((ref) {
   final store = ref.watch(sessionStoreProvider);
   final node = ref.watch(nodeProvider);
   ref.watch(proxyProvider);
-  return Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 25), headers: {'User-Agent': store.userAgent, 'Referer': '${siteBase(node)}/'}))
+  final jar = ref.watch(imageCookieJarProvider);
+  final dio = Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 25), headers: {'User-Agent': store.userAgent, 'Referer': '${siteBase(node)}/'}))
     ..httpClientAdapter = store.adapter();
+  if (!kIsWeb) {
+    final restoring = <String, Future<void>>{};
+    dio.interceptors.add(
+      InterceptorsWrapper(
+        onRequest: (options, handler) async {
+          final host = options.uri.host;
+          if (host.isNotEmpty) {
+            final origin = 'https://$host';
+            await (restoring[origin] ??= () async {
+              final saved = store.cfCookie(origin);
+              if (saved != null && saved.isNotEmpty) {
+                await jar.saveFromResponse(Uri.parse(origin), Wenku8Client.parseCookieString(saved));
+              }
+            }());
+          }
+          handler.next(options);
+        },
+      ),
+    );
+    dio.interceptors.add(CookieManager(jar));
+  }
+  return dio;
 });
 
 final wenku8UrlsProvider = Provider<Wenku8Urls>((ref) => Wenku8Urls(siteBase(ref.watch(nodeProvider)), CharsetType.gbk));

@@ -45,7 +45,7 @@ class Api {
   final Wenku8Urls _urls;
   final String _base;
 
-  /// 受限书的正文改从文库 App 接口或全本 TXT 取
+  /// 受限章节的正文由运行期扩展工具尝试获取
   final UnlockService? unlock;
 
   /// 当前用户 ID（游客为 guest）：账号私有页面（书架）的离线备份按它分开存。

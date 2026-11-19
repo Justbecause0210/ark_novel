@@ -97,8 +97,8 @@ const _items = <(String, SettingsSection, String)>[
   ('章节缓存', SettingsSection.data, '正文 清除 存储 自动清理'),
   ('备份', SettingsSection.data, '导出 导入 恢复'),
   ('同步', SettingsSection.data, '坚果云 webdav 多设备'),
-  ('妙妙小工具', SettingsSection.unlock, '无法阅读 书籍解锁 受限 下架 版权 TXT'),
-  ('App 接口', SettingsSection.unlock, '接口 API 中继 插图'),
+  ('妙妙小工具', SettingsSection.unlock, '无法阅读 书籍解锁 受限 下架 版权 导入 口令'),
+  ('备用接口', SettingsSection.unlock, '接口 API 插图 测试'),
   ('生物识别锁', SettingsSection.security, '指纹 面容 密码 锁定'),
   ('防截屏', SettingsSection.security, '录屏 最近任务 隐私'),
   ('无痕模式', SettingsSection.security, '不记录 历史 进度'),
@@ -121,10 +121,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final addon = ref.watch(unlockAddonProvider);
     final q = _q.trim().toLowerCase();
     final hits = q.isEmpty
         ? const <(String, SettingsSection, String)>[]
-        : _items.where((e) => (hasUnlockAddon || e.$1 != 'App 接口') && '${e.$1} ${e.$3} ${e.$2.title}'.toLowerCase().contains(q)).toList();
+        : _items.where((e) => (addon?.api != null || e.$1 != '备用接口') && '${e.$1} ${e.$3} ${e.$2.title}'.toLowerCase().contains(q)).toList();
     void open(SettingsSection s) => context.push(Routes.settingsSection(s.name));
     return Scaffold(
       appBar: AppBar(title: const Text('设置')),
@@ -511,15 +512,95 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   static const _authorEmail = 'chenshi22150@gmail.com';
 
   Future<void> _testAppApi() async {
-    _snack('正在请求文库 App 接口…');
+    _snack('正在测试备用接口…');
     final msg = await ref.read(unlockServiceProvider).testApi();
     if (mounted) _snack(msg);
   }
 
+  Future<void> _importAddonFromFile() async {
+    try {
+      final picked = await FilePicker.pickFile(type: FileType.any);
+      final path = picked?.path;
+      if (path == null || !mounted) return;
+      final bytes = await File(path).readAsBytes();
+      final cfg = await ref.read(unlockAddonProvider.notifier).importBytes(bytes);
+      if (mounted) _snack('已导入：${cfg.name} v${cfg.version}');
+    } catch (e) {
+      if (mounted) _snack('导入失败：$e');
+    }
+  }
+
+  Future<void> _importAddonFromClipboard() async {
+    final notifier = ref.read(unlockAddonProvider.notifier);
+    final clip = (await Clipboard.getData(Clipboard.kTextPlain))?.text?.trim() ?? '';
+    if (!mounted) return;
+    if (clip.isNotEmpty) {
+      try {
+        final cfg = await notifier.importText(clip);
+        if (mounted) _snack('已导入：${cfg.name} v${cfg.version}');
+        return;
+      } catch (_) {}
+    }
+    if (!mounted) return;
+
+    final ctrl = TextEditingController(text: clip);
+    String? error;
+    final imported = await showDialog<UnlockAddonConfig>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (innerContext, setLocal) => AlertDialog(
+          title: const Text('导入口令或配置'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: ctrl,
+                maxLines: 4,
+                minLines: 2,
+                decoration: InputDecoration(
+                  hintText: '粘贴 arktool:// 口令或 JSON 配置',
+                  errorText: error,
+                  border: const OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('取消')),
+            FilledButton(
+              onPressed: () async {
+                try {
+                  final cfg = await notifier.importText(ctrl.text);
+                  if (dialogContext.mounted) Navigator.pop(dialogContext, cfg);
+                } catch (e) {
+                  if (innerContext.mounted) setLocal(() => error = '$e');
+                }
+              },
+              child: const Text('导入'),
+            ),
+          ],
+        ),
+      ),
+    );
+    ctrl.dispose();
+    if (imported != null && mounted) {
+      _snack('已导入：${imported.name} v${imported.version}');
+    }
+  }
+
+  Future<void> _removeAddon() => _confirm(
+    '移除妙妙小工具？',
+    '移除后将清除本机导入的扩展配置，之后可随时重新导入。',
+    '移除',
+    () => ref.read(unlockAddonProvider.notifier).remove(),
+  );
+
   List<Widget> _unlock() {
-    if (!hasUnlockAddon) {
+    final addon = ref.watch(unlockAddonProvider);
+    if (addon == null) {
       return [
-        const XNote('遇到无法正常阅读的书籍？试试这个小工具。\n感兴趣的话，联系作者获取。'),
+        const XNote('遇到无法正常阅读的书籍？试试导入妙妙小工具扩展包。\n感兴趣的话，可以联系作者获取。'),
         XTile(
           title: '作者邮箱',
           subtitle: _authorEmail,
@@ -529,25 +610,64 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
             _snack('已复制邮箱：$_authorEmail');
           },
         ),
+        const XDivider(),
+        const XGroupTitle('导入扩展包'),
+        XTile(
+          leading: const Icon(Icons.file_open_outlined),
+          title: '从文件导入',
+          subtitle: '选择 .arktool 或 .json 文件',
+          onTap: _importAddonFromFile,
+        ),
+        XTile(
+          leading: const Icon(Icons.content_paste_outlined),
+          title: '从剪贴板导入口令',
+          subtitle: '读取剪贴板中的 arktool:// 口令或 JSON',
+          onTap: _importAddonFromClipboard,
+        ),
       ];
     }
     final on = _prefs.get(P.unlock, true);
+    final apiRule = addon.api;
     return [
+      XTile(
+        leading: const Icon(Icons.extension_outlined),
+        title: '${addon.name} · v${addon.version}',
+        subtitle: addon.description.isEmpty ? '已导入本地运行期扩展' : addon.description,
+      ),
       XSwitch(
         title: '启用妙妙小工具',
         value: on,
         onChanged: (v) => _prefs.set(P.unlock, v),
-        help: '遇到网站不给正文的书籍时，打开章节自动改从备用通道读取，并支持整本缓存后照常阅读。',
+        help: '遇到网站不给正文的书籍时，打开章节自动改从扩展通道读取，并支持整本缓存后照常阅读。',
       ),
-      if (on) ...[
+      if (on && apiRule != null) ...[
         XSwitch(
-          title: '优先使用文库 App 接口',
+          title: apiRule.label ?? '优先使用备用接口',
           value: _prefs.get(P.unlockApi, true),
           onChanged: (v) => _prefs.set(P.unlockApi, v),
-          help: '接口能用时正文带插图；经社区中继 wenku8-relay.mewx.org，经常失效，失效时自动改用全本 TXT。',
+          help: apiRule.description ?? '接口能用时正文可带插图；失效时自动回退到整本文本通道。',
         ),
-        XTile(title: '测试 App 接口', onTap: _testAppApi),
+        XTile(title: '测试备用接口', onTap: _testAppApi),
       ],
+      const XDivider(),
+      const XGroupTitle('管理'),
+      XTile(
+        leading: const Icon(Icons.file_open_outlined),
+        title: '从文件更新 / 替换',
+        subtitle: '选择新的 .arktool 或 .json 文件',
+        onTap: _importAddonFromFile,
+      ),
+      XTile(
+        leading: const Icon(Icons.content_paste_outlined),
+        title: '从剪贴板口令更新 / 替换',
+        subtitle: '读取新的 arktool:// 口令或 JSON',
+        onTap: _importAddonFromClipboard,
+      ),
+      XTile(
+        leading: Icon(Icons.delete_outline, color: Theme.of(context).colorScheme.error),
+        title: '移除当前工具',
+        onTap: _removeAddon,
+      ),
     ];
   }
 

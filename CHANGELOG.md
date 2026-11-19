@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.2.0...ark_novel-v1.3.0) (2026-11-17)
+
+
+### Features
+
+* 增加 Bangumi 封面临时兜底与阅读页插图加载/失败重试占位 ([7be8062](https://github.com/chenshi221/ark_novel/commit/7be80624f2006fef91486a4c2a146856d14f4cdd))
+* 支持从文件和口令导入妙妙小工具扩展 ([d6d438f](https://github.com/chenshi221/ark_novel/commit/d6d438ff8ed1f5c591618640bb3cb30838a31f9a))
+
+
+### Bug Fixes
+
+* 删除章节缓存后立即更新存储空间和离线缓存列表 ([20c5e2d](https://github.com/chenshi221/ark_novel/commit/20c5e2d7ceba2fd9fa8da3398365c3753bfbe794))
+* 接入备选图床域名并支持图床 Cloudflare 过盾 ([d14a09f](https://github.com/chenshi221/ark_novel/commit/d14a09fa72e7d1561fe189fa4156f10fe9464d22))
+
 ## [1.2.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.1.2...ark_novel-v1.2.0) (2026-11-14)
 
 

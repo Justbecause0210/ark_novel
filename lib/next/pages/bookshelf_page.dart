@@ -14,6 +14,7 @@ import '../bookmarks.dart';
 import '../cache.dart';
 import '../cover_color.dart';
 import '../data.dart';
+import '../env.dart';
 import '../history.dart';
 import '../image_cache.dart';
 import '../library.dart';
@@ -632,7 +633,7 @@ class _ResumeBar extends ConsumerWidget {
                       height: 64,
                       decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), boxShadow: const [BoxShadow(color: Color(0x55000000), blurRadius: 8, offset: Offset(0, 3))]),
                       clipBehavior: Clip.antiAlias,
-                      child: CoverImage(cover),
+                      child: CoverImage(cover, aid: h.aid),
                     ),
                     const SizedBox(width: 14),
                     Expanded(
@@ -915,6 +916,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     final err = await ref.read(libraryProvider.notifier).sync(force: true);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err == null ? '已和网站书架同步，书架共 ${ref.read(libraryProvider).books.length} 本' : '同步网站书架失败：$err')));
+    if (err == null && !isWebPreview) ref.read(volumeCoverQueueProvider).prefetchAll(ref.read(libraryProvider).books.keys).ignore();
     ref.read(updateProvider.notifier).refresh();
   }
 
@@ -1257,7 +1259,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
       child: Stack(
         fit: StackFit.expand,
         children: [
-          CoverImage(_cover(b)),
+          CoverImage(_cover(b), aid: b.aid),
           DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(10),
@@ -1302,7 +1304,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
                       child: ValueListenableBuilder<String>(
                         valueListenable: widget.activeTab,
                         builder: (context, tab, child) => HeroMode(enabled: tab == widget.catId, child: child!),
-                        child: Hero(tag: 'vols:${b.aid}', flightShuttleBuilder: volumeHeroShuttle, child: VolumeStack(cover: _cover(b), behind: behind)),
+                        child: Hero(tag: 'vols:${b.aid}', flightShuttleBuilder: volumeHeroShuttle, child: VolumeStack(cover: _cover(b), behind: behind, aid: b.aid)),
                       ),
                     ),
                     if (badge != null) Positioned(top: 6, right: 6, child: badge),
@@ -1339,7 +1341,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     final n = _unread(b.aid);
     return ListTile(
       selected: _selected.contains(b.aid),
-      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(b))),
+      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(b), aid: b.aid)),
       title: Text(b.shown, maxLines: 2, overflow: TextOverflow.ellipsis),
       subtitle: Text([if (n > 0) '未读 $n 章', if (ChapterCache.count(b.aid) > 0) '已缓存 ${ChapterCache.count(b.aid)} 章', if (b.done) '已完结', if (p == null) '还没读'].join(' · ')),
       trailing: _selected.contains(b.aid) ? Icon(Icons.check_circle, color: Theme.of(context).colorScheme.primary) : _resume(b),
@@ -1360,7 +1362,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     },
     itemBuilder: (context, i) => ListTile(
       key: ValueKey(books[i].aid),
-      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(books[i]))),
+      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(books[i]), aid: books[i].aid)),
       title: Text(books[i].shown, maxLines: 2, overflow: TextOverflow.ellipsis),
       trailing: ReorderableDragStartListener(index: i, child: const Icon(Icons.drag_handle)),
       onTap: () => context.push(Routes.novel(books[i].aid)),

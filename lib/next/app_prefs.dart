@@ -85,9 +85,9 @@ class P {
   // 数据
   static const autoClear = 'data.autoClear'; // bool 每次打开 App 自动清理读过时缓存的章节
 
-  // 妙妙小工具（本地扩展）
+  // 妙妙小工具（运行期扩展）
   static const unlock = 'unlock.enabled'; // bool 总开关
-  static const unlockApi = 'unlock.api'; // bool 先试文库 App 接口（带插图），不行再用全本 TXT
+  static const unlockApi = 'unlock.api'; // bool 先试备用接口（带插图），不行再用整本文本通道
 
   // 安全
   static const lock = 'sec.lock'; // bool 生物识别锁
