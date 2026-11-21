@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.3.0...ark_novel-v1.3.1) (2026-11-21)
+
+
+### Features
+
+* 显著缩小安卓安装包体积并优化编译速度与缓存 ([c39a05c](https://github.com/chenshi221/ark_novel/commit/c39a05ce6f9049449807af0d727bb260d361a980))
+
 ## [1.3.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.2.0...ark_novel-v1.3.0) (2026-11-17)
 
 
