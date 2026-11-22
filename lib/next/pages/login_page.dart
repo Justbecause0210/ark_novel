@@ -135,28 +135,35 @@ class _LoginPageState extends ConsumerState<LoginPage> {
 
   List<Widget> _form(ThemeData theme) {
     return [
-      TextField(
-        controller: _username,
-        enabled: !_busy,
-        decoration: const InputDecoration(label: Text('用户名')),
-        textInputAction: TextInputAction.next,
-        autofillHints: const [AutofillHints.username],
-      ),
-      const SizedBox(height: 14),
-      TextField(
-        controller: _password,
-        enabled: !_busy,
-        obscureText: !_showPassword,
-        decoration: InputDecoration(
-          label: const Text('密码'),
-          suffixIcon: IconButton(
-            tooltip: hz(context, _showPassword ? '隐藏密码' : '显示密码'),
-            icon: Icon(_showPassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 20),
-            onPressed: _busy ? null : () => setState(() => _showPassword = !_showPassword),
-          ),
+      AutofillGroup(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            TextField(
+              controller: _username,
+              enabled: !_busy,
+              decoration: const InputDecoration(label: Text('用户名')),
+              textInputAction: TextInputAction.next,
+              autofillHints: const [AutofillHints.username],
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _password,
+              enabled: !_busy,
+              obscureText: !_showPassword,
+              decoration: InputDecoration(
+                label: const Text('密码'),
+                suffixIcon: IconButton(
+                  tooltip: hz(context, _showPassword ? '隐藏密码' : '显示密码'),
+                  icon: Icon(_showPassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 20),
+                  onPressed: _busy ? null : () => setState(() => _showPassword = !_showPassword),
+                ),
+              ),
+              autofillHints: const [AutofillHints.password],
+              onSubmitted: (_) => _submit(),
+            ),
+          ],
         ),
-        autofillHints: const [AutofillHints.password],
-        onSubmitted: (_) => _submit(),
       ),
       const SizedBox(height: 20),
       Text('保持登录', style: theme.textTheme.labelLarge),

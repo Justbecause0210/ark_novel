@@ -127,6 +127,68 @@ void main() {
       expect(fallbackCalls, 2);
       expect(adapter.requests.length, 2);
     });
+
+    test('fallback 过盾后若返回登录页且 shouldRetryAfterFallback 为真，则用 Dio 重试一次', () async {
+      var dioCalls = 0;
+      var fallbackCalls = 0;
+      final adapter = _CallbackAdapter((options, _) async {
+        dioCalls++;
+        if (dioCalls == 1) return _gbk('cf', status: 403, headers: {'server': ['cloudflare']});
+        return _gbk('real-user-page');
+      });
+      final client = Wenku8Client(
+        baseUrl: () => 'https://www.wenku8.cc',
+        charset: () => CharsetType.gbk,
+        headers: const {},
+        dio: Dio()..httpClientAdapter = adapter,
+        rateLimitPause: Duration.zero,
+        challengeFallback: (url, {referer}) async {
+          fallbackCalls++;
+          return '<form><input name="password" type="password"></form>';
+        },
+        shouldRetryAfterFallback: (html) => html.contains('name="password"'),
+      );
+
+      final html = await client.getPage('https://www.wenku8.cc/userdetail.php', charsetParam: false);
+      expect(fallbackCalls, 1);
+      expect(dioCalls, 2);
+      expect(html, 'real-user-page');
+    });
+
+    test('跨域名 301 重定向后触发 CF 时按跳转后域名维护单飞门控并正确释放', () async {
+      var cleared = false;
+      var fallbackCalls = 0;
+      String? fallbackUrl;
+      final adapter = _CallbackAdapter((options, _) async {
+        if (options.uri.host == 'www.wenku8.cc') {
+          return _gbk('', status: 301, headers: {'location': ['https://www.wenku8.net${options.uri.path}']});
+        }
+        if (!cleared) return _gbk('cf', status: 403, headers: {'server': ['cloudflare']});
+        return _gbk('ok:${options.uri.path}');
+      });
+      final client = Wenku8Client(
+        baseUrl: () => 'https://www.wenku8.cc',
+        charset: () => CharsetType.gbk,
+        headers: const {},
+        dio: Dio()..httpClientAdapter = adapter,
+        rateLimitPause: Duration.zero,
+        challengeFallback: (url, {referer}) async {
+          fallbackCalls++;
+          fallbackUrl = url;
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+          cleared = true;
+          return 'web:${Uri.parse(url).path}';
+        },
+      );
+
+      final res = await Future.wait([
+        client.getPage('https://www.wenku8.cc/a', charsetParam: false),
+        client.getPage('https://www.wenku8.cc/b', charsetParam: false),
+      ]);
+      expect(fallbackCalls, 1);
+      expect(fallbackUrl, 'https://www.wenku8.net/a');
+      expect(res, ['web:/a', 'ok:/b']);
+    });
   });
 
   group('Wenku8Client 去重、取消、429 与瞬态重试', () {

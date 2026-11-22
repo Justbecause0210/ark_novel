@@ -271,8 +271,11 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
     final hl = widget.highlight;
     return Scaffold(
       appBar: AppBar(title: Text(widget.section.title)),
-      body: contentWidth(
-        SingleChildScrollView(
+      body: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 760),
+          child: SingleChildScrollView(
           padding: const EdgeInsets.only(bottom: 32),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -293,6 +296,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
               ...children,
             ],
           ),
+        ),
         ),
       ),
     );

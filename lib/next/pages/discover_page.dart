@@ -59,7 +59,9 @@ class _RecommendTabState extends ConsumerState<_RecommendTab> with AutomaticKeep
           .when(
             loading: () => const _RecommendSkeleton(),
             error: (e, _) => StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(_recommendProvider)),
-            data: (blocks) => LayoutBuilder(
+            data: (blocks) => blocks.isEmpty
+                ? StatePanel(title: '暂无推荐内容', detail: '请稍后重试或检查网络连接', onRetry: () => ref.invalidate(_recommendProvider))
+                : LayoutBuilder(
               builder: (context, c) {
                 final cols = gridColumns(c.maxWidth) >= 6 ? 6 : 3;
                 final delegate = SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52);

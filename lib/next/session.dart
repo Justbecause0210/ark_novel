@@ -90,8 +90,9 @@ class SessionStore {
       final ts = cfCookieTimestamp(host);
       if (ts != null && ts < cutoff) {
         expired.add(host);
-      } else if (ts == null && (cfCookie(host) ?? '').contains('cf_clearance')) {
-        expired.add(host);
+      } else if (ts == null) {
+        // 旧版本未记录时间戳的放行 cookie 先补打当前时间戳，避免升级首启就强制重验；若已失效会在实际请求时自然刷新
+        await _box.put('cf:ts:$host', now);
       }
     }
     for (final host in expired) {
@@ -275,12 +276,14 @@ final wenku8ClientProvider = Provider<Wenku8Client>((ref) {
             url,
             referer: referer,
             proxy: ref.read(proxyProvider),
+            loginCookies: store.cookie,
             onSession: (cookies, ua, origin) {
               final session = ref.read(sessionProvider.notifier);
               // 退出登录不清 WebView 的 cookie：没登录时只收 Cloudflare 的，不把旧账号存回来
               return session.acceptWebCookies(cookies, userAgent: ua, login: ref.read(sessionProvider) is SessionLoggedIn, origin: origin);
             },
           ),
+    shouldRetryAfterFallback: kIsWeb ? null : (html) => store.cookie != null && store.cookie != 'preview' && Wenku8Parser.needsLogin(html),
   );
   // shortcut: 换代理或切换原生网络栈时热替换适配器（旧适配器在途请求自然结束，避免正在传输时强关底层引擎）
   if (!kIsWeb) {

@@ -147,7 +147,7 @@ void main() {
     expect(netCookies['jieqiUserInfo'], 'keepme');
   });
 
-  test('pruneExpiredCfCookies 清理过期与无时间戳旧 cf_clearance，保留有效记录', () async {
+  test('pruneExpiredCfCookies 清理过期 cf_clearance，保留有效记录并为旧版无时间戳记录补打时间戳', () async {
     final store = await SessionStore.open();
     final now = DateTime.now().millisecondsSinceEpoch;
     await store.setCfCookie('https://fresh.example', 'cf_clearance=good', timestampMs: now - const Duration(hours: 2).inMilliseconds);
@@ -156,10 +156,11 @@ void main() {
     await Hive.box('session').put('cf:https://legacy.example', 'cf_clearance=legacy');
 
     final removed = await store.pruneExpiredCfCookies(nowMs: now);
-    expect(removed, 2);
+    expect(removed, 1);
     expect(store.cfCookie('https://fresh.example'), 'cf_clearance=good');
     expect(store.cfCookie('https://expired.example'), isNull);
-    expect(store.cfCookie('https://legacy.example'), isNull);
+    expect(store.cfCookie('https://legacy.example'), 'cf_clearance=legacy');
+    expect(store.cfCookieTimestamp('https://legacy.example'), now);
   });
 
   test('nativeNetProvider 响应式切换并持久化，imageDioProvider 切换节点不重建且动态读取 Referer', () async {

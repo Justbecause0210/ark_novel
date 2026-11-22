@@ -26,8 +26,9 @@ class Wenku8Client {
     Dio? dio,
     CookieJar? cookieJar,
     this.challengeFallback,
+    this.shouldRetryAfterFallback,
     Duration rateLimitPause = const Duration(seconds: 10),
-    this.challengeCooldown = const Duration(seconds: 15),
+    this.challengeCooldown = const Duration(seconds: 5),
     this.transientRetryDelay = const Duration(milliseconds: 350),
   }) : _cookieJar = cookieJar ?? CookieJar() {
     this.dio = (dio ?? Dio())
@@ -61,6 +62,9 @@ class Wenku8Client {
   /// GET 页面被 Cloudflare 验证或 403 拦下时改用它取页面（原生 App 里是不显示的网页），返回解码好的 HTML
   final Future<String> Function(String url, {String? referer})? challengeFallback;
 
+  /// 无头网页过盾返回 HTML 后，若仍像是未带完整登录态的页面（例如 `login.php`），用刚写回的新 `cf_clearance` 让 Dio 重试一次。
+  final bool Function(String html)? shouldRetryAfterFallback;
+
   // 按域名维护单飞 CF 协调与失败冷却窗口，防止多条并发请求齐刷刷撞 403 并排队进无头 WebView
   final _hostChallenges = <String, Completer<void>>{};
   final _hostClearedAt = <String, DateTime>{};
@@ -68,6 +72,11 @@ class Wenku8Client {
 
   // 相同 (url, referer) 的在途幂等 GET 请求合并去重
   final _inflight = <(String, String?), _InflightGet>{};
+
+  int _fallbackCount = 0;
+
+  /// 已触发无头网页 CF 兜底的累计次数（用于调用方判断某次请求是否经由兜底完成）。
+  int get fallbackCount => _fallbackCount;
 
   /// 手动验证完成后清除对应域名（或全部域名）的 CF 失败冷却窗口，让紧接着的重试立即生效。
   void clearChallengeCooldown([String? host]) {
@@ -84,6 +93,7 @@ class Wenku8Client {
     final gate = Completer<void>();
     _hostChallenges[host] = gate;
     options.extra['cfGateOwner'] = gate;
+    options.extra['cfGateHost'] = host;
     return gate;
   }
 
@@ -206,27 +216,33 @@ class Wenku8Client {
   }
 
   Future<String> _fetchPage(String target, CharsetType currentCharset, String? referer, CancelToken? cancelToken, {required bool retryTransient}) async {
-    final host = Uri.tryParse(target)?.host.toLowerCase() ?? '';
+    final targetHost = Uri.tryParse(target)?.host.toLowerCase() ?? '';
     final requestStarted = DateTime.now();
     final gateBox = <Completer<void>?>[null];
+    final gateHostBox = <String?>[null];
     final Uint8List bytes;
     try {
-      bytes = await _getRetrying(target, referer, cancelToken, retryTransient: retryTransient, gateBox: gateBox);
+      bytes = await _getRetrying(target, referer, cancelToken, retryTransient: retryTransient, gateBox: gateBox, gateHostBox: gateHostBox);
     } on DioException catch (e) {
       final ownedGate = gateBox[0];
+      // 若经过 301/302 跳转（例如 wenku8.cc -> wenku8.net），实际触发 CF 的是跳转后的域名，门控与冷却必须按该域名一致维护
+      final cfHost = (gateHostBox[0] ?? e.requestOptions.uri.host.toLowerCase()).isNotEmpty
+          ? (gateHostBox[0] ?? e.requestOptions.uri.host.toLowerCase())
+          : targetHost;
       // 书架这类页面不出验证，直接 403 拒绝不像浏览器的请求，也交给网页再试
       if (e is! CloudflareChallengeException && e is! Cloudflare403Exception) {
-        _releaseGate(host, ownedGate);
+        _releaseGate(cfHost, ownedGate);
         rethrow;
       }
       final fallback = challengeFallback;
       if (fallback == null || e.requestOptions.extra['cfCooldownHit'] == true) {
-        _releaseGate(host, ownedGate);
+        _releaseGate(cfHost, ownedGate);
         rethrow;
       }
-      return _handleChallenge(host, target, currentCharset, referer, requestStarted, e, fallback, cancelToken, ownedGate);
+      final fallbackTarget = e.requestOptions.uri.toString().isNotEmpty ? e.requestOptions.uri.toString() : target;
+      return _handleChallenge(cfHost, fallbackTarget, currentCharset, referer, requestStarted, e, fallback, cancelToken, ownedGate);
     } catch (_) {
-      _releaseGate(host, gateBox[0]);
+      _releaseGate(gateHostBox[0] ?? targetHost, gateBox[0]);
       rethrow;
     }
     return Wenku8Charset.decode(bytes, currentCharset);
@@ -272,11 +288,12 @@ class Wenku8Client {
     }
 
     final gate = ownedGate ?? (_hostChallenges[host] = Completer<void>());
+    String html;
     try {
-      final html = await fallback(target, referer: referer);
+      _fallbackCount++;
+      html = await fallback(target, referer: referer);
       _hostClearedAt[host] = DateTime.now();
       _hostFailedAt.remove(host);
-      return html;
     } on DioException catch (err) {
       if (err is CloudflareChallengeException || err is Cloudflare403Exception) {
         _hostFailedAt[host] = (DateTime.now(), err);
@@ -285,6 +302,15 @@ class Wenku8Client {
     } finally {
       _releaseGate(host, gate);
     }
+    if (shouldRetryAfterFallback?.call(html) == true) {
+      try {
+        final bytes = await _getRetrying(target, referer, cancelToken, retryTransient: false);
+        return Wenku8Charset.decode(bytes, currentCharset);
+      } catch (_) {
+        // 重试失败则回退到 fallback 拿到的页面，避免掩盖原始状态
+      }
+    }
+    return html;
   }
 
   /// 读页面没有副作用，被限流（429）就排队再试：限流拦截器会先等暂停结束。试 3 次还不行才算失败。
@@ -295,6 +321,7 @@ class Wenku8Client {
     CancelToken? cancelToken, {
     required bool retryTransient,
     List<Completer<void>?>? gateBox,
+    List<String?>? gateHostBox,
   }) async {
     var rateLimitTries = 0;
     var transientTries = 0;
@@ -309,7 +336,7 @@ class Wenku8Client {
           cancelToken: cancelToken,
           options: Options(headers: referer == null ? null : {'Referer': referer}, extra: extra),
         );
-        return await _followRedirect(response, cancelToken: cancelToken);
+        return await _followRedirect(response, cancelToken: cancelToken, extra: extra);
       } on Wenku8HttpException catch (e) {
         if (e.status == 429 && ++rateLimitTries < 3 && cancelToken?.isCancelled != true) {
           continue;
@@ -322,6 +349,8 @@ class Wenku8Client {
       } on DioException catch (e) {
         final owner = e.requestOptions.extra['cfGateOwner'];
         if (owner is Completer<void> && gateBox != null) gateBox[0] = owner;
+        final gateHost = e.requestOptions.extra['cfGateHost'];
+        if (gateHost is String && gateHostBox != null) gateHostBox[0] = gateHost;
         if (e is CloudflareChallengeException || e is Cloudflare403Exception) rethrow;
         if (retryTransient && _isTransientDioError(e) && ++transientTries <= 1 && cancelToken?.isCancelled != true) {
           await _delayOrCancel(transientRetryDelay, cancelToken);
@@ -378,7 +407,7 @@ class Wenku8Client {
   /// 好让解析层拿到最终页面并判断出"未登录"等情况。
   /// - location 可能是相对路径（`userdetail.php`、`/login.php`）或绝对地址，基于当前请求地址解析
   /// - 最多跟随 [maxRedirects] 次，防止重定向死循环
-  Future<Uint8List> _followRedirect(Response response, {int maxRedirects = 5, bool submitting = false, CancelToken? cancelToken}) async {
+  Future<Uint8List> _followRedirect(Response response, {int maxRedirects = 5, bool submitting = false, CancelToken? cancelToken, Map<String, dynamic>? extra}) async {
     var current = response;
     for (var i = 0; i < maxRedirects; i++) {
       final status = current.statusCode;
@@ -389,7 +418,7 @@ class Wenku8Client {
       if (submitting && target.path.toLowerCase().endsWith('/login.php')) throw const Wenku8UnexpectedPageException('登录已失效，请重新登录后再提交');
       // 307/308 要保留 POST 方法和请求体，不能改成 GET，也不自动重发可能已有副作用的请求。
       if (submitting && (status == 307 || status == 308)) throw const Wenku8UnexpectedPageException('提交请求被重定向，结果未确认，请刷新后检查');
-      current = await dio.getUri(target, cancelToken: cancelToken);
+      current = await dio.getUri(target, cancelToken: cancelToken, options: extra == null ? null : Options(extra: Map<String, dynamic>.of(extra)));
     }
     if (submitting && (current.statusCode ?? 0) >= 300 && (current.statusCode ?? 0) < 400) {
       throw const Wenku8UnexpectedPageException('提交结果未确认，请刷新后检查');

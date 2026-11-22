@@ -55,11 +55,53 @@ class LoginWebViewPage extends ConsumerStatefulWidget {
 /// [host] 是不是 [root] 这个站点（或它的子域名）。只比后缀的话 `evilwenku8.net` 也算，会把密码填进仿冒站。
 bool isSameSite(String host, String root) => host == root || host.endsWith('.$root');
 
+/// 是否为轻小说文库主站域名（`wenku8.net` / `wenku8.cc` 及其子域名）。
+bool isMainSiteHost(String host) => isSameSite(host, 'wenku8.net') || isSameSite(host, 'wenku8.cc');
+
+/// 自动填表可信域名判定：同一站点及其子域名，或在文库两个官方主站（`wenku8.cc` 301 到 `wenku8.net`）之间跳转；
+/// 仿冒域名（如 `evilwenku8.net`）仍严格拒绝。
+bool isTrustedLoginHost(String currentHost, String initialHost) {
+  final root = _rootDomainOf(initialHost);
+  return isSameSite(currentHost, root) || (isMainSiteHost(initialHost) && isMainSiteHost(currentHost));
+}
+
+/// 文库站点常把首页或未登录请求 302 到明文 `http://www.wenku8.net/login.php`，
+/// Android `network_security_config` 默认禁止主站明文 HTTP，会触发 `ERR_CLEARTEXT_NOT_PERMITTED`；
+/// 拦截并升级为 `https://` 可避免白屏报错。
+Uri? upgradeMainSiteHttp(Uri uri) => uri.scheme == 'http' && isMainSiteHost(uri.host) ? uri.replace(scheme: 'https') : null;
+
+String _rootDomainOf(String host) => host.split('.').reversed.take(2).toList().reversed.join('.');
+
+/// 验证模式下计算读取与回写 `cf_clearance` 的目标地址：
+/// - 若站点在文库主站镜像间跳转（例如 `www.wenku8.cc` 301 到 `www.wenku8.net`），Cloudflare 实际在跳转后的主站域名下签发 `cf_clearance`，应跟随该主站域名；
+/// - 若跳到非同站外部域名，则仍锚定最初请求验证的域名（统一 https）。
+Uri resolveVerifyTargetUri(Uri initialUri, Uri? currentUri) {
+  final root = _rootDomainOf(initialUri.host);
+  final bothMainSite = currentUri != null && isMainSiteHost(initialUri.host) && isMainSiteHost(currentUri.host);
+  final useInitial = currentUri == null || currentUri.host.isEmpty || (!bothMainSite && root.isNotEmpty && !isSameSite(currentUri.host, root));
+  final chosen = useInitial ? initialUri : currentUri;
+  return chosen.scheme == 'http' ? chosen.replace(scheme: 'https') : chosen;
+}
+
+/// 计算「去验证」页默认打开的目标地址：主站默认打开 `/login.php` 停留在当前线路，避免 `/` 直接踢去 `http://www.wenku8.net/login.php`。
+String defaultVerifyUrl({required String? url, required String? host, required Wenku8Node node}) {
+  if (url != null && url.isNotEmpty) {
+    final parsed = Uri.tryParse(url);
+    final upgraded = parsed == null ? null : upgradeMainSiteHttp(parsed);
+    return (upgraded ?? parsed)?.toString() ?? url;
+  }
+  if (host != null && host.isNotEmpty) {
+    return isMainSiteHost(host) ? 'https://$host/login.php' : 'https://$host/';
+  }
+  return '${siteBase(node)}/login.php';
+}
+
 class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   final _cookieManager = CookieManager.instance();
+  late final WebUri _initialUri = WebUri(widget.url);
   late final String _host = Uri.parse(widget.url).host;
   // 站点可能在 wenku8.net 和 www.wenku8.net 之间跳转，按主域名判断
-  late final String _root = _host.split('.').reversed.take(2).toList().reversed.join('.');
+  late final String _root = _rootDomainOf(_host);
   String _status = '';
   String _hint = '';
   bool _blocked = false;
@@ -98,12 +140,15 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
         if (c.name.startsWith('jieqi')) await _cookieManager.deleteCookie(url: webUri, name: c.name);
       }
     } else {
-      // 验证模式：清掉已失效的旧 cf_clearance，避免刚打开就误判已经通过验证
+      // 验证模式：清掉已失效的旧 cf_clearance，避免刚打开就误判已经通过验证；同时同步本地登录 cookie，避免主站把验证页踢去登录页
       for (final u in [webUri, WebUri('https://$_root/')]) {
         try {
           await _cookieManager.deleteCookie(url: u, name: 'cf_clearance');
           await _cookieManager.deleteCookie(url: u, name: 'cf_clearance', domain: '.$_root');
         } catch (_) {}
+      }
+      if (isMainSiteHost(_host)) {
+        await syncWebViewLoginCookies(ref.read(sessionStoreProvider).cookie, ['https://$_host', 'https://www.wenku8.net', 'https://www.wenku8.cc']);
       }
     }
     if (mounted) setState(() => _ready = true);
@@ -148,8 +193,10 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
     if (_done) return;
     _done = true;
     try {
-      final cookies = await _cookiesOf(uri);
-      final origin = uri.host.isEmpty ? null : 'https://${uri.host}';
+      final effective = widget.isLogin ? uri : WebUri.uri(resolveVerifyTargetUri(_initialUri, uri));
+      _ua ??= await _readUserAgent(c);
+      final cookies = await _cookiesOf(effective);
+      final origin = effective.host.isEmpty ? null : 'https://${effective.host}';
       final result = WebSessionResult(cookies.map((e) => '${e.name}=${e.value}').join(';'), _ua, origin: origin);
       if (widget.onDone != null) {
         await widget.onDone!(result);
@@ -162,6 +209,25 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
       _log('完成时出错：$e');
       if (mounted) setState(() => _status = '完成时出错：$e');
     }
+  }
+
+  Future<String?> _readUserAgent(InAppWebViewController c) async {
+    try {
+      final raw = await c.evaluateJavascript(source: 'navigator.userAgent');
+      return raw is String && raw.isNotEmpty ? raw : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 验证模式下检查原始目标域名是否已拿到 `cf_clearance`（例如 `wenku8.cc` 过完 CF 后立即跳转到 `wenku8.net` 时）。
+  Future<bool> _finishIfVerifyCleared(InAppWebViewController c, WebUri? currentUri) async {
+    if (widget.isLogin || _done) return false;
+    final target = WebUri.uri(resolveVerifyTargetUri(_initialUri, currentUri));
+    final names = (await _cookiesOf(target)).map((e) => e.name).toSet();
+    if (!names.contains('cf_clearance')) return false;
+    await _finish(c, target);
+    return true;
   }
 
   Future<_GuardState> _guardState(InAppWebViewController c) async {
@@ -196,17 +262,18 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   Future<void> _check(InAppWebViewController c, WebUri? uri) async {
     if (_done || uri == null) return;
     _log('加载完成 ${uri.host}${uri.path}');
-    if (!isSameSite(uri.host, _root)) {
+    _ua ??= await _readUserAgent(c);
+    if (!widget.isLogin && await _finishIfVerifyCleared(c, uri)) return;
+    if (!isTrustedLoginHost(uri.host, _host)) {
       if (mounted) {
         setState(() {
           _blocked = false;
-          _status = '当前在其他域名 ${uri.host}，不会自动填表（登录页是 $_host）';
-          _hint = '当前跳转到 ${uri.host}，为保护账号安全未自动填写密码';
+          _status = widget.isLogin ? '当前在其他域名 ${uri.host}，不会自动填表（登录页是 $_host）' : '站点已跳转到 ${uri.host}（原验证域名 $_host）';
+          _hint = widget.isLogin ? '当前跳转到 ${uri.host}，为保护账号安全未自动填写密码' : '站点已跳转到 ${uri.host}，若验证已完成可点右上角「完成」返回';
         });
       }
       return;
     }
-    _ua ??= (await c.evaluateJavascript(source: 'navigator.userAgent')) as String?;
     final guard = await _guardState(c);
     final names = (await _cookiesOf(uri)).map((e) => e.name).toSet();
     _status = '${uri.host}${uri.path}  登录cookie：${names.any((n) => n.startsWith('jieqiUserInfo')) ? '有' : '无'}  已填表：${_submitted ? '是' : '否'}';
@@ -324,13 +391,38 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
           ? const SizedBox.shrink()
           : InAppWebView(
               initialUrlRequest: URLRequest(url: WebUri(widget.url)),
-              initialSettings: InAppWebViewSettings(javaScriptEnabled: true),
+              // Android 15/16 + Impeller 下 Hybrid Composition 容易导致 WebView 网页输入框无法唤起软键盘，使用 TLHC（useHybridComposition: false）修复输入焦点
+              initialSettings: InAppWebViewSettings(
+                javaScriptEnabled: true,
+                useShouldOverrideUrlLoading: true,
+                useHybridComposition: false,
+                needInitialFocus: true,
+              ),
               onWebViewCreated: (c) => _controller = c,
               onProgressChanged: (_, p) {
                 if (mounted) setState(() => _progress = p);
               },
+              shouldOverrideUrlLoading: (c, action) async {
+                final target = action.request.url;
+                if (target == null || action.isForMainFrame == false) return NavigationActionPolicy.ALLOW;
+                if (!widget.isLogin && !isSameSite(target.host, _root)) {
+                  if (await _finishIfVerifyCleared(c, _initialUri)) return NavigationActionPolicy.CANCEL;
+                }
+                final upgraded = upgradeMainSiteHttp(target);
+                if (upgraded != null) {
+                  _log('升级 HTTPS ${upgraded.host}${upgraded.path}');
+                  await c.loadUrl(urlRequest: URLRequest(url: WebUri.uri(upgraded)));
+                  return NavigationActionPolicy.CANCEL;
+                }
+                return NavigationActionPolicy.ALLOW;
+              },
               onLoadStop: _check,
-              onReceivedError: (_, req, err) => _log('出错 ${req.url.host}${req.url.path}：${err.description}'),
+              onReceivedError: (c, req, err) {
+                _log('出错 ${req.url.host}${req.url.path}：${err.description}');
+                if (!widget.isLogin && !_done && req.isForMainFrame != false) {
+                  _finishIfVerifyCleared(c, _initialUri);
+                }
+              },
               onReceivedHttpError: (_, req, res) => _log('HTTP ${res.statusCode} ${req.url.host}${req.url.path}'),
             ),
     );
@@ -339,7 +431,7 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   InAppWebViewController? _controller;
 }
 
-/// "去验证"路由页：打开目标地址/域名（默认当前线路首页）过 Cloudflare 验证，通过后写回 cookie 并返回 `true` 供原页面自动重试。
+/// "去验证"路由页：打开目标地址/域名（主站默认当前线路登录页，避免 `/` 重定向到另一域名的明文 HTTP）过 Cloudflare 验证，通过后写回 cookie 并返回 `true` 供原页面自动重试。
 class VerifyPage extends ConsumerWidget {
   const VerifyPage({super.key, this.url, this.host});
 
@@ -349,14 +441,10 @@ class VerifyPage extends ConsumerWidget {
   /// 可选目标验证域名（例如 `www.wenku8.cc` 或 `pic.wenku8.com`）
   final String? host;
 
-  static bool _isMainSiteHost(String h) => isSameSite(h, 'wenku8.net') || isSameSite(h, 'wenku8.cc');
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final node = ref.watch(nodeProvider);
-    final targetUrl = (url != null && url!.isNotEmpty)
-        ? url!
-        : (host != null && host!.isNotEmpty ? 'https://$host/' : '${siteBase(node)}/');
+    final targetUrl = defaultVerifyUrl(url: url, host: host, node: node);
     final targetHost = Uri.tryParse(targetUrl)?.host ?? '';
     final label = targetHost.isEmpty ? node.node.replaceFirst('https://www.', '') : targetHost.replaceFirst('www.', '');
     return LoginWebViewPage(
@@ -365,7 +453,7 @@ class VerifyPage extends ConsumerWidget {
       onDone: (r) async {
         final origin = r.origin ?? (targetHost.isEmpty ? null : 'https://$targetHost');
         final originHost = origin == null ? targetHost : (Uri.tryParse(origin)?.host ?? targetHost);
-        if (originHost.isEmpty || _isMainSiteHost(originHost)) {
+        if (originHost.isEmpty || isMainSiteHost(originHost)) {
           await ref.read(sessionProvider.notifier).afterVerify(r.cookies, userAgent: r.userAgent, origin: origin);
         } else if (origin != null) {
           final store = ref.read(sessionStoreProvider);
