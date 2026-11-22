@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.5.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.4.0...ark_novel-v1.5.0) (2026-11-22)
+
+
+### Features
+
+* 优化三端编译速度、Android Debug ABI 过滤与 CI 缓存策略 ([bd3568e](https://github.com/chenshi221/ark_novel/commit/bd3568eeb7aa0f2018b95cefa743f8fb16a69238))
+* 优化网络请求复用、Cloudflare 跨域名验证与登录态同步体验 ([3e70317](https://github.com/chenshi221/ark_novel/commit/3e703170bb41f4619fa0eecc43166781865bc59a))
+
+
+### Bug Fixes
+
+* 优化主题对比度与按钮尺寸，解耦路由常量并支持偏好细粒度监听 ([bff3826](https://github.com/chenshi221/ark_novel/commit/bff3826b435e178a5fa485057cb52dd291e2116d))
+* 优化书架、3D 书架、卷册、详情页与公共组件的性能与交互体验 ([309ab89](https://github.com/chenshi221/ark_novel/commit/309ab89e45b0a5d436e5787a590e0b195f35049d))
+* 优化发现、更新、设置、同步、统计等全站页面 UI/UX 与性能 ([e73e485](https://github.com/chenshi221/ark_novel/commit/e73e4853baecec7cddd6971e13cf3aa8f2b10670))
+* 清理模块循环导入并修复阅读器插图按钮热区与验证路由衔接 ([9b8fe18](https://github.com/chenshi221/ark_novel/commit/9b8fe18a211d7d50f06d955ad69a7b107cedc4ec))
+
+
+### Performance Improvements
+
+* 优化简繁转换、分卷/图片缓存、离线下载与 WebDAV 同步架构 ([d09ed7b](https://github.com/chenshi221/ark_novel/commit/d09ed7b0362ebd8a475780d09ad2b313358e740f))
+* 优化网络层连接复用、Cloudflare 单飞协调与请求治理 ([e743903](https://github.com/chenshi221/ark_novel/commit/e743903e28bf0c3618ed177417a47b7e2744e4b2))
+* 优化阅读器翻页与正文繁体性能、拆离 TTS 与弹窗并提升阅读交互 ([331af84](https://github.com/chenshi221/ark_novel/commit/331af84bc3186de3e25f4951a7cd8dbc125d68f4))
+
 ## [1.4.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.3.1...ark_novel-v1.4.0) (2026-11-21)
 
 
