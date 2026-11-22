@@ -407,7 +407,7 @@ class LibraryController extends Notifier<LibraryState> {
 
   /// 和网站书架同步：拉网站全部 6 个书架 → 推本地排队的操作 → 对一遍。没登录、离线时什么都不做。
   /// 距上次不到 30 分钟时跳过（[force] 除外）。返回出错信息，成功或跳过返回 null；[force]（用户下拉）时跳过也说明原因。
-  Future<String?> sync({bool force = false, bool details = true}) async {
+  Future<String?> sync({bool force = false, bool details = true, Duration shelfDelay = const Duration(seconds: 1)}) async {
     final s = ref.read(sessionProvider);
     if (s is! SessionLoggedIn) return null;
     if (s.offline) return force ? '现在是离线模式（没连上网站），点顶部的提示重新连接后再下拉' : null;
@@ -425,7 +425,7 @@ class LibraryController extends Notifier<LibraryState> {
       final api = ref.read(apiProvider);
       final remote = <String, RemoteBook>{};
       for (var shelf = 0; shelf < 6; shelf++) {
-        if (shelf > 0) await Future<void>.delayed(const Duration(seconds: 1)); // 连续读太快，网站会回 429
+        if (shelf > 0 && shelfDelay > Duration.zero) await Future<void>.delayed(shelfDelay); // 连续读太快，网站会回 429
         if (!_sameAccount(s.user.uid)) return null;
         final shelfBooks = (await api.bookshelf(shelf, fresh: true)).list;
         if (!_sameAccount(s.user.uid)) return null;

@@ -39,6 +39,7 @@ class Backup {
     'sync:folder',
     'sync:device',
     'sync:avatarUp',
+    'sync:avatarFile',
     'sync:last',
     'sync:passMoved',
     'lib:imported',
@@ -51,12 +52,16 @@ class Backup {
     'unlock:addon',
   };
 
-  static bool _isLocal(String k) => _localKeys.contains(k) || k.startsWith('cf:');
+  /// 设备私有键：不进备份，恢复时也不覆盖/删除本机。
+  static bool _isLocal(String k) => _localKeys.contains(k) || k.startsWith('cf:') || k.startsWith('unlock:txt:');
+
+  /// 可再生缓存键：新导出排除出备份（缩小体积），旧备份里若带有则仍兼容恢复。
+  static bool _isCache(String k) => k == 'ccolor' || k.startsWith('bgm:');
 
   static String make() => jsonEncode({
     'backup': 3,
     'device': Sync.deviceId,
-    'box': {for (final k in _box.keys.whereType<String>().where((k) => !_isLocal(k))) k: _box.get(k)},
+    'box': {for (final k in _box.keys.whereType<String>().where((k) => !_isLocal(k) && !_isCache(k))) k: _box.get(k)},
   });
 
   static Future<String> _supportDir() async => (await getApplicationSupportDirectory()).path;

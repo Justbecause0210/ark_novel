@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:collection';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -105,13 +108,47 @@ Map<String, String> matchVolumeCovers(List<String> titles, List<({String name, S
   return {for (final (i, t) in mains.keys.indexed) t: vols[i].img};
 }
 
+/// 简单异步信号量，用于限制 Bangumi 并发查询的书数与请求数。
+class _Semaphore {
+  _Semaphore(this._max);
+
+  final int _max;
+  int _inUse = 0;
+  final _waiters = Queue<Completer<void>>();
+
+  Future<T> run<T>(Future<T> Function() fn) async {
+    if (_inUse >= _max) {
+      final c = Completer<void>();
+      _waiters.add(c);
+      await c.future;
+    } else {
+      _inUse++;
+    }
+    try {
+      return await fn();
+    } finally {
+      if (_waiters.isNotEmpty) {
+        _waiters.removeFirst().complete();
+      } else {
+        _inUse--;
+      }
+    }
+  }
+}
+
 /// 去 Bangumi（bgm.tv）找各卷封面：文库没插图的卷（受限书、没有插图章节的卷）只有一张很小的书封。
 /// 一本书只查一次（搜系列、取各卷），结果存在 `bgm:aid`；没找到也记下，30 天后再试；网络出错不记，下次再试。
 class BangumiCovers {
-  BangumiCovers(this._dio);
+  BangumiCovers(this._dio, {this.rateLimitBase = const Duration(seconds: 2)});
 
   final Dio _dio;
+  final Duration rateLimitBase;
   final _running = <String, Future<BgmSeries?>>{};
+  // 全局并发上限：最多同时查 2 本书 / 4 条 HTTP 请求，防止文库熔断时瞬间触发百级并发
+  final _bookSem = _Semaphore(2);
+  final _reqSem = _Semaphore(4);
+  DateTime _pausedUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  int _consecutive429 = 0;
 
   static Box get _box => Hive.box('session');
   static const _api = 'https://api.bgm.tv/v0';
@@ -134,10 +171,34 @@ class BangumiCovers {
     );
   }
 
-  /// 同一本书同时要几次（几卷一起补）只查一次
-  Future<BgmSeries?> series(String aid) => _running[aid] ??= _series(aid).whenComplete(() {
+  /// 同一本书同时要几次（几卷一起补）只查一次；全局最多同时查 2 本书。
+  Future<BgmSeries?> series(String aid) => _running[aid] ??= _bookSem.run(() => _series(aid)).whenComplete(() {
     _running.remove(aid);
   });
+
+  Future<Response<T>> _request<T>(Future<Response<T>> Function() call) async {
+    for (var attempt = 0; ; attempt++) {
+      while (true) {
+        final wait = _pausedUntil.difference(DateTime.now());
+        if (wait <= Duration.zero) break;
+        await Future<void>.delayed(wait);
+      }
+      try {
+        final res = await _reqSem.run(call);
+        _consecutive429 = 0;
+        return res;
+      } on DioException catch (e) {
+        if (e.response?.statusCode != 429 || attempt >= 2) rethrow;
+        _consecutive429++;
+        final retryAfter = int.tryParse(e.response?.headers.value('retry-after')?.trim() ?? '');
+        final pause = retryAfter != null
+            ? Duration(seconds: retryAfter.clamp(1, 60))
+            : Duration(milliseconds: (rateLimitBase.inMilliseconds * (1 << (_consecutive429 - 1).clamp(0, 3))).clamp(0, 30000));
+        final until = DateTime.now().add(pause);
+        if (until.isAfter(_pausedUntil)) _pausedUntil = until;
+      }
+    }
+  }
 
   Future<BgmSeries?> _series(String aid) async {
     final m = _box.get('bgm:$aid') as Map?;
@@ -151,7 +212,7 @@ class BangumiCovers {
     if (title == null) return null;
     // 有两个译名时先用拆开的（Bangumi 上的中文名多是其中一个），再用整个书名
     for (final k in {...titleAlternatives(title), title}) {
-      final r = await _dio.post<Map>('$_api/search/subjects', queryParameters: {'limit': 10}, data: {'keyword': k, 'filter': {'type': [1]}});
+      final r = await _request(() => _dio.post<Map>('$_api/search/subjects', queryParameters: {'limit': 10}, data: {'keyword': k, 'filter': {'type': [1]}}));
       final hit = ((r.data?['data'] as List?) ?? const []).cast<Map>().where((s) => s['platform'] == '小说' && s['series'] == true).firstOrNull;
       if (hit == null) continue;
       final rel = await _relations(hit['id'] as int);
@@ -166,25 +227,30 @@ class BangumiCovers {
 
   static String _img(Map s) => (s['images'] as Map?)?['large'] as String? ?? '';
 
-  Future<List<Map>> _relations(int id) async => ((await _dio.get<List>('$_api/subjects/$id/subjects')).data ?? const []).cast<Map>();
+  Future<List<Map>> _relations(int id) async => ((await _request(() => _dio.get<List>('$_api/subjects/$id/subjects'))).data ?? const []).cast<Map>();
 
   static List<Map> _vols(List<Map> rel) => [
     for (final s in rel)
       if (s['relation'] == '单行本' && _img(s).isNotEmpty) {'n': s['name'] as String, 'i': _img(s)},
   ];
 
-  /// 「番外篇」里的小说外传（漫画、游戏、画集不要）：外传系列取它的单行本，单本取它自己的封面（小批量并发，避免长篇串行几十次阻塞）
+  /// 「番外篇」里的小说外传（漫画、游戏、画集不要）：外传系列取它的单行本，单本取它自己的封面。
+  /// 单条外传独立 try/catch，局部失败不影响其余外传与主系列结果落盘。
   Future<List<Map>> _extras(List<Map> rel) async {
     final candidates = rel.where((s) => s['relation'] == '番外篇' && s['type'] == 1).take(30).toList();
     final out = <Map>[];
     for (var i = 0; i < candidates.length; i += 4) {
       final batch = candidates.sublist(i, i + 4 > candidates.length ? candidates.length : i + 4);
       final items = await Future.wait(batch.map((s) async {
-        final d = (await _dio.get<Map>('$_api/subjects/${s['id']}')).data ?? const {};
-        if (d['platform'] != '小说') return null;
-        final vols = d['series'] == true ? _vols(await _relations(s['id'] as int)) : const <Map>[];
-        if (vols.isEmpty && _img(d).isEmpty) return null;
-        return <String, Object>{'n': d['name'] as String, 'c': (d['name_cn'] as String?) ?? '', 'i': _img(d), 'v': vols};
+        try {
+          final d = (await _request(() => _dio.get<Map>('$_api/subjects/${s['id']}'))).data ?? const {};
+          if (d['platform'] != '小说') return null;
+          final vols = d['series'] == true ? _vols(await _relations(s['id'] as int)) : const <Map>[];
+          if (vols.isEmpty && _img(d).isEmpty) return null;
+          return <String, Object>{'n': d['name'] as String, 'c': (d['name_cn'] as String?) ?? '', 'i': _img(d), 'v': vols};
+        } catch (_) {
+          return null;
+        }
       }));
       out.addAll(items.whereType<Map>());
     }
@@ -195,6 +261,7 @@ class BangumiCovers {
 final bangumiProvider = Provider<BangumiCovers>((ref) {
   final store = ref.watch(sessionStoreProvider);
   ref.watch(proxyProvider);
+  ref.watch(nativeNetProvider);
   // Bangumi 要求带上说明是哪个程序的 User-Agent
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 10), receiveTimeout: const Duration(seconds: 20), headers: {'User-Agent': 'ark_novel (https://github.com/chenshi221/ark_novel)'}))
     ..httpClientAdapter = store.adapter();

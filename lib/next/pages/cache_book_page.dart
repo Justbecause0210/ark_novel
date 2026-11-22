@@ -4,7 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../cache.dart';
 import '../library.dart' show LibraryStore;
-import '../router.dart';
+import '../routes.dart';
 import '../widgets.dart';
 import 'novel_page.dart';
 import '../text.dart';
@@ -25,7 +25,7 @@ class _CacheBookPageState extends ConsumerState<CacheBookPage> {
   @override
   Widget build(BuildContext context) {
     final novel = ref.watch(novelProvider(widget.aid));
-    final task = ref.watch(downloadProvider)[widget.aid];
+    final task = ref.watch(downloadProvider.select((m) => m[widget.aid]));
     return Scaffold(
       appBar: AppBar(title: const Text('缓存管理')),
       body: contentWidth(

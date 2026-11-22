@@ -5,10 +5,14 @@ import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ark_novel/models/custom_exception.dart';
 import 'package:ark_novel/next/image_cache.dart';
 import 'package:ark_novel/next/session.dart';
 
-/// 假网络：记下请求的地址，默认返回固定字节，也可按请求定制响应或抛错
+/// 构造带合法 JPEG 魔数的短字节，用于单测区分不同响应。
+List<int> _jpeg(int tag) => [0xFF, 0xD8, 0xFF, 0xE0, tag];
+
+/// 假网络：记下请求的地址，默认返回合法 JPEG 字节，也可按请求定制响应或抛错
 class _FakeAdapter implements HttpClientAdapter {
   _FakeAdapter([this._onFetch]);
 
@@ -19,7 +23,7 @@ class _FakeAdapter implements HttpClientAdapter {
   Future<ResponseBody> fetch(RequestOptions options, Stream<List<int>>? requestStream, Future<void>? cancelFuture) async {
     urls.add(options.uri.toString());
     if (_onFetch != null) return _onFetch(options);
-    return ResponseBody.fromBytes([1, 2, 3], 200);
+    return ResponseBody.fromBytes(_jpeg(1), 200);
   }
 
   @override
@@ -54,9 +58,9 @@ void main() {
     final store = c.read(imageStoreProvider);
 
     const url = 'https://img.wenku8.com/image/1/1158/1158s.jpg';
-    expect(await store.load(url).timeout(const Duration(seconds: 2)), [1, 2, 3]);
+    expect(await store.load(url).timeout(const Duration(seconds: 2)), _jpeg(1));
     expect(net.urls, ['http://img.wenku8.com/image/1/1158/1158s.jpg']);
-    expect(await store.load(url).timeout(const Duration(seconds: 2)), [1, 2, 3]);
+    expect(await store.load(url).timeout(const Duration(seconds: 2)), _jpeg(1));
     expect(net.urls, hasLength(1));
   });
 
@@ -67,17 +71,17 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir.path);
     final net = _FakeAdapter((o) async {
       if (o.uri.host == 'pic.777743.xyz') throw DioException.connectionError(requestOptions: o, reason: 'blocked');
-      return ResponseBody.fromBytes([7, 8, 9], 200);
+      return ResponseBody.fromBytes(_jpeg(7), 200);
     });
     final c = ProviderContainer(overrides: [imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net)]);
     addTearDown(c.dispose);
     final store = c.read(imageStoreProvider);
 
     const url = 'https://pic.777743.xyz/pictures/1/1973/100/1.jpg';
-    expect(await store.load(url), [7, 8, 9]);
+    expect(await store.load(url), _jpeg(7));
     expect(net.urls, ['https://pic.777743.xyz/pictures/1/1973/100/1.jpg', 'https://pic.wenku8.com/pictures/1/1973/100/1.jpg']);
     // 第二次直接命中缓存，不再请求网络
-    expect(await store.load(url), [7, 8, 9]);
+    expect(await store.load(url), _jpeg(7));
     expect(net.urls, hasLength(2));
   });
 
@@ -89,13 +93,13 @@ void main() {
     final net = _FakeAdapter((o) async {
       if (o.uri.host == 'pic.777743.xyz') return ResponseBody.fromString('<html>blocked</html>', 200);
       if (o.uri.path.contains('fail')) return ResponseBody.fromBytes([], 404);
-      return ResponseBody.fromBytes([4, 5, 6], 200);
+      return ResponseBody.fromBytes(_jpeg(4), 200);
     });
     final c = ProviderContainer(overrides: [imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net)]);
     addTearDown(c.dispose);
     final store = c.read(imageStoreProvider);
 
-    expect(await store.load('https://pic.777743.xyz/pictures/1/1/1.jpg'), [4, 5, 6]);
+    expect(await store.load('https://pic.777743.xyz/pictures/1/1/1.jpg'), _jpeg(4));
     expect(net.urls, ['https://pic.777743.xyz/pictures/1/1/1.jpg', 'https://pic.wenku8.com/pictures/1/1/1.jpg']);
 
     await expectLater(store.load('https://pic.wenku8.com/pictures/1/1/fail.jpg'), throwsA(isA<Object>()));
@@ -112,7 +116,7 @@ void main() {
     final challengeCalls = <String>[];
     final net = _FakeAdapter((o) async {
       if (!cleared) return ResponseBody.fromBytes(const [], 403);
-      return ResponseBody.fromBytes([o.uri.path.endsWith('1.jpg') ? 1 : 2], 200);
+      return ResponseBody.fromBytes(_jpeg(o.uri.path.endsWith('1.jpg') ? 1 : 2), 200);
     });
     final gate = Completer<void>();
     final c = ProviderContainer(
@@ -122,7 +126,7 @@ void main() {
           challengeCalls.add(url);
           await gate.future;
           cleared = true;
-          return Uint8List.fromList([url.endsWith('1.jpg') ? 1 : 2]);
+          return Uint8List.fromList(_jpeg(url.endsWith('1.jpg') ? 1 : 2));
         }),
       ],
     );
@@ -135,8 +139,8 @@ void main() {
     expect(challengeCalls, hasLength(1));
     gate.complete();
 
-    expect(await f1, [1]);
-    expect(await f2, [2]);
+    expect(await f1, _jpeg(1));
+    expect(await f2, _jpeg(2));
     expect(challengeCalls, hasLength(1));
   });
 
@@ -157,14 +161,14 @@ void main() {
         imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net),
         imageChallengeProvider.overrideWithValue((url) async {
           challengeCalls.add(url);
-          return Uint8List.fromList([9, 9]);
+          return Uint8List.fromList(_jpeg(9));
         }),
       ],
     );
     addTearDown(c.dispose);
     final store = c.read(imageStoreProvider);
 
-    expect(await store.load('https://pic.777743.xyz/pictures/1/1/cover.jpg'), [9, 9]);
+    expect(await store.load('https://pic.777743.xyz/pictures/1/1/cover.jpg'), _jpeg(9));
     expect(challengeCalls, ['https://pic.wenku8.com/pictures/1/1/cover.jpg']);
 
     await expectLater(store.load('https://pic.777743.xyz/pictures/1/1/404.jpg'), throwsA(isA<Object>()));
@@ -184,13 +188,102 @@ void main() {
     String? sentCookie;
     final net = _FakeAdapter((o) async {
       sentCookie = o.headers['cookie'] as String?;
-      return ResponseBody.fromBytes([5, 5], 200);
+      return ResponseBody.fromBytes(_jpeg(5), 200);
     });
     final c = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(sessionStore)]);
     addTearDown(c.dispose);
     c.read(imageDioProvider).httpClientAdapter = net;
 
-    expect(await c.read(imageStoreProvider).load('https://pic.777743.xyz/pictures/1/1/1.jpg'), [5, 5]);
+    expect(await c.read(imageStoreProvider).load('https://pic.777743.xyz/pictures/1/1/1.jpg'), _jpeg(5));
     expect(sentCookie, contains('cf_clearance=abc123'));
+  });
+
+  test('非图片魔数响应拒绝落盘并回退备用图床；无备用地址时报错且不污染缓存', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final dir = await Directory.systemTemp.createTemp('imgstore_magic');
+    addTearDown(() => dir.delete(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir.path);
+
+    final net = _FakeAdapter((o) async {
+      if (o.uri.host == 'pic.777743.xyz') return ResponseBody.fromString('{"error":"rate limited"}', 200);
+      if (o.uri.path.contains('bad')) return ResponseBody.fromString('plain error body', 200);
+      return ResponseBody.fromBytes(_jpeg(8), 200);
+    });
+    final c = ProviderContainer(overrides: [imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net)]);
+    addTearDown(c.dispose);
+    final store = c.read(imageStoreProvider);
+
+    expect(await store.load('https://pic.777743.xyz/pictures/1/1/ok.jpg'), _jpeg(8));
+    await expectLater(store.load('https://pic.wenku8.com/pictures/1/1/bad.jpg'), throwsA(isA<StateError>()));
+    expect(await store.cached('https://pic.wenku8.com/pictures/1/1/bad.jpg'), isNull);
+  });
+
+  test('图床 challenge 失败后进入冷却窗口，冷却期内同域名不重复拉起过盾', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final dir = await Directory.systemTemp.createTemp('imgstore_cooldown');
+    addTearDown(() => dir.delete(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir.path);
+
+    var challengeCalls = 0;
+    final net = _FakeAdapter((o) async => ResponseBody.fromBytes(const [], 403));
+    final c = ProviderContainer(
+      overrides: [
+        imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net),
+        imageChallengeProvider.overrideWithValue((url) async {
+          challengeCalls++;
+          throw CloudflareChallengeException(requestOptions: RequestOptions(path: url));
+        }),
+      ],
+    );
+    addTearDown(c.dispose);
+    final store = c.read(imageStoreProvider);
+
+    await expectLater(store.load('https://pic.wenku8.com/pictures/1/1/a.jpg'), throwsA(isA<CloudflareChallengeException>()));
+    await expectLater(store.load('https://pic.wenku8.com/pictures/1/1/b.jpg'), throwsA(isA<CloudflareChallengeException>()));
+    expect(challengeCalls, 1);
+  });
+
+  test('cancelPrefetch 取消尚未开始的低优预取，且可见图加载优先于预取队列', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final dir = await Directory.systemTemp.createTemp('imgstore_priority');
+    addTearDown(() => dir.delete(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir.path);
+
+    final gates = <String, Completer<void>>{};
+    final started = <String>[];
+    final net = _FakeAdapter((o) async {
+      final name = o.uri.pathSegments.last;
+      started.add(name);
+      final gate = gates[name];
+      if (gate != null) await gate.future;
+      return ResponseBody.fromBytes(_jpeg(started.length), 200);
+    });
+    final c = ProviderContainer(overrides: [imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net)]);
+    addTearDown(c.dispose);
+    final store = c.read(imageStoreProvider);
+
+    // 先占满 4 个网络槽位，再排 2 个低优预取与 1 个高优可见加载
+    for (var i = 1; i <= 4; i++) {
+      gates['slot$i.jpg'] = Completer<void>();
+    }
+    final slotFutures = [for (var i = 1; i <= 4; i++) store.load('https://img.example/slot$i.jpg')];
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(started, hasLength(4));
+
+    store.prefetch(['https://img.example/pre1.jpg', 'https://img.example/pre2.jpg']);
+    final visibleFuture = store.load('https://img.example/visible.jpg');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    // 取消未开始的预取，仅保留 visible.jpg
+    store.cancelPrefetch(['https://img.example/pre1.jpg', 'https://img.example/pre2.jpg']);
+    for (final g in gates.values) {
+      g.complete();
+    }
+    await Future.wait([...slotFutures, visibleFuture]);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+
+    expect(started, contains('visible.jpg'));
+    expect(started, isNot(contains('pre1.jpg')));
+    expect(started, isNot(contains('pre2.jpg')));
   });
 }

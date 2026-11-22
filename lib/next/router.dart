@@ -26,41 +26,10 @@ import 'pages/volumes_page.dart';
 import 'pages/wall_page.dart';
 import 'pages/splash_page.dart';
 import 'reader/reader_page.dart';
+import 'routes.dart';
 import 'session.dart';
 
-class Routes {
-  const Routes._();
-
-  static const splash = '/splash';
-  static const login = '/login';
-  static const verify = '/verify';
-  static const discover = '/discover';
-  static const bookshelf = '/bookshelf';
-  static const updates = '/updates';
-  static const stats = '/stats';
-  static const bookmarks = '/bookmarks';
-  static String report(String aid, {int? vol}) => '/report/$aid${vol == null ? '' : '?v=$vol'}';
-  static const wall = '/wall';
-  static const rules = '/rules';
-  static const categories = '/categories';
-  static const sync = '/sync';
-  static const profile = '/profile';
-  static const search = '/search';
-  static const settings = '/settings';
-  static String settingsSection(String name, {String? highlight}) =>
-      highlight == null || highlight.isEmpty ? '/settings/$name' : '/settings/$name?q=${Uri.encodeQueryComponent(highlight)}';
-  static const history = '/history';
-  static const cache = '/cache';
-  static const storage = '/storage';
-
-  static String searchAuthor(String author) => '/search?author=${Uri.encodeQueryComponent(author)}';
-  static String cacheBook(String aid) => '/cache/$aid';
-  static String novel(String aid) => '/novel/$aid';
-  static String volumes(String aid) => '/volumes/$aid';
-  static String comments(String aid) => '/novel/$aid/comments';
-  static String replies(String aid, String rid) => '/novel/$aid/comments/$rid';
-  static String reader(String aid, String cid, {int? offset}) => offset == null ? '/reader/$aid/$cid' : '/reader/$aid/$cid?offset=$offset';
-}
+export 'routes.dart';
 
 /// 检查登录状态时停在启动页，检查完一律进主界面；登录页由用户按需 push 打开。
 final routerProvider = Provider<GoRouter>((ref) {
@@ -90,7 +59,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(path: Routes.splash, builder: (_, _) => const SplashPage()),
       GoRoute(path: Routes.login, builder: (_, _) => const LoginPage()),
-      GoRoute(path: Routes.verify, builder: (_, _) => const VerifyPage()),
+      GoRoute(path: Routes.verify, builder: (_, state) => VerifyPage(url: state.uri.queryParameters['url'], host: state.uri.queryParameters['host'])),
       GoRoute(path: Routes.search, builder: (_, state) => SearchPage(author: state.uri.queryParameters['author'])),
       GoRoute(path: Routes.bookmarks, builder: (_, _) => const BookmarksPage()),
       GoRoute(path: '/report/:aid', builder: (_, state) => ReportPage(aid: state.pathParameters['aid']!, vol: int.tryParse(state.uri.queryParameters['v'] ?? ''))),
