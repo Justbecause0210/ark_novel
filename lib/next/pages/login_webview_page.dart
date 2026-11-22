@@ -1,25 +1,33 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../data/wenku8/wenku8_client.dart';
 import '../../models/common/wenku8_node.dart';
 import '../session.dart';
 import '../web_fetch.dart';
 import '../text.dart';
 
 class WebSessionResult {
-  const WebSessionResult(this.cookies, this.userAgent);
+  const WebSessionResult(this.cookies, this.userAgent, {this.origin});
 
   /// 站点的全部 cookie（`a=1;b=2`）
   final String cookies;
 
   /// WebView 的真实 User-Agent，Dio 要用同一个，Cloudflare 才认放行 cookie
   final String? userAgent;
+
+  /// 实际完成登录/验证时的站点 origin（例如 `https://www.wenku8.cc`）
+  final String? origin;
 }
+
+enum _GuardState { none, challenge, blocked }
 
 /// 内嵌浏览器页，两种用法：
 /// - 登录（[username] 不为空）：打开登录页，过完 Cloudflare 验证后把用户名、密码、有效期填进表单提交，出现登录 cookie 后返回
@@ -54,6 +62,7 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   late final String _root = _host.split('.').reversed.take(2).toList().reversed.join('.');
   String _status = '';
   String _hint = '';
+  bool _blocked = false;
   bool _ready = false;
   bool _done = false;
   bool _submitted = false;
@@ -66,10 +75,17 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
     if (_events.length > 12) _events.removeAt(0);
   }
 
+  String _appleProxyNote() {
+    if (kIsWeb || !(Platform.isIOS || Platform.isMacOS)) return '';
+    final proxy = ref.read(sessionStoreProvider).proxy;
+    return proxy.isEmpty ? '' : '（提示：当前平台验证页走系统网络，请确保系统代理出口与 App 内代理一致）';
+  }
+
   @override
   void initState() {
     super.initState();
-    _hint = widget.isLogin ? '正在打开登录页，如遇人机验证请点击通过…' : '请在页面中完成人机验证，通过后将自动返回…';
+    final note = _appleProxyNote();
+    _hint = (widget.isLogin ? '正在打开登录页，如遇人机验证请点击通过…' : '请在页面中完成人机验证，通过后将自动返回…') + note;
     _prepare();
   }
 
@@ -133,7 +149,8 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
     _done = true;
     try {
       final cookies = await _cookiesOf(uri);
-      final result = WebSessionResult(cookies.map((e) => '${e.name}=${e.value}').join(';'), _ua);
+      final origin = uri.host.isEmpty ? null : 'https://${uri.host}';
+      final result = WebSessionResult(cookies.map((e) => '${e.name}=${e.value}').join(';'), _ua, origin: origin);
       if (widget.onDone != null) {
         await widget.onDone!(result);
       } else if (mounted) {
@@ -147,16 +164,32 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
     }
   }
 
-  Future<bool> _isChallengePage(InAppWebViewController c) async {
+  Future<_GuardState> _guardState(InAppWebViewController c) async {
     try {
       final title = await c.getTitle() ?? '';
-      if (title.contains('Just a moment') || title.contains('请稍候') || title.contains('Checking your browser') || title.contains('Attention Required') || title.startsWith('Access denied')) {
-        return true;
+      final lowerTitle = title.toLowerCase();
+      if (lowerTitle.startsWith('access denied') ||
+          title.contains('Attention Required') ||
+          title.contains('已被封锁') ||
+          lowerTitle.contains('have been blocked') ||
+          lowerTitle.contains('error 1015') ||
+          lowerTitle.contains('error 1020')) {
+        return _GuardState.blocked;
       }
-      final dom = await c.evaluateJavascript(source: "!!document.querySelector('#challenge-form, #challenge-running, .cf-turnstile, #cf-challenge-running')");
-      return dom == true;
+      if (title.contains('Just a moment') || title.contains('请稍候') || title.contains('Checking your browser')) {
+        return _GuardState.challenge;
+      }
+      final dom = await c.evaluateJavascript(
+        source: "!!document.querySelector('#challenge-form, #challenge-running, .cf-turnstile, #cf-challenge-running, iframe[src*=\"challenges.cloudflare.com\"]')",
+      );
+      if (dom == true) return _GuardState.challenge;
+      final blockedBody = await c.evaluateJavascript(
+        source: "(() => { const t = (document.body?.innerText || '').slice(0, 600).toLowerCase(); return t.includes('sorry, you have been blocked') || t.includes('you have been blocked') || t.includes('error 1015') || t.includes('error 1020'); })()",
+      );
+      if (blockedBody == true) return _GuardState.blocked;
+      return _GuardState.none;
     } catch (_) {
-      return false;
+      return _GuardState.none;
     }
   }
 
@@ -166,6 +199,7 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
     if (!isSameSite(uri.host, _root)) {
       if (mounted) {
         setState(() {
+          _blocked = false;
           _status = '当前在其他域名 ${uri.host}，不会自动填表（登录页是 $_host）';
           _hint = '当前跳转到 ${uri.host}，为保护账号安全未自动填写密码';
         });
@@ -173,13 +207,28 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
       return;
     }
     _ua ??= (await c.evaluateJavascript(source: 'navigator.userAgent')) as String?;
-    final inChallenge = await _isChallengePage(c);
+    final guard = await _guardState(c);
     final names = (await _cookiesOf(uri)).map((e) => e.name).toSet();
     _status = '${uri.host}${uri.path}  登录cookie：${names.any((n) => n.startsWith('jieqiUserInfo')) ? '有' : '无'}  已填表：${_submitted ? '是' : '否'}';
-    if (inChallenge) {
-      if (mounted) setState(() => _hint = '请点击完成页面中的 Cloudflare 人机验证，通过后将自动继续…');
+    if (guard == _GuardState.blocked) {
+      if (mounted) {
+        setState(() {
+          _blocked = true;
+          _hint = '当前网络/IP 已被 Cloudflare 拒绝访问（403 封锁页），无法通过点击验证解除，请尝试切换网络、更换代理节点或切换站点线路';
+        });
+      }
       return;
     }
+    if (guard == _GuardState.challenge) {
+      if (mounted) {
+        setState(() {
+          _blocked = false;
+          _hint = '请点击完成页面中的 Cloudflare 人机验证，通过后将自动继续…${_appleProxyNote()}';
+        });
+      }
+      return;
+    }
+    if (_blocked && mounted) setState(() => _blocked = false);
     if (widget.isLogin) {
       if (names.any((n) => n.startsWith('jieqiUserInfo'))) return _finish(c, uri);
       String? why;
@@ -254,9 +303,18 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                   child: Row(
                     children: [
-                      Icon(Icons.info_outline, size: 16, color: Theme.of(context).colorScheme.primary),
+                      Icon(
+                        _blocked ? Icons.block_outlined : Icons.info_outline,
+                        size: 16,
+                        color: _blocked ? Theme.of(context).colorScheme.error : Theme.of(context).colorScheme.primary,
+                      ),
                       const SizedBox(width: 8),
-                      Expanded(child: Text(_hint, style: Theme.of(context).textTheme.bodySmall)),
+                      Expanded(
+                        child: Text(
+                          _hint,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: _blocked ? Theme.of(context).colorScheme.error : null),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -281,19 +339,48 @@ class _LoginWebViewPageState extends ConsumerState<LoginWebViewPage> {
   InAppWebViewController? _controller;
 }
 
-/// "去验证"路由页：打开当前线路的首页过 Cloudflare 验证，通过后写回 cookie、重新确认登录状态并返回。
+/// "去验证"路由页：打开目标地址/域名（默认当前线路首页）过 Cloudflare 验证，通过后写回 cookie 并返回 `true` 供原页面自动重试。
 class VerifyPage extends ConsumerWidget {
-  const VerifyPage({super.key});
+  const VerifyPage({super.key, this.url, this.host});
+
+  /// 可选目标验证地址（例如特定被拦页面或图床 URL）
+  final String? url;
+
+  /// 可选目标验证域名（例如 `www.wenku8.cc` 或 `pic.wenku8.com`）
+  final String? host;
+
+  static bool _isMainSiteHost(String h) => isSameSite(h, 'wenku8.net') || isSameSite(h, 'wenku8.cc');
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final node = ref.watch(nodeProvider);
+    final targetUrl = (url != null && url!.isNotEmpty)
+        ? url!
+        : (host != null && host!.isNotEmpty ? 'https://$host/' : '${siteBase(node)}/');
+    final targetHost = Uri.tryParse(targetUrl)?.host ?? '';
+    final label = targetHost.isEmpty ? node.node.replaceFirst('https://www.', '') : targetHost.replaceFirst('www.', '');
     return LoginWebViewPage(
-      url: '${siteBase(node)}/',
-      title: '验证（${node.node.replaceFirst('https://www.', '')}）',
+      url: targetUrl,
+      title: '验证（$label）',
       onDone: (r) async {
-        await ref.read(sessionProvider.notifier).afterVerify(r.cookies, userAgent: r.userAgent);
-        if (context.mounted) context.pop();
+        final origin = r.origin ?? (targetHost.isEmpty ? null : 'https://$targetHost');
+        final originHost = origin == null ? targetHost : (Uri.tryParse(origin)?.host ?? targetHost);
+        if (originHost.isEmpty || _isMainSiteHost(originHost)) {
+          await ref.read(sessionProvider.notifier).afterVerify(r.cookies, userAgent: r.userAgent, origin: origin);
+        } else if (origin != null) {
+          final store = ref.read(sessionStoreProvider);
+          final jar = ref.read(imageCookieJarProvider);
+          if (r.cookies.isNotEmpty) {
+            await store.setCfCookie(origin, r.cookies);
+            await jar.saveFromResponse(Uri.parse(origin), Wenku8Client.parseCookieString(r.cookies));
+          }
+          final ua = r.userAgent;
+          if (ua != null && ua.isNotEmpty && ua != store.userAgent) {
+            await store.setUserAgent(ua);
+            ref.read(wenku8ClientProvider).dio.options.headers['User-Agent'] = ua;
+          }
+        }
+        if (context.mounted) context.pop(true);
       },
     );
   }
