@@ -23,24 +23,29 @@ import 'volumes.dart';
 /// 图片缓存：内存里最多留 [_memBytes] 字节（LRU），磁盘上长期保留，断网后封面和插图还能显示。
 /// 网页预览不用它（直接走转发程序）。
 class ImageStore {
-  ImageStore(this._ref);
+  ImageStore(this._ref) {
+    srVersion.addListener(_onGlobalSrVersion);
+  }
 
   final Ref _ref;
-  // 按字节算：封面几十 KB、插图几百 KB，按张数算不是存不下封面就是插图占太多内存
-  static const _memBytes = 64 << 20;
+  // 按字节算：封面几十 KB、插图几百 KB；移动端留 48 MB 避免叠加解码缓存与超分缓冲吃紧，桌面留 64 MB
+  static final int _memBytes = (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) ? (48 << 20) : (64 << 20);
   final _mem = <String, Uint8List>{}; // Dart 的 Map 字面量保持插入顺序，当 LRU 用
   var _memUsed = 0;
   final _inflight = <String, Future<Uint8List>>{};
   final _cancelled = <String>{};
   final _hostChallenges = <String, Future<Uint8List?>>{}; // 同一个图床域名并发被拦时只拉起一次无头网页过盾
   final _hostClearedAt = <String, DateTime>{};
+  final _hostFailedAt = <String, DateTime>{};
+  static const _challengeCooldown = Duration(seconds: 60);
 
-  // 网络下载排队：同时最多 [_maxNet] 张，按请求顺序（列表从上到下）。不排队时几十张一起抢带宽，挂代理时谁都快不了，最后一起冒出来。
-  // 滑出屏幕的会被 [cancel] 从队里拿掉，所以排着的基本都是眼前这一屏的。
+  // 网络下载排队：同时最多 [_maxNet] 张。可见图排 [_highWaiting]（高优），预取排 [_lowWaiting]（低优），不让后台预取阻塞书架封面。
+  // 滑出屏幕的会被 [cancel] 从队里拿掉，退出阅读器可调 [cancelPrefetch] 取消未开始的预取。
   static const _maxNet = 4;
   int _running = 0;
-  final _waiting = <String, Completer<void>>{}; // Map 保持插入顺序
-  final _pinned = <String>{}; // 预取的（[prefetch]），页面一闪而过也不取消
+  final _highWaiting = <String, Completer<void>>{}; // Map 保持插入顺序
+  final _lowWaiting = <String, Completer<void>>{};
+  final _pinned = <String>{}; // 预取的（[prefetch]），页面一闪而过时不因单控件 dispose 取消；可用 [cancelPrefetch] 批量取消
   Directory? _dir;
 
   Future<Directory> _cacheDir() async => _dir ??= await Directory(p.join((await getApplicationSupportDirectory()).path, 'imgcache')).create(recursive: true);
@@ -79,19 +84,19 @@ class ImageStore {
   }
 
   /// 原图字节（不管清晰度）
-  Future<Uint8List> _load(String rawUrl) {
+  Future<Uint8List> _load(String rawUrl, {bool lowPriority = false}) {
     final url = _norm(rawUrl);
     _cancelled.remove(url);
     final hit = _hit(url);
     if (hit != null) return Future.value(hit);
     final running = _inflight[url];
     if (running != null) {
-      _bump(url);
+      if (!lowPriority) _bump(url);
       return running;
     }
     late final Future<Uint8List> f;
     // 只删自己：被取消后又重新请求时，这里已经换成新的那次了
-    f = _fetch(url).whenComplete(() { if (identical(_inflight[url], f)) _inflight.remove(url); });
+    f = _fetch(url, lowPriority: lowPriority).whenComplete(() { if (identical(_inflight[url], f)) _inflight.remove(url); });
     return _inflight[url] = f;
   }
 
@@ -102,23 +107,39 @@ class ImageStore {
     return peek(url) ?? (await f.exists() ? await f.readAsBytes() : null);
   }
 
-  /// 预取一整章的插图：按顺序排进下载队列，一次排好，不用翻到哪页才去取哪张。
-  /// 翻页快、页面一闪而过时也不取消（见 [cancel]）；正要看的那张会插到队首（见 [_bump]）。
+  /// 预取一整章的插图：排入低优先级队列，不抢占可见封面/图片；正要看的那张会提升到高优队首（见 [_bump]）。
+  /// 退出阅读器时可调 [cancelPrefetch] 取消尚未开始的预取。
   void prefetch(Iterable<String> urls) {
     for (final raw in urls) {
       final url = _norm(raw);
       if (raw.isEmpty || _mem.containsKey(url)) continue;
       _pinned.add(url);
-      _load(url).whenComplete(() => _pinned.remove(url)).ignore(); // 只下载，放大清晰度等真要显示时再说
+      _load(url, lowPriority: true).whenComplete(() => _pinned.remove(url)).ignore(); // 只下载，放大清晰度等真要显示时再说
     }
   }
 
-  /// 还在排队的图有人要看了：挪到队首，下一个空出来的名额先给它。
+  /// 取消尚未开始的预取（传 [urls] 仅取消指定批，不传则取消全部低优预取）；已提升为高优可见加载的图不受影响。
+  void cancelPrefetch([Iterable<String>? urls]) {
+    final targets = urls == null ? _pinned.toList() : [for (final u in urls) if (u.isNotEmpty) _norm(u)];
+    for (final url in targets) {
+      _pinned.remove(url);
+      if (_highWaiting.containsKey(url)) continue; // 已有可见控件在等这张图，不取消
+      final c = _lowWaiting.remove(url);
+      if (c != null) {
+        _inflight.remove(url);
+        c.completeError(const ImageCancelled());
+      } else if (_inflight.containsKey(url)) {
+        _cancelled.add(url);
+      }
+    }
+  }
+
+  /// 还在排队的图有人要看了：挪到高优队首，下一个空出来的名额先给它。
   void _bump(String url) {
-    final c = _waiting.remove(url);
+    final c = _highWaiting.remove(url) ?? _lowWaiting.remove(url);
     if (c == null) return;
-    final rest = {..._waiting};
-    _waiting
+    final rest = {..._highWaiting};
+    _highWaiting
       ..clear()
       ..[url] = c
       ..addAll(rest);
@@ -134,19 +155,22 @@ class ImageStore {
     return file.path;
   }
 
-  Future<void> _slot(String url) {
+  Future<void> _slot(String url, {bool lowPriority = false}) {
     if (_running < _maxNet) {
       _running++;
       return Future.value();
     }
-    return (_waiting[url] = Completer<void>()).future;
+    final queue = lowPriority ? _lowWaiting : _highWaiting;
+    return (queue[url] = Completer<void>()).future;
   }
 
   void _release() {
-    if (_waiting.isEmpty) {
-      _running--;
+    if (_highWaiting.isNotEmpty) {
+      _highWaiting.remove(_highWaiting.keys.first)!.complete();
+    } else if (_lowWaiting.isNotEmpty) {
+      _lowWaiting.remove(_lowWaiting.keys.first)!.complete();
     } else {
-      _waiting.remove(_waiting.keys.first)!.complete(); // 名额直接交给排在最前面的
+      _running--;
     }
   }
 
@@ -154,7 +178,7 @@ class ImageStore {
   void cancel(String rawUrl) {
     final url = _norm(rawUrl);
     if (_pinned.contains(url)) return;
-    final c = _waiting.remove(url);
+    final c = _highWaiting.remove(url) ?? _lowWaiting.remove(url);
     if (c == null) {
       if (_inflight.containsKey(url)) _cancelled.add(url);
       return;
@@ -192,6 +216,7 @@ class ImageStore {
       if (cf) throw CloudflareChallengeException(requestOptions: res.requestOptions);
       throw StateError('invalid image response');
     }
+    if (!isValidImageBytes(data)) throw StateError('invalid image response');
     return data;
   }
 
@@ -211,19 +236,33 @@ class ImageStore {
       await running;
       return _download(targetUrl);
     }
+    final failedAt = _hostFailedAt[host];
+    if (failedAt != null && DateTime.now().difference(failedAt) < _challengeCooldown) {
+      throw CloudflareChallengeException(requestOptions: RequestOptions(path: targetUrl));
+    }
     final f = challenge(targetUrl);
     _hostChallenges[host] = f;
     try {
       final bytes = await f;
+      if (bytes != null && bytes.isNotEmpty) {
+        if (!isValidImageBytes(bytes)) throw StateError('invalid image response');
+        _hostFailedAt.remove(host);
+        _hostClearedAt[host] = DateTime.now();
+        return bytes;
+      }
+      final retry = await _download(targetUrl);
+      _hostFailedAt.remove(host);
       _hostClearedAt[host] = DateTime.now();
-      if (bytes != null && bytes.isNotEmpty) return bytes;
-      return await _download(targetUrl);
+      return retry;
+    } catch (_) {
+      _hostFailedAt[host] = DateTime.now();
+      rethrow;
     } finally {
       if (identical(_hostChallenges[host], f)) _hostChallenges.remove(host);
     }
   }
 
-  Future<Uint8List> _fetch(String url) async {
+  Future<Uint8List> _fetch(String url, {bool lowPriority = false}) async {
     final file = File(p.join((await _cacheDir()).path, _name(url)));
     Uint8List bytes;
     if (await file.exists()) {
@@ -234,44 +273,51 @@ class ImageStore {
         _inflight.remove(url);
         throw const ImageCancelled();
       }
-      await _slot(url);
+      List<int>? data;
+      Object? primaryErr;
+      Object? altErr;
+      final started = DateTime.now();
+      DateTime? altStarted;
+      final alt = ImageUrlHelper.fallback(url);
+      final hasAlt = alt.isNotEmpty && alt != url;
+      // 仅普通 HTTP 下载占并发槽位；长耗时 challenge 过盾与本地图片压缩移出 _slot，避免饿死其他图床。
+      await _slot(url, lowPriority: lowPriority);
       try {
-        final started = DateTime.now();
-        List<int> data;
         try {
           data = await _download(url);
-        } catch (primaryErr) {
-          final alt = ImageUrlHelper.fallback(url);
-          if (alt.isNotEmpty && alt != url) {
-            final altStarted = DateTime.now();
+        } catch (e) {
+          primaryErr = e;
+          if (hasAlt) {
+            altStarted = DateTime.now();
             try {
               data = await _download(alt);
-            } catch (altErr) {
-              final challenge = _ref.read(imageChallengeProvider);
-              if (challenge == null) rethrow;
-              if (_isChallengeError(primaryErr)) {
-                try {
-                  data = await _downloadViaChallenge(url, challenge, started);
-                } catch (_) {
-                  if (!_isChallengeError(altErr)) rethrow;
-                  data = await _downloadViaChallenge(alt, challenge, altStarted);
-                }
-              } else if (_isChallengeError(altErr)) {
-                data = await _downloadViaChallenge(alt, challenge, altStarted);
-              } else {
-                rethrow;
-              }
+            } catch (e2) {
+              altErr = e2;
             }
-          } else {
-            final challenge = _ref.read(imageChallengeProvider);
-            if (challenge == null || !_isChallengeError(primaryErr)) rethrow;
-            data = await _downloadViaChallenge(url, challenge, started);
           }
         }
-        bytes = await shrinkImage(Uint8List.fromList(data));
       } finally {
         _release();
       }
+      if (data == null) {
+        final challenge = _ref.read(imageChallengeProvider);
+        if (challenge == null) throw (altErr ?? primaryErr)!;
+        if (_isChallengeError(primaryErr!)) {
+          try {
+            data = await _downloadViaChallenge(url, challenge, started);
+          } catch (_) {
+            if (altErr == null || !_isChallengeError(altErr)) rethrow;
+            data = await _downloadViaChallenge(alt, challenge, altStarted!);
+          }
+        } else if (altErr != null && _isChallengeError(altErr)) {
+          data = await _downloadViaChallenge(alt, challenge, altStarted!);
+        } else {
+          throw altErr ?? primaryErr;
+        }
+      }
+      final rawBytes = data is Uint8List ? data : Uint8List.fromList(data);
+      if (!isValidImageBytes(rawBytes)) throw StateError('invalid image response');
+      bytes = await shrinkImage(rawBytes);
       await file.parent.create(recursive: true); // 下载期间可能清空了缓存目录
       await writeFileAtomic(file, bytes);
     }
@@ -297,14 +343,61 @@ class ImageStore {
 
   static const _upscale = MethodChannel('ark/upscale');
 
-  /// 有图放大好了、模式换了：显示中的图重新取一次
+  /// 有图放大好了、模式换了：兼容旧版全量订阅；新代码请使用 [srNotifierFor] / [srVersionForProvider] 做按 URL 局部刷新。
   final srVersion = ValueNotifier<int>(0);
+  final _srUrlNotifiers = <String, _UrlSrNotifier>{};
+  bool _inSingleSrNotify = false;
   Directory? _srDirCache;
   Set<String>? _srDone; // 放大好的（原图文件名），第一次用到时从目录读
+  Future<Set<String>>? _srIndexFuture;
   final _srQueue = <String>[];
   final _srSkip = <String>{}; // 不用放大（太大）或放大失败的，这次运行不再试
   bool _srRunning = false;
   final _srAllowed = <String>{}; // 自动模式能放大的：书架上的书的封面（取封面时记下）
+
+  /// 按图片地址获取局部超分版本号通知器（仅该图超分完成或全局模式切换时递增）。
+  ValueNotifier<int> srNotifierFor(String rawUrl) {
+    final url = _norm(rawUrl);
+    return _srUrlNotifiers.putIfAbsent(url, _UrlSrNotifier.new);
+  }
+
+  void _releaseSrNotifierIfUnused(String rawUrl) {
+    final url = _norm(rawUrl);
+    final n = _srUrlNotifiers[url];
+    if (n != null && !n.active) {
+      _srUrlNotifiers.remove(url);
+      n.dispose();
+    }
+  }
+
+  void _onGlobalSrVersion() {
+    if (_inSingleSrNotify) return;
+    for (final n in _srUrlNotifiers.values.toList()) {
+      n.value++;
+    }
+  }
+
+  void _notifySingleSr(String url) {
+    _srUrlNotifiers[url]?.value++;
+    _inSingleSrNotify = true;
+    try {
+      srVersion.value++;
+    } finally {
+      _inSingleSrNotify = false;
+    }
+  }
+
+  /// 切换超分模式时调用：通知所有已挂载图片重新评估清晰度。
+  void notifySrModeChanged() => srVersion.value++;
+
+  void dispose() {
+    srVersion.removeListener(_onGlobalSrVersion);
+    srVersion.dispose();
+    for (final n in _srUrlNotifiers.values) {
+      n.dispose();
+    }
+    _srUrlNotifiers.clear();
+  }
 
   /// 书架上的书的封面，自动模式可以放大（发现、排行、搜索里别的书的封面不放大）。
   void allowAutoSr(String rawUrl) => _srAllowed.add(_norm(rawUrl));
@@ -313,13 +406,24 @@ class ImageStore {
 
   Future<Directory> _srDir() async => _srDirCache ??= await Directory(p.join((await getApplicationSupportDirectory()).path, 'imgsr')).create(recursive: true);
 
-  Future<Set<String>> _srIndex() async {
-    if (_srDone case final done?) return done;
-    final names = {await for (final f in (await _srDir()).list()) if (f is File) p.basename(f.path)};
-    if (_srDone != null) return _srDone!;
-    _srDone = names;
-    if (names.isNotEmpty) srVersion.value++; // 读到之前显示的是原图，换一下
-    return names;
+  Future<Set<String>> _srIndex() {
+    if (_srDone case final done?) return Future.value(done);
+    return _srIndexFuture ??= () async {
+      final names = {await for (final f in (await _srDir()).list()) if (f is File) p.basename(f.path)};
+      _srDone ??= names;
+      if (names.isNotEmpty) {
+        for (final entry in _srUrlNotifiers.entries.toList()) {
+          if (names.contains(_name(entry.key))) entry.value.value++;
+        }
+        _inSingleSrNotify = true;
+        try {
+          srVersion.value++; // 读到之前显示的是原图，换一下
+        } finally {
+          _inSingleSrNotify = false;
+        }
+      }
+      return _srDone!;
+    }().whenComplete(() => _srIndexFuture = null);
   }
 
   bool _srShown(String raw, String url) => srSupported && (_autoSr(url) || wantsSr(raw)) && (_srDone?.contains(_name(url)) ?? false);
@@ -364,7 +468,7 @@ class ImageStore {
           await writeFileAtomic(File(p.join((await _srDir()).path, _name(url))), out);
           (await _srIndex()).add(_name(url));
           _put('$url#sr', out);
-          srVersion.value++;
+          _notifySingleSr(url);
         } catch (e) {
           debugPrint('upscale $url: $e');
           _srSkip.add(url);
@@ -437,6 +541,7 @@ class ImageStore {
       if (await sd.exists()) await sd.delete(recursive: true);
       _srDirCache = null;
       _srDone = null;
+      _srIndexFuture = null;
     }
     _dir = null;
     _mem.clear();
@@ -512,6 +617,15 @@ Future<Uint8List> shrinkImage(Uint8List b) async {
 
 bool _isTemp(File f) => f.path.endsWith('.tmp');
 
+/// 校验图片魔数（JPEG / PNG / GIF / WebP），防止非 HTML 报错体或截断垃圾数据落盘污染缓存。
+bool isValidImageBytes(List<int> b) {
+  if (b.length >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return true; // JPEG
+  if (b.length >= 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 && b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A) return true; // PNG
+  if (b.length >= 6 && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x38 && (b[4] == 0x37 || b[4] == 0x39) && b[5] == 0x61) return true; // GIF87a/89a
+  if (b.length >= 12 && b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 && b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50) return true; // WebP
+  return false;
+}
+
 bool _isGif(Uint8List b) => b.length > 3 && b[0] == 0x47 && b[1] == 0x49 && b[2] == 0x46;
 
 bool _isWebp(Uint8List b) => b.length > 12 && b[0] == 0x52 && b[1] == 0x49 && b[2] == 0x46 && b[3] == 0x46 && b[8] == 0x57 && b[9] == 0x45 && b[10] == 0x42 && b[11] == 0x50;
@@ -563,8 +677,31 @@ String withSr(String s, bool on) {
 
 String withCrop(String url, Rect r, {bool auto = false}) => '$url#${auto ? 'trim' : 'crop'}=${[r.left, r.top, r.width, r.height].map((e) => e.toStringAsFixed(4)).join(',')}';
 
+class _UrlSrNotifier extends ValueNotifier<int> {
+  _UrlSrNotifier() : super(0);
+
+  bool get active => hasListeners;
+}
+
 class ImageCancelled implements Exception {
   const ImageCancelled();
 }
 
-final imageStoreProvider = Provider<ImageStore>((ref) => ImageStore(ref));
+final imageStoreProvider = Provider<ImageStore>((ref) {
+  final store = ImageStore(ref);
+  ref.onDispose(store.dispose);
+  return store;
+});
+
+/// 按图片地址细粒度订阅超分版本号：单张图超分完成只刷新对应图片，不再触发全屏级失效重建。
+final srVersionForProvider = Provider.autoDispose.family<int, String>((ref, rawUrl) {
+  final store = ref.watch(imageStoreProvider);
+  final notifier = store.srNotifierFor(rawUrl);
+  void listener() => ref.invalidateSelf();
+  notifier.addListener(listener);
+  ref.onDispose(() {
+    notifier.removeListener(listener);
+    store._releaseSrNotifierIfUnused(rawUrl);
+  });
+  return notifier.value;
+});
