@@ -59,7 +59,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     routes: [
       GoRoute(path: Routes.splash, builder: (_, _) => const SplashPage()),
       GoRoute(path: Routes.login, builder: (_, _) => const LoginPage()),
-      GoRoute(path: Routes.verify, builder: (_, _) => const VerifyPage()),
+      GoRoute(path: Routes.verify, builder: (_, state) => VerifyPage(url: state.uri.queryParameters['url'], host: state.uri.queryParameters['host'])),
       GoRoute(path: Routes.search, builder: (_, state) => SearchPage(author: state.uri.queryParameters['author'])),
       GoRoute(path: Routes.bookmarks, builder: (_, _) => const BookmarksPage()),
       GoRoute(path: '/report/:aid', builder: (_, state) => ReportPage(aid: state.pathParameters['aid']!, vol: int.tryParse(state.uri.queryParameters['v'] ?? ''))),

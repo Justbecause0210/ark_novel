@@ -42,6 +42,7 @@ import '../stats.dart';
 import '../sync.dart';
 import '../text.dart';
 import '../unlock.dart';
+import '../volume_covers.dart';
 import '../volumes.dart';
 import '../widgets.dart';
 import 'paginator.dart';

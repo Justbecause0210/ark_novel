@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:ark_novel/models/cat_chapter.dart';
 import 'package:ark_novel/models/cat_volume.dart';
+import 'package:ark_novel/models/common/wenku8_node.dart';
+import 'package:ark_novel/next/app_prefs.dart';
 import 'package:ark_novel/next/bookmarks.dart';
 import 'package:ark_novel/next/cache.dart';
 import 'package:ark_novel/next/hant.dart';
@@ -15,6 +17,7 @@ import 'package:ark_novel/next/reader/reader_page.dart';
 import 'package:ark_novel/next/reader/reader_sheets.dart';
 import 'package:ark_novel/next/reader/reader_tts.dart';
 import 'package:ark_novel/next/routes.dart';
+import 'package:ark_novel/next/session.dart';
 import 'package:ark_novel/next/text.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart' as material show Text;
@@ -96,6 +99,16 @@ class _NoopNotice implements TtsNoticePort {
   }) async {}
 }
 
+class _StubSession extends SessionController {
+  @override
+  SessionState build() => const SessionLoggedOut();
+}
+
+class _StubNode extends NodeController {
+  @override
+  Wenku8Node build() => Wenku8Node.wwwWenku8Net;
+}
+
 void main() {
   late Directory tempDir;
 
@@ -108,6 +121,7 @@ void main() {
 
   setUp(() async {
     await Hive.box('session').clear();
+    await AppPrefs.write('r.tapHintShown', true);
   });
 
   tearDownAll(() async {
@@ -357,15 +371,18 @@ void main() {
     });
 
     testWidgets('夜间阅读主题下 AnnotatedRegion 状态栏与错误态 StatePanel 同步为深色', (t) async {
-      // 设为夜间主题 (theme: 2)
-      await t.runAsync(() => Hive.box('session').put('reader', {'theme': 2, 'mode': 1, 'fullscreen': false}));
+      // 设为夜间主题 (r.theme: 2)
+      await t.runAsync(() => Hive.box('session').putAll({'r.theme': 2, 'r.mode': 1, 'r.fullscreen': false}));
 
       await t.pumpWidget(
         ProviderScope(
+          retry: (_, _) => null,
           overrides: [
             chapterProvider(('1', '200')).overrideWith((ref) => Future<Chapter>.error(Exception('network timeout'))),
             novelProvider('1').overrideWith((ref) => const Stream.empty()),
             imageStoreProvider.overrideWithValue(_StubImageStore()),
+            sessionProvider.overrideWith(_StubSession.new),
+            nodeProvider.overrideWith(_StubNode.new),
           ],
           child: MaterialApp(
             theme: ThemeData.light(useMaterial3: true),
@@ -519,12 +536,13 @@ void main() {
       expect(find.text('1 / 2'), findsOneWidget);
 
       // 左滑切到第 2 张
-      await t.drag(find.byType(PageView), const Offset(-400, 0));
+      await t.fling(find.byType(PageView), const Offset(-400, 0), 1000);
       await t.pumpAndSettle();
       expect(find.text('2 / 2'), findsOneWidget);
 
-      // 单击隐藏工具栏
+      // 单击隐藏工具栏（同时挂了 onDoubleTap，需等待双击判定超时 300ms 才派发单击）
       await t.tapAt(const Offset(200, 300));
+      await t.pump(const Duration(milliseconds: 350));
       await t.pumpAndSettle();
       final barOpacity = t.widget<AnimatedOpacity>(find.byType(AnimatedOpacity));
       expect(barOpacity.opacity, 0);

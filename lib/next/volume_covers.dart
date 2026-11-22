@@ -1,6 +1,5 @@
 import 'dart:ui' as ui;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
@@ -393,20 +392,6 @@ class VolumeCoverQueue {
 
   /// 图片本来就要显示，下载后存在本机。
   Future<ui.Size> _size(String url) async => imageSize(await _ref.read(imageStoreProvider).load(url));
-}
-
-/// 只读图片头部拿宽高，不完整解码。
-Future<ui.Size> imageSize(Uint8List bytes) async {
-  ui.ImmutableBuffer? buffer;
-  ui.ImageDescriptor? desc;
-  try {
-    buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
-    desc = await ui.ImageDescriptor.encoded(buffer);
-    return ui.Size(desc.width.toDouble(), desc.height.toDouble());
-  } finally {
-    desc?.dispose();
-    buffer?.dispose();
-  }
 }
 
 /// 挑封面时最多看插图章节的前几张

@@ -38,8 +38,6 @@ import 'cover_picker_page.dart';
 import 'volumes_page.dart';
 import '../text.dart';
 
-export '../shelf_tabs.dart';
-
 enum ShelfSort {
   added('加入时间'),
   name('名称'),

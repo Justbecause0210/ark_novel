@@ -13,7 +13,6 @@ import '../cover_trim.dart';
 import '../data.dart';
 import '../image_cache.dart';
 import '../unlock.dart';
-import '../volume_covers.dart';
 import '../volumes.dart' show Vol, Volumes;
 import '../widgets.dart';
 import '../text.dart';

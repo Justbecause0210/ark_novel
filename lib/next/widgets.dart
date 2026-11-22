@@ -148,7 +148,7 @@ class StatePanel extends ConsumerWidget {
                   style: FilledButton.styleFrom(minimumSize: const Size(160, 44), padding: const EdgeInsets.symmetric(horizontal: 24)),
                   onPressed: () async {
                     final ok = await context.push<bool>(Routes.verify);
-                    if (ok == true) onRetry?.call();
+                    if (ok == true && context.mounted) onRetry?.call();
                   },
                   child: const Text('去验证'),
                 ),

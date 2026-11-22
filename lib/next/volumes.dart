@@ -9,8 +9,6 @@ import 'read_state.dart';
 import 'stats.dart';
 import 'sync.dart';
 
-export 'volume_covers.dart';
-
 /// 目录里的一卷：卷名、章节 cid（按顺序）、插图章节的 cid（没有为 null）。
 class Vol {
   const Vol(this.title, this.cids, this.illus);
@@ -29,7 +27,7 @@ bool isIllustration(String title) => title.contains('插图') || title.contains(
 
 /// 分卷数据，全部存在本机（不用每次都请求网页）：
 /// - `vols:aid` 卷列表（目录加载时记下，书架、报告页同步就能用）
-/// - `vcover2:aid` 卷名 → 封面地址（插图章节里第一张竖着的图，见 [chooseCover]；'' 表示这卷没有插图）
+/// - `vcover2:aid` 卷名 → 封面地址（插图章节里第一张竖着的图，见 `chooseCover`；'' 表示这卷没有插图）
 ///   （`vcover:` 是旧版直接取第一张图的记录，作废不用）
 /// - `vdone:aid` 卷名 → 读完的时间（毫秒）
 /// - `vrate:aid` 卷名 → 星级

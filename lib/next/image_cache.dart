@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -692,6 +693,20 @@ final imageStoreProvider = Provider<ImageStore>((ref) {
   ref.onDispose(store.dispose);
   return store;
 });
+
+/// 只读图片头部拿宽高，不完整解码。
+Future<ui.Size> imageSize(Uint8List bytes) async {
+  ui.ImmutableBuffer? buffer;
+  ui.ImageDescriptor? desc;
+  try {
+    buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+    desc = await ui.ImageDescriptor.encoded(buffer);
+    return ui.Size(desc.width.toDouble(), desc.height.toDouble());
+  } finally {
+    desc?.dispose();
+    buffer?.dispose();
+  }
+}
 
 /// 按图片地址细粒度订阅超分版本号：单张图超分完成只刷新对应图片，不再触发全屏级失效重建。
 final srVersionForProvider = Provider.autoDispose.family<int, String>((ref, rawUrl) {

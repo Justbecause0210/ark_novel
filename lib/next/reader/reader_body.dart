@@ -421,7 +421,7 @@ class _ReaderIllustration extends ConsumerWidget {
       child: Stack(
         alignment: Alignment.center,
         children: [
-          img,
+          ConstrainedBox(constraints: const BoxConstraints(minHeight: 52), child: img),
           Positioned(
             right: 4,
             bottom: 4,

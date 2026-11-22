@@ -11,6 +11,7 @@ import 'package:ark_novel/next/image_cache.dart';
 import 'package:ark_novel/next/read_state.dart';
 import 'package:ark_novel/next/pages/volumes_page.dart';
 import 'package:ark_novel/next/progress.dart';
+import 'package:ark_novel/next/volume_covers.dart';
 import 'package:ark_novel/next/volumes.dart';
 
 CatVolume vol(String t, List<String> chapters) => CatVolume(title: t, chapters: [for (final c in chapters) CatChapter(title: c.startsWith('i') ? '插图' : '第$c章', cid: c)]);

@@ -32,7 +32,6 @@ import 'package:ark_novel/next/theme_squire.dart';
 import 'package:ark_novel/next/updates.dart';
 import 'package:ark_novel/next/x_list.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -130,6 +129,7 @@ void main() {
   });
 
   tearDownAll(() async {
+    await Hive.close();
     if (dir.existsSync()) dir.deleteSync(recursive: true);
   });
 
@@ -177,9 +177,11 @@ void main() {
     final filterBtn = find.byTooltip('隐藏书架里的书');
     expect(filterBtn, findsOneWidget);
     expect(AppPrefs.read(P.hideShelved, false), isFalse);
-    await tester.tap(filterBtn);
+    await tester.runAsync(() async {
+      await tester.tap(filterBtn);
+      await Hive.box('session').flush();
+    });
     await tester.pumpAndSettle();
-    await tester.runAsync(() => Hive.box('session').flush());
     expect(AppPrefs.read(P.hideShelved, false), isTrue);
   });
 
@@ -204,14 +206,15 @@ void main() {
     expect(find.byType(XEmpty), findsOneWidget);
   });
 
-  testWidgets('SettingsPage 搜索清空、子页定位高亮、网络页 nativeNet 热切换与 Apple 代理提示', (tester) async {
-    await resetBox(tester);
-    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    await tester.runAsync(() async {
-      await store.setProxy('127.0.0.1:7890');
-      await store.setNativeNet(true);
-    });
+  testWidgets(
+    'SettingsPage 搜索清空、子页定位高亮、网络页 nativeNet 热切换与 Apple 代理提示',
+    variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    (tester) async {
+      await resetBox(tester);
+      await tester.runAsync(() async {
+        await store.setProxy('127.0.0.1:7890');
+        await store.setNativeNet(true);
+      });
 
     // 1. 搜索清空按钮
     await tester.pumpWidget(
@@ -239,14 +242,18 @@ void main() {
     expect(find.textContaining('出口 IP'), findsOneWidget);
     expect(find.textContaining('重启后生效'), findsNothing);
     expect(find.textContaining('切换后立即生效'), findsOneWidget);
-    await tester.tap(find.byType(Switch));
+    await tester.runAsync(() async {
+      await tester.tap(find.byType(Switch));
+      await Hive.box('session').flush();
+    });
     await tester.pumpAndSettle(const Duration(seconds: 2));
-    await tester.runAsync(() => Hive.box('session').flush());
     expect(store.nativeNet, isFalse);
   });
 
   testWidgets('SyncPage：同步中按钮 Spinner 用 onPrimary 且状态卡圆角跟随主题', (tester) async {
     await resetBox(tester);
+    // 预置 sync:passMoved，避免 SyncPage.initState 在 macOS 路径里于 FakeAsync 中触发未 await 的 Hive.put 锁
+    await tester.runAsync(() => Hive.box('session').put('sync:passMoved', true));
     final ruins = appPalettes.firstWhere((p) => p.scene);
     final theme = buildAppTheme(Brightness.dark, ruins);
     await tester.pumpWidget(
@@ -294,9 +301,11 @@ void main() {
     // 系统网络栈热切换
     expect(find.textContaining('重启后生效'), findsNothing);
     await tester.ensureVisible(find.byType(SwitchListTile));
-    await tester.tap(find.byType(SwitchListTile));
+    await tester.runAsync(() async {
+      await tester.tap(find.byType(SwitchListTile));
+      await Hive.box('session').flush();
+    });
     await tester.pumpAndSettle();
-    await tester.runAsync(() => Hive.box('session').flush());
     expect(store.nativeNet, isFalse);
   });
 
@@ -339,9 +348,11 @@ void main() {
     await tester.pump();
     expect(tester.widget<RuinsScene>(find.byType(RuinsScene)).animate, isTrue);
 
-    container.read(appPrefsProvider.notifier).set(P.sceneMotion, false);
+    await tester.runAsync(() async {
+      container.read(appPrefsProvider.notifier).set(P.sceneMotion, false);
+      await Hive.box('session').flush();
+    });
     await tester.pump();
-    await tester.runAsync(() => Hive.box('session').flush());
     expect(tester.widget<RuinsScene>(find.byType(RuinsScene)).animate, isFalse);
 
     await tester.tap(find.byType(CircleAvatar));
@@ -349,9 +360,8 @@ void main() {
     expect(pushedLogin, isTrue);
   });
 
-  testWidgets('HistoryPage 左滑删除带红底与撤销恢复；CachePage 整本删除二次确认；BookmarksPage 圆角跟随主题', (tester) async {
+  testWidgets('HistoryPage 左滑删除带红底与撤销恢复', (tester) async {
     await resetBox(tester);
-    // 1. HistoryPage 撤销恢复
     await tester.runAsync(() => ReadingHistory.record('10', '测试历史书', '', '100', '第一章'));
     await tester.pumpWidget(
       ProviderScope(
@@ -365,19 +375,28 @@ void main() {
     final bg = dismissible.background! as Container;
     expect(bg.color, isNotNull);
 
-    await tester.tap(find.byTooltip('删除记录'));
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.runAsync(() async {
+      await tester.tap(find.byTooltip('删除记录'));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Hive.box('session').flush();
+    });
     await tester.pumpAndSettle();
     expect(ReadingHistory.all(), isEmpty);
     expect(find.text('撤销'), findsOneWidget);
 
-    await tester.tap(find.text('撤销'));
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.runAsync(() async {
+      await tester.tap(find.text('撤销'));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await Hive.box('session').flush();
+    });
+    ScaffoldMessenger.of(tester.element(find.byType(HistoryPage))).clearSnackBars();
     await tester.pumpAndSettle();
     expect(ReadingHistory.all().length, 1);
     expect(ReadingHistory.all().first.aid, '10');
+  });
 
-    // 2. CachePage 整本删除二次确认
+  testWidgets('CachePage 整本删除二次确认', (tester) async {
+    await resetBox(tester);
     await tester.runAsync(() async {
       await ChapterCache.put('30', '1', Content(text: '正文内容', images: []));
       await ChapterCache.setMeta('30', '缓存测试书', 1, '', '1');
@@ -398,16 +417,24 @@ void main() {
     await tester.pumpAndSettle();
     expect(ChapterCache.count('30'), 1);
 
-    await tester.tap(find.byType(PopupMenuButton<String>));
+    // 从 PopupMenuButton 开始就在 runAsync 真实异步区触发 showMenu -> onSelected -> showDialog -> ChapterCache.remove + compact，避免在 FakeAsync 滞留 Hive 锁
+    await tester.runAsync(() => tester.tap(find.byType(PopupMenuButton<String>)));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('删除缓存'));
+    await tester.runAsync(() => tester.tap(find.text('删除缓存')));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, '删除'));
-    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await tester.runAsync(() async {
+      await tester.tap(find.widgetWithText(FilledButton, '删除'));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await Hive.box('chapter_index').flush();
+      await Hive.lazyBox('chapters').flush();
+      await Hive.box('session').flush();
+    });
     await tester.pumpAndSettle();
     expect(ChapterCache.count('30'), 0);
+  });
 
-    // 3. BookmarksPage 圆角跟随主题
+  testWidgets('BookmarksPage 圆角跟随主题', (tester) async {
+    await resetBox(tester);
     await tester.runAsync(() => Bookmarks.toggle('40', '书签书', '1', '第一章', 10, '这是一段摘录'));
     final ruins = appPalettes.firstWhere((p) => p.scene);
     await tester.pumpWidget(
@@ -416,7 +443,7 @@ void main() {
         child: MaterialApp(theme: buildAppTheme(Brightness.light, ruins), home: const BookmarksPage()),
       ),
     );
-    await tester.pump();
+    await tester.pumpAndSettle();
     final mat = tester.widget<Material>(find.ancestor(of: find.text('书签书'), matching: find.byType(Material)).first);
     expect(mat.borderRadius, equals(BorderRadius.circular(6)));
   });
@@ -490,7 +517,7 @@ void main() {
 
     final todayLabel = '${now.year}年${now.month}月${now.day}日，30 分钟';
     final cell = find.byTooltip(todayLabel);
-    await tester.ensureVisible(cell);
+    await tester.scrollUntilVisible(cell, 300, scrollable: find.byType(Scrollable).first);
     await tester.tap(cell);
     await tester.pump();
     expect(find.textContaining('${now.year}年${now.month}月${now.day}日 · 30 分钟'), findsOneWidget);
@@ -514,7 +541,12 @@ void main() {
     expect(size.width, greaterThanOrEqualTo(44));
     expect(size.height, greaterThanOrEqualTo(44));
 
-    await tester.tap(star3);
+    await tester.ensureVisible(star3);
+    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      await tester.tap(star3);
+      await Hive.box('session').flush();
+    });
     await tester.pump();
     expect(ReadState.rating('60'), 3);
     expect(find.text('还不错'), findsOneWidget);
