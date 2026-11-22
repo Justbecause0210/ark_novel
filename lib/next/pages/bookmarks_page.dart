@@ -7,9 +7,9 @@ import '../bookmarks.dart';
 import '../cache.dart';
 import '../library.dart' show LibraryStore;
 import '../reader/reader_page.dart' show bookmarkPage;
-import '../router.dart';
+import '../routes.dart';
 import '../stats.dart';
-import '../volumes.dart';
+import '../volume_covers.dart';
 import '../widgets.dart';
 import 'updates_page.dart';
 import '../text.dart';
@@ -64,7 +64,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
         color: scheme.error,
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: const Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.delete_outline, color: Colors.white), SizedBox(width: 6), Text('删除', style: TextStyle(color: Colors.white))]),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.delete_outline, color: scheme.onError), const SizedBox(width: 6), Text('删除', style: TextStyle(color: scheme.onError))]),
       ),
       child: InkWell(
         // 位置随路由参数传过去，不覆盖真正的阅读进度
@@ -115,6 +115,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
       ),
     );
 
+    final cardRadius = (theme.cardTheme.shape as RoundedRectangleBorder?)?.borderRadius ?? BorderRadius.circular(16);
     return Scaffold(
       appBar: AppBar(title: const Text('书签')),
       body: all.isEmpty
@@ -125,7 +126,7 @@ class _BookmarksPageState extends ConsumerState<BookmarksPage> {
                 for (final e in books.entries) ...[
                   Material(
                     color: scheme.surfaceContainerLowest,
-                    borderRadius: BorderRadius.circular(16),
+                    borderRadius: cardRadius,
                     clipBehavior: Clip.antiAlias,
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
