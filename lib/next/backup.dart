@@ -18,7 +18,7 @@ class Backup {
   static Box get _box => Hive.box('session');
 
   static const _pending = 'restore_pending';
-  static const _dirs = ['avatar', 'font'];
+  static const _dirs = ['avatar', 'font', 'reader_bg'];
 
   /// 登录信息、代理、WebDAV 账号和这台设备的同步身份留在本机：不进备份，恢复时也不动。
   /// `sync:device` 跟着备份走的话，恢复到另一台设备后两台用同一个 ID，同步时互相覆盖、也不再合并对方。
@@ -181,9 +181,10 @@ class Backup {
     // 备份是哪台设备的（旧版备份记在 box 的 sync:device 里）
     final from = m['device'] ?? saved['sync:device'];
     saved.removeWhere((k, _) => _isLocal(k));
-    // 这两个存的是绝对路径，换设备、换包名后要指到新位置
-    if (saved['avatar'] case final String v) saved['avatar'] = p.join(supportDir, 'avatar', p.basename(v));
-    if (saved['font:path'] case final String v) saved['font:path'] = p.join(supportDir, 'font', p.basename(v));
+    // 这些存的是绝对路径，换设备、换包名后要指到新位置
+    if (saved['avatar'] case final String v when v.isNotEmpty) saved['avatar'] = p.join(supportDir, 'avatar', p.basename(v));
+    if (saved['font:path'] case final String v when v.isNotEmpty) saved['font:path'] = p.join(supportDir, 'font', p.basename(v));
+    if (saved['reader_bg:path'] case final String v when v.isNotEmpty) saved['reader_bg:path'] = p.join(supportDir, 'reader_bg', p.basename(v));
     final box = await Hive.openBox('session');
     await box.deleteAll(box.keys.whereType<String>().where((k) => !_isLocal(k)).toList());
     await box.putAll(saved);

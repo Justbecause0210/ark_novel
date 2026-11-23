@@ -9,6 +9,7 @@ class Routes {
   static const bookshelf = '/bookshelf';
   static const updates = '/updates';
   static const stats = '/stats';
+  static String yearlyReport([int? year]) => year == null ? '/stats/yearly' : '/stats/yearly?y=$year';
   static const bookmarks = '/bookmarks';
   static String report(String aid, {int? vol}) => '/report/$aid${vol == null ? '' : '?v=$vol'}';
   static const wall = '/wall';

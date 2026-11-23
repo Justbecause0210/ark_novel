@@ -67,7 +67,7 @@ class SyncMerge {
   static Iterable<String> _keys(String prefix) => _box.keys.whereType<String>().where((k) => k.startsWith(prefix));
 
   /// 书架和更新偏好里跨设备同步的：列数、上次停在的标签各设备自己的。
-  static bool isShelfPref(String k) => (k.startsWith('p.shelf.') || k.startsWith('p.upd.')) && !{P.colsPortrait, P.colsLandscape, P.lastTab}.any((x) => k == 'p.$x');
+  static bool isShelfPref(String k) => (k.startsWith('p.shelf.') || k.startsWith('p.upd.') || k.startsWith('p.stats.')) && !{P.colsPortrait, P.colsLandscape, P.lastTab}.any((x) => k == 'p.$x');
 
   /// 头像图片不进快照：单独传成 `<设备ID>.avatar`，变了才传；快照里只记时间和文件名。
   static Map<String, dynamic>? avatarSnapshot(String deviceId) {

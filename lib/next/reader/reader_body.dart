@@ -18,6 +18,7 @@ import '../widgets.dart';
 import 'page_curl.dart';
 import 'page_physics.dart';
 import 'paginator.dart';
+import 'reader_chrome.dart';
 import 'reader_image_viewer.dart';
 
 /// 章节：正文（已套用替换规则、统一缩进）、插图地址、高亮位置。
@@ -104,6 +105,9 @@ class ReaderNav {
 
   /// 滚动模式：按像素滚动；翻页模式不用
   void Function(double)? scrollBy;
+
+  /// 滚动模式：自动滚屏每帧直接步进像素，返回 true 正在滚 / false 已到底 / null 未就绪
+  bool? Function(double)? autoScrollStep;
 
   /// 翻页模式：当前第几屏（从 0 起）、共几屏，底部进度条用；滚动模式不用
   final page = ValueNotifier<(int, int)>((0, 0));
@@ -486,6 +490,8 @@ class ScrollBody extends StatefulWidget {
     this.tapInvert = 0,
     this.onPullDown,
     this.marked,
+    this.onUserInteract,
+    this.showHeader = false,
   });
 
   final int tapZone;
@@ -494,6 +500,8 @@ class ScrollBody extends StatefulWidget {
   /// 在章首继续往下拉：加 / 取消书签；[marked] 是当前位置有没有书签
   final VoidCallback? onPullDown;
   final bool Function()? marked;
+  final VoidCallback? onUserInteract;
+  final bool showHeader;
   final Chapter chapter;
   final SpanOf spanOf;
   final InlineSpan Function(int from, int to, (int, int)? hl)? spanOfHighlight;
@@ -535,6 +543,7 @@ class _ScrollBodyState extends State<ScrollBody> {
   final _controller = ScrollController();
   final _textKey = GlobalKey();
   double _padTop = 0; // 正文第一行到滚动内容顶部的距离（含章节标题）
+  DateTime _lastAutoReport = DateTime.fromMillisecondsSinceEpoch(0);
 
   void _followOffset(int f) {
     if (!mounted || !_controller.hasClients) return;
@@ -552,6 +561,27 @@ class _ScrollBodyState extends State<ScrollBody> {
     if (hl != null) _followOffset(hl.$1);
   }
 
+  bool? _autoStep(double dy) {
+    if (!mounted || !_controller.hasClients) return null;
+    final pos = _controller.position;
+    if (pos.maxScrollExtent <= 0 || pos.pixels >= pos.maxScrollExtent - 1.5) {
+      widget.onEnd();
+      return false;
+    }
+    final next = (pos.pixels + dy).clamp(0.0, pos.maxScrollExtent);
+    _controller.jumpTo(next);
+    final now = DateTime.now();
+    if (now.difference(_lastAutoReport) >= const Duration(milliseconds: 500) || next >= pos.maxScrollExtent - 1.5) {
+      _lastAutoReport = now;
+      widget.onOffset(_charAtTop());
+    }
+    if (next >= pos.maxScrollExtent - 1.5) {
+      widget.onEnd();
+      return false;
+    }
+    return true;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -560,6 +590,7 @@ class _ScrollBodyState extends State<ScrollBody> {
       ?..next = (() => _page(1))
       ..prev = (() => _page(-1))
       ..scrollBy = _nudge
+      ..autoScrollStep = _autoStep
       ..toPage = null
       ..toFraction = ((f) {
         if (_controller.hasClients) _controller.jumpTo(f.clamp(0.0, 1.0) * _controller.position.maxScrollExtent);
@@ -640,12 +671,16 @@ class _ScrollBodyState extends State<ScrollBody> {
     final hasText = c.text.trim().isNotEmpty;
     final width = MediaQuery.sizeOf(context).width - widget.margin * 2;
     final head = hasText ? headingHeight(widget.title, widget.style, width) : 0.0;
-    final padTop = MediaQuery.viewPaddingOf(context).top + 24;
+    final padTop = MediaQuery.viewPaddingOf(context).top + (widget.showHeader ? 36 : 24);
     _padTop = padTop + head;
-    return NotificationListener<ScrollEndNotification>(
+    return NotificationListener<ScrollNotification>(
       onNotification: (n) {
-        widget.onOffset(_charAtTop());
-        if (n.metrics.maxScrollExtent <= 0 || n.metrics.pixels >= n.metrics.maxScrollExtent - 40) widget.onEnd();
+        if (n is ScrollStartNotification && n.dragDetails != null) {
+          widget.onUserInteract?.call();
+        } else if (n is ScrollEndNotification) {
+          widget.onOffset(_charAtTop());
+          if (n.metrics.maxScrollExtent <= 0 || n.metrics.pixels >= n.metrics.maxScrollExtent - 40) widget.onEnd();
+        }
         return false;
       },
       child: TapDetector(
@@ -662,8 +697,10 @@ class _ScrollBodyState extends State<ScrollBody> {
           }
           switch (tapActionAt(widget.tapZone, widget.tapInvert, local, size, paged: false)) {
             case TapAction.prev:
+              widget.onUserInteract?.call();
               _page(-1);
             case TapAction.next:
+              widget.onUserInteract?.call();
               _page(1);
             case TapAction.menu:
               widget.onTapZone();
@@ -866,7 +903,16 @@ class PagedBody extends StatefulWidget {
     this.lead = 0,
     this.arrivedBack = false,
     this.onTurn,
+    this.pageBackground,
+    this.backgroundKey,
+    this.chromeConfig,
+    this.onUserInteract,
   });
+
+  final Widget? pageBackground;
+  final Object? backgroundKey;
+  final ReaderChromeConfig? chromeConfig;
+  final VoidCallback? onUserInteract;
 
   /// 相邻章节已经加载好时传进来：翻到头时接着翻过去，不用另外的换章动画，双页时还用来补空着的半边
   final ChapterPeek? prevChapter;
@@ -992,6 +1038,7 @@ class _PagedBodyState extends State<PagedBody> {
     widget.nav
       ?..next = (() => _step(1))
       ..prev = (() => _step(-1))
+      ..autoScrollStep = null
       ..toFraction = null
       ..toPage = _jump;
   }
@@ -1253,7 +1300,25 @@ class _PagedBodyState extends State<PagedBody> {
     final end = i + 1 < f.starts.length ? f.starts[i + 1] : c.text.length;
     final faint = TextStyle(fontSize: 11, color: widget.color.withValues(alpha: 0.5));
     final view = MediaQuery.viewPaddingOf(context);
-    final progress = chrome == _Chrome.left ? '' : '${i + 1}/${f.total} · ${((f.volumeProgress?.call((i + 1) / f.total) ?? (i + 1) / f.total) * 100).floor()}%';
+    final cfg = widget.chromeConfig ?? const ReaderChromeConfig();
+    final frac = f.total > 0 ? (i + 1) / f.total : 1.0;
+    final volProg = f.volumeProgress?.call(frac) ?? frac;
+    final pageProgress = '${i + 1}/${f.total} · ${(volProg * 100).floor()}%';
+    final volProgressText = '本卷 ${(volProg * 100).floor()}%';
+    final needEta = cfg.headerLeft == ReaderChromeField.volumeEta ||
+        cfg.headerRight == ReaderChromeField.volumeEta ||
+        cfg.footerLeft == ReaderChromeField.volumeEta ||
+        cfg.footerRight == ReaderChromeField.volumeEta;
+    final etaText = needEta ? (cfg.volumeEta?.call(frac) ?? volProgressText) : '';
+    var hLeft = chrome == _Chrome.right ? ReaderChromeField.empty : cfg.headerLeft;
+    var hRight = chrome == _Chrome.left ? ReaderChromeField.empty : cfg.headerRight;
+    // 首屏已展示大号章节标题时，页眉不再重复显示章节名
+    if (i == 0 && f.head > 0) {
+      if (hLeft == ReaderChromeField.chapterTitle) hLeft = ReaderChromeField.empty;
+      if (hRight == ReaderChromeField.chapterTitle) hRight = ReaderChromeField.empty;
+    }
+    final fLeft = chrome == _Chrome.right ? ReaderChromeField.empty : cfg.footerLeft;
+    final fRight = chrome == _Chrome.left ? ReaderChromeField.empty : cfg.footerRight;
     final useLiveHighlight = live && identical(c, _c) && widget.highlight != null && widget.spanOfHighlight != null;
     return Stack(
       children: [
@@ -1268,8 +1333,40 @@ class _PagedBodyState extends State<PagedBody> {
                 )
               : material.Text.rich(f.spanOf(f.starts[i], end), key: live ? _keyFor(i) : null, textScaler: TextScaler.noScaling, strutStyle: readerStrut(widget.style)),
         ),
-        if ((i > 0 || f.head == 0) && chrome != _Chrome.right) Positioned(top: view.top + 10, left: widget.margin, right: widget.margin, child: material.Text(f.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: faint)),
-        if (widget.showFooter) Positioned(bottom: view.bottom + 10, left: widget.margin, right: widget.margin, child: ReaderFooter(status: chrome == _Chrome.right ? null : widget.status, right: progress, style: faint)),
+        if (hLeft != ReaderChromeField.empty || hRight != ReaderChromeField.empty)
+          Positioned(
+            top: view.top + 10,
+            left: widget.margin,
+            right: widget.margin,
+            child: ReaderChromeRow(
+              leftField: hLeft,
+              rightField: hRight,
+              style: faint,
+              chapterTitle: f.title,
+              bookTitle: cfg.bookTitle,
+              status: widget.status,
+              pageProgress: pageProgress,
+              volumeEta: etaText,
+              volumeProgressText: volProgressText,
+            ),
+          ),
+        if (widget.showFooter && (fLeft != ReaderChromeField.empty || fRight != ReaderChromeField.empty))
+          Positioned(
+            bottom: view.bottom + 10,
+            left: widget.margin,
+            right: widget.margin,
+            child: ReaderChromeRow(
+              leftField: fLeft,
+              rightField: fRight,
+              style: faint,
+              chapterTitle: f.title,
+              bookTitle: cfg.bookTitle,
+              status: widget.status,
+              pageProgress: pageProgress,
+              volumeEta: etaText,
+              volumeProgressText: volProgressText,
+            ),
+          ),
       ],
     );
   }
@@ -1289,8 +1386,10 @@ class _PagedBodyState extends State<PagedBody> {
     }
     switch (tapActionAt(widget.tapZone, widget.tapInvert, local, size, paged: true)) {
       case TapAction.prev:
+        widget.onUserInteract?.call();
         _step(-1);
       case TapAction.next:
+        widget.onUserInteract?.call();
         _step(1);
       case TapAction.menu:
         widget.onTapZone();
@@ -1381,12 +1480,14 @@ class _PagedBodyState extends State<PagedBody> {
             firstIndex: _canTurnPrev ? -1 : 0,
             initialIndex: _page,
             background: widget.background,
-            cacheKey: Object.hash(sig, widget.background, widget.color, widget.showFooter, widget.headingAccent?.$1, _prev?.starts.length, _next?.starts.length, _c.marks.length),
+            pageBackground: widget.pageBackground,
+            cacheKey: Object.hash(sig, widget.background, widget.backgroundKey, widget.chromeConfig?.layoutSignature, widget.color, widget.showFooter, widget.headingAccent?.$1, _prev?.starts.length, _next?.starts.length, _c.marks.length),
             cacheInvalidator: widget.status,
             pageBuilder: (context, i, live) => _pageContent(context, i, live, pad),
             onIndexChanged: _changed,
             onReachStart: _reachStart,
             onReachEnd: _reachEnd,
+            onUserDragStart: widget.onUserInteract,
           );
         } else {
           final base = _canTurnPrev ? 1 : 0;
@@ -1400,6 +1501,7 @@ class _PagedBodyState extends State<PagedBody> {
               if (n is ScrollStartNotification) {
                 _scrolling = true;
                 _dragFrom = n.dragDetails == null ? null : _controller?.page;
+                if (n.dragDetails != null) widget.onUserInteract?.call();
               }
               // 第一页往前滑、最后一页往后滑：松手后切到上一章 / 下一章
               if (n is OverscrollNotification) _overscroll = n.overscroll;

@@ -17,7 +17,9 @@ import '../theme.dart';
 import '../theme_doodle.dart';
 import '../theme_squire.dart';
 import '../x_list.dart';
+import 'reader_bg.dart';
 import 'reader_body.dart';
+import 'reader_chrome.dart';
 import 'reader_tts.dart';
 
 /// 阅读器底色与前景色。
@@ -716,6 +718,55 @@ Future<void> showReaderSettingsSheet(
                                       ],
                                     ),
                                   ),
+                                  XChips<int>(
+                                    title: '纸张纹理',
+                                    value: prefs.bgTexture,
+                                    options: kReaderBgTextures,
+                                    onChanged: (v) => set(prefs.copyWith(bgTexture: v)),
+                                  ),
+                                  if (!isWebPreview)
+                                    () {
+                                      final bgImg = ref.watch(readerBgImageProvider);
+                                      return Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          XTile(
+                                            title: '自定义背景图',
+                                            subtitle: bgImg != null ? '已应用本地背景图片' : '叠加本地图片并保留护眼遮罩',
+                                            trailing: Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              spacing: 6,
+                                              children: [
+                                                OutlinedButton(
+                                                  style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 12)),
+                                                  onPressed: () => ref.read(readerBgImageProvider.notifier).pick(),
+                                                  child: Text(bgImg == null ? '选图' : '更换'),
+                                                ),
+                                                if (bgImg != null)
+                                                  TextButton(
+                                                    style: TextButton.styleFrom(visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                                    onPressed: () => ref.read(readerBgImageProvider.notifier).clear(),
+                                                    child: const Text('清除'),
+                                                  ),
+                                              ],
+                                            ),
+                                          ),
+                                          if (bgImg != null)
+                                            XSlider(
+                                              compact: true,
+                                              title: '背景浓度',
+                                              label: '${(prefs.bgImageOpacity * 100).round()}%',
+                                              slider: Slider(
+                                                min: 0.05,
+                                                max: 0.85,
+                                                divisions: 16,
+                                                value: prefs.bgImageOpacity.clamp(0.05, 0.85),
+                                                onChanged: (v) => set(prefs.copyWith(bgImageOpacity: v)),
+                                              ),
+                                            ),
+                                        ],
+                                      );
+                                    }(),
                                 ],
                                 if (currentTab == 1) ...[
                                   _LayoutSlider(title: '字号', label: (v) => '${v.round()}', min: 14, max: 32, divisions: 18, value: prefs.fontSize, onCommit: (v) => set(prefs.copyWith(fontSize: v))),
@@ -757,6 +808,12 @@ Future<void> showReaderSettingsSheet(
                                   XSwitch(title: '沉浸式阅读', value: prefs.fullscreen, onChanged: (v) => set(prefs.copyWith(fullscreen: v))),
                                   XSwitch(title: '页脚信息', value: prefs.showStatus, onChanged: (v) => set(prefs.copyWith(showStatus: v))),
                                   XTile(
+                                    title: '页眉与页脚字段',
+                                    subtitle: '${ReaderChromeField.labels[prefs.headerLeft] ?? '留空'} · ${ReaderChromeField.labels[prefs.footerRight] ?? '留空'}',
+                                    trailing: const Icon(Icons.chevron_right),
+                                    onTap: () => _showChromeFieldsSheet(context, themed),
+                                  ),
+                                  XTile(
                                     title: '朗读设置',
                                     trailing: const Icon(Icons.chevron_right),
                                     onTap: () {
@@ -789,6 +846,63 @@ Future<void> showReaderSettingsSheet(
     ),
   );
 }
+
+/// 页眉 / 页脚字段配置弹窗（沿用当前阅读器主题，一键挑选各位置显示项）。
+Future<void> _showChromeFieldsSheet(BuildContext context, ThemeData sheetTheme) => showModalBottomSheet<void>(
+  context: context,
+  isScrollControlled: true,
+  showDragHandle: true,
+  backgroundColor: sheetTheme.scaffoldBackgroundColor,
+  builder: (_) => Theme(
+    data: sheetTheme,
+    child: Consumer(
+      builder: (context, ref, _) {
+        final prefs = ref.watch(readerPrefsProvider);
+        void set(ReaderPrefs p) => ref.read(readerPrefsProvider.notifier).update(p);
+        final isDefault = prefs.headerLeft == ReaderChromeField.chapterTitle &&
+            prefs.headerRight == ReaderChromeField.empty &&
+            prefs.footerLeft == ReaderChromeField.timeAndBattery &&
+            prefs.footerRight == ReaderChromeField.pageOrProgress;
+        return SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.only(bottom: 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 12, 4),
+                  child: Row(
+                    children: [
+                      const Expanded(child: Text('页眉与页脚字段', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700))),
+                      if (!isDefault)
+                        TextButton(
+                          onPressed: () => set(
+                            prefs.copyWith(
+                              headerLeft: ReaderChromeField.chapterTitle,
+                              headerRight: ReaderChromeField.empty,
+                              footerLeft: ReaderChromeField.timeAndBattery,
+                              footerRight: ReaderChromeField.pageOrProgress,
+                            ),
+                          ),
+                          child: const Text('恢复默认'),
+                        ),
+                    ],
+                  ),
+                ),
+                XChips<int>(title: '页眉左侧', value: prefs.headerLeft, options: ReaderChromeField.labels, onChanged: (v) => set(prefs.copyWith(headerLeft: v))),
+                XChips<int>(title: '页眉右侧', value: prefs.headerRight, options: ReaderChromeField.labels, onChanged: (v) => set(prefs.copyWith(headerRight: v))),
+                const XDivider(),
+                XChips<int>(title: '页脚左侧', value: prefs.footerLeft, options: ReaderChromeField.labels, onChanged: (v) => set(prefs.copyWith(footerLeft: v))),
+                XChips<int>(title: '页脚右侧', value: prefs.footerRight, options: ReaderChromeField.labels, onChanged: (v) => set(prefs.copyWith(footerRight: v))),
+              ],
+            ),
+          ),
+        );
+      },
+    ),
+  ),
+);
 
 /// 字号、行距、页边距：拖动时只改数字，松手才生效。每改一档都要整章重新排版，拖动中每档都排一次会卡顿。
 class _LayoutSlider extends StatefulWidget {

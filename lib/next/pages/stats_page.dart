@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../data/wenku8/wenku8_parser.dart';
+import '../app_prefs.dart';
 import '../cache.dart';
 import '../history.dart';
 import '../progress.dart';
@@ -42,6 +43,15 @@ int? charsPerMinute(Iterable<(int, int)> samples) {
   final ok = samples.where((e) => e.$2 >= 60).toList();
   if (ok.length < 3) return null;
   return ok.fold(0, (a, e) => a + e.$1) * 60 ~/ ok.fold(0, (a, e) => a + e.$2);
+}
+
+/// 阅读目标完成度：[target] <= 0 或 [current] <= 0 返回 0%；未达标时向下取整至 0~99%，达标后为 100% 且 [reached] 为 true。
+({double ratio, int percent, bool reached}) readingGoalProgress(int current, int target) {
+  if (target <= 0 || current <= 0) return (ratio: 0.0, percent: 0, reached: false);
+  final reached = current >= target;
+  final ratio = (current / target).clamp(0.0, 1.0);
+  final percent = reached ? 100 : (current * 100 ~/ target).clamp(0, 99);
+  return (ratio: ratio, percent: percent, reached: reached);
 }
 
 /// 在读的一本：读到的那卷第几卷、读了几章 / 共几章，按读这本书的速度估计读完这卷还要多少秒（数据不够为 null）
@@ -259,11 +269,95 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     );
   }
 
+  Future<void> _pickGoal({
+    required String title,
+    required String unit,
+    required String prefKey,
+    required int current,
+    required List<int> presets,
+    required int maxVal,
+  }) async {
+    final ctrl = TextEditingController(text: current > 0 && !presets.contains(current) ? '$current' : '');
+    final picked = await showModalBottomSheet<int>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetCtx) {
+        final scheme = Theme.of(sheetCtx).colorScheme;
+        String? err;
+        return StatefulBuilder(
+          builder: (ctx, setLocal) => Padding(
+            padding: EdgeInsets.fromLTRB(20, 4, 20, MediaQuery.viewInsetsOf(ctx).bottom + 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final v in [0, ...presets])
+                      ChoiceChip(
+                        label: Text(v == 0 ? '关闭目标' : '$v $unit'),
+                        selected: current == v,
+                        showCheckmark: false,
+                        selectedColor: scheme.primary.withValues(alpha: 0.14),
+                        labelStyle: TextStyle(color: current == v ? scheme.primary : scheme.onSurface, fontWeight: current == v ? FontWeight.w600 : null),
+                        side: BorderSide(color: current == v ? scheme.primary.withValues(alpha: 0.5) : scheme.outline),
+                        onSelected: (_) => Navigator.pop(sheetCtx, v),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: ctrl,
+                        keyboardType: TextInputType.number,
+                        decoration: InputDecoration(
+                          isDense: true,
+                          label: Text('自定义（$unit）'),
+                          hintText: '1 ~ $maxVal',
+                          errorText: err,
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    FilledButton(
+                      onPressed: () {
+                        final v = int.tryParse(ctrl.text.trim());
+                        if (v == null || v < 1 || v > maxVal) {
+                          setLocal(() => err = '请输入 1 ~ $maxVal');
+                          return;
+                        }
+                        Navigator.pop(sheetCtx, v);
+                      },
+                      child: const Text('确定'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) => ctrl.dispose());
+    if (picked != null && mounted) {
+      ref.read(appPrefsProvider.notifier).set(prefKey, picked);
+    }
+  }
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final volVersion = ref.watch(volumeChangesProvider);
+    final dailyGoal = ref.watch(appPref(P.statsDailyGoal, 0));
+    final yearlyVolGoal = ref.watch(appPref(P.statsYearlyVolGoal, 0));
     final queue = ref.read(volumeCoverQueueProvider);
     final now = DateTime.now();
     final snap = _computeSnapshot(now, volVersion);
@@ -271,6 +365,8 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     final perBook = snap.perBook;
     final total = snap.total;
     final today = snap.today;
+    final todayMins = today <= 0 ? 0 : (today + 59) ~/ 60;
+    final dailyProg = readingGoalProgress(todayMins, dailyGoal);
     final weekSum = snap.weekSum;
     final streak = snap.streak;
     final top = snap.top;
@@ -300,14 +396,36 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     final booksInRange = snap.booksMatching((d) => picked != null ? d.startsWith(picked.$4) : d.compareTo(from) >= 0);
 
     final reading = snap.reading;
+    final volGoalProg = readingGoalProgress(snap.doneYearCount, yearlyVolGoal);
     final perMonth = snap.perMonth;
     final maxMonth = snap.maxMonth;
     final speed = snap.speed;
+    void editDailyGoal() => _pickGoal(
+      title: '每日阅读目标',
+      unit: '分钟',
+      prefKey: P.statsDailyGoal,
+      current: dailyGoal,
+      presets: const [15, 30, 45, 60, 90, 120],
+      maxVal: 1440,
+    );
+    void editYearlyVolGoal() => _pickGoal(
+      title: '年度完卷目标',
+      unit: '卷',
+      prefKey: P.statsYearlyVolGoal,
+      current: yearlyVolGoal,
+      presets: const [12, 24, 36, 50, 100],
+      maxVal: 9999,
+    );
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('阅读统计'),
         actions: [
+          if (total > 0 || snap.doneYearCount > 0)
+            TextButton(
+              onPressed: () => context.push(Routes.yearlyReport(now.year)),
+              child: const Text('年度报告'),
+            ),
           if (perBook.isNotEmpty)
             TextButton(
               onPressed: () async {
@@ -323,10 +441,10 @@ class _StatsPageState extends ConsumerState<StatsPage> {
           : contentWidth(ListView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
               children: [
-                // 今天
+                // 今天 + 每日目标环 + 连续天数
                 card(
                   Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
                       Expanded(
                         child: Column(
@@ -336,7 +454,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                             Text.rich(
                               TextSpan(
                                 children: [
-                                  TextSpan(text: '${(today / 60).ceil()}', style: theme.textTheme.displaySmall?.copyWith(fontWeight: FontWeight.w600, color: scheme.primary)),
+                                  TextSpan(text: '$todayMins', style: theme.textTheme.displaySmall?.copyWith(fontWeight: FontWeight.w600, color: scheme.primary)),
                                   TextSpan(text: ' 分钟', style: theme.textTheme.titleMedium),
                                 ],
                               ),
@@ -345,6 +463,46 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                           ],
                         ),
                       ),
+                      Tooltip(
+                        message: hz(context, '设置每日阅读目标'),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: editDailyGoal,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SizedBox(
+                                  width: 54,
+                                  height: 54,
+                                  child: CustomPaint(
+                                    painter: _GoalRingPainter(
+                                      ratio: dailyGoal > 0 ? dailyProg.ratio : 0,
+                                      trackColor: scheme.primary.withValues(alpha: 0.14),
+                                      fillColor: dailyProg.reached ? const Color(0xFF34C759) : scheme.primary,
+                                    ),
+                                    child: Center(
+                                      child: dailyGoal > 0
+                                          ? Text(
+                                              '${dailyProg.percent}%',
+                                              style: theme.textTheme.labelMedium?.copyWith(
+                                                fontWeight: FontWeight.w700,
+                                                color: dailyProg.reached ? const Color(0xFF34C759) : scheme.primary,
+                                              ),
+                                            )
+                                          : Icon(Icons.flag_outlined, size: 20, color: scheme.onSurfaceVariant),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(dailyGoal > 0 ? '$todayMins/$dailyGoal 分' : '设目标', style: muted),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
                       Column(
                         children: [
                           Icon(Icons.local_fire_department_rounded, color: streak > 0 ? const Color(0xFFFF9500) : scheme.outline, size: 30),
@@ -352,6 +510,33 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                           Text('连续阅读', style: muted),
                         ],
                       ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // 年度阅读报告入口卡片
+                card(
+                  onTap: () => context.push(Routes.yearlyReport(now.year)),
+                  Row(
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(color: scheme.primary.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(12)),
+                        child: Icon(Icons.auto_awesome_rounded, color: scheme.primary, size: 22),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${now.year} 年度阅读报告', style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700)),
+                            const SizedBox(height: 2),
+                            Text('年度时长、最爱作品与读者称号，支持生成长图分享', style: muted),
+                          ],
+                        ),
+                      ),
+                      Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
                     ],
                   ),
                 ),
@@ -546,10 +731,68 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                       Row(
                         children: [
                           Expanded(child: Text('今年读完的卷', style: theme.textTheme.titleMedium)),
+                          Tooltip(
+                            message: hz(context, '设置年度完卷目标'),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(999),
+                              onTap: editYearlyVolGoal,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: scheme.primary.withValues(alpha: 0.10),
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Text(
+                                  yearlyVolGoal > 0 ? '目标 $yearlyVolGoal 卷' : '设目标',
+                                  style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary, fontWeight: FontWeight.w600),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
                           Text('${snap.doneYearCount} 卷', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600, color: scheme.primary)),
                           Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
                         ],
                       ),
+                      if (yearlyVolGoal > 0) ...[
+                        const SizedBox(height: 10),
+                        InkWell(
+                          borderRadius: BorderRadius.circular(8),
+                          onTap: editYearlyVolGoal,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: LinearProgressIndicator(
+                                  value: volGoalProg.ratio,
+                                  minHeight: 6,
+                                  color: volGoalProg.reached ? const Color(0xFF34C759) : scheme.primary,
+                                  backgroundColor: scheme.primary.withValues(alpha: 0.12),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      volGoalProg.reached ? '已达成年度目标 · ${snap.doneYearCount} / $yearlyVolGoal 卷' : '年度目标进度 ${snap.doneYearCount} / $yearlyVolGoal 卷',
+                                      style: muted,
+                                    ),
+                                  ),
+                                  Text(
+                                    '${volGoalProg.percent}%',
+                                    style: theme.textTheme.labelMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                      color: volGoalProg.reached ? const Color(0xFF34C759) : scheme.primary,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 12),
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.end,
@@ -843,4 +1086,41 @@ class _HeatmapState extends State<_Heatmap> {
       },
     );
   }
+}
+
+/// 每日阅读目标环形进度绘制器。
+class _GoalRingPainter extends CustomPainter {
+  const _GoalRingPainter({required this.ratio, required this.trackColor, required this.fillColor});
+
+  final double ratio;
+  final Color trackColor;
+  final Color fillColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const stroke = 5.0;
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = (math.min(size.width, size.height) - stroke) / 2;
+    final track = Paint()
+      ..color = trackColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke;
+    canvas.drawCircle(center, radius, track);
+    if (ratio <= 0) return;
+    final arc = Paint()
+      ..color = fillColor
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = stroke
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      -math.pi / 2,
+      math.pi * 2 * ratio.clamp(0.0, 1.0),
+      false,
+      arc,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_GoalRingPainter old) => old.ratio != ratio || old.trackColor != trackColor || old.fillColor != fillColor;
 }

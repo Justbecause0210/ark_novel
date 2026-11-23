@@ -21,6 +21,7 @@ import 'pages/search_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/storage_page.dart';
 import 'pages/stats_page.dart';
+import 'pages/yearly_report_page.dart';
 import 'pages/updates_page.dart';
 import 'pages/volumes_page.dart';
 import 'pages/wall_page.dart';
@@ -64,6 +65,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.bookmarks, builder: (_, _) => const BookmarksPage()),
       GoRoute(path: '/report/:aid', builder: (_, state) => ReportPage(aid: state.pathParameters['aid']!, vol: int.tryParse(state.uri.queryParameters['v'] ?? ''))),
       GoRoute(path: Routes.stats, builder: (_, _) => const StatsPage()),
+      GoRoute(path: '/stats/yearly', builder: (_, state) => YearlyReportPage(year: int.tryParse(state.uri.queryParameters['y'] ?? ''))),
       GoRoute(path: Routes.wall, builder: (_, _) => const WallPage()),
       // 卷册：整页只淡入淡出，让从书架飞过来的封面和摊开的各卷当主角
       GoRoute(

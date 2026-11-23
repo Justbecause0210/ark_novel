@@ -35,7 +35,7 @@ class AppPrefs extends Notifier<int> {
   static String? _syncGroup(String key) => switch (key) {
     P.colsPortrait || P.colsLandscape || P.lastTab => null,
     P.volumeDone => 'sync:readerTs',
-    _ when key.startsWith('shelf.') || key.startsWith('upd.') => 'sync:prefsTs',
+    _ when key.startsWith('shelf.') || key.startsWith('upd.') || key.startsWith('stats.') => 'sync:prefsTs',
     _ when key.startsWith('ui.') => 'sync:appearanceTs',
     _ => null,
   };
@@ -135,6 +135,10 @@ class P {
 
   // 阅读
   static const volumeDone = 'reader.volumeDone'; // bool 读完一卷时弹庆祝卡片
+
+  // 阅读目标与统计
+  static const statsDailyGoal = 'stats.dailyGoal'; // int 每日阅读目标分钟数（0 未开启）
+  static const statsYearlyVolGoal = 'stats.yearlyVolGoal'; // int 年度目标读完卷数（0 未开启）
 
   // 数据
   static const autoClear = 'data.autoClear'; // bool 每次打开 App 自动清理读过时缓存的章节
