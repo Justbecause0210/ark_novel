@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
 import 'package:ark_novel/models/cat_chapter.dart';
@@ -156,5 +157,42 @@ void main() {
     final r2 = ReadState.readView('7');
     expect(identical(r1, r2), isTrue);
     expect(() => r1.add('c'), throwsUnsupportedError);
+  });
+
+  test('Volumes 按 aid 细粒度通知：单本书变更只刷新对应 aid 订阅者，全局广播可刷新全部并支持自动释放', () async {
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    var hitsA = 0;
+    var hitsB = 0;
+    var hitsGlobal = 0;
+    final subA = c.listen(volumeChangeForProvider('aidA'), (_, _) => hitsA++);
+    final subB = c.listen(volumeChangeForProvider('aidB'), (_, _) => hitsB++);
+    final subG = c.listen(volumeChangesProvider, (_, _) => hitsGlobal++);
+
+    await Volumes.saveCatalogue('aidA', [vol('第一卷', ['c1'])]);
+    await Volumes.setCover('aidA', '第一卷', 'https://img.example/a.jpg');
+    await Future<void>.delayed(Duration.zero);
+    expect(hitsA, greaterThanOrEqualTo(1));
+    expect(hitsB, 0);
+    expect(hitsGlobal, greaterThanOrEqualTo(1));
+
+    final aBefore = hitsA;
+    final bBefore = hitsB;
+    await Volumes.setRating('aidB', '第一卷', 5);
+    await Future<void>.delayed(Duration.zero);
+    expect(hitsA, aBefore);
+    expect(hitsB, bBefore + 1);
+
+    // 全局广播（Volumes.changes.value++）同步通知所有已订阅 aid
+    final aPrev = hitsA;
+    final bPrev = hitsB;
+    Volumes.changes.value++;
+    await Future<void>.delayed(Duration.zero);
+    expect(hitsA, aPrev + 1);
+    expect(hitsB, bPrev + 1);
+
+    subA.close();
+    subB.close();
+    subG.close();
   });
 }

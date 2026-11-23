@@ -5,12 +5,15 @@ import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show HardwareKeyboard, KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey, SystemUiOverlayStyle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../../models/cat_volume.dart';
 import '../bookmarks.dart';
 import '../cache.dart';
 import '../cover_color.dart';
+import '../image_cache.dart';
 import '../library.dart';
+import '../local_books.dart' show isLocalAid;
 import '../progress.dart';
 import '../read_state.dart';
 import '../routes.dart';
@@ -18,7 +21,7 @@ import '../settings.dart';
 import '../stats.dart';
 import '../swipe.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
+import '../volumes.dart' show Vol, Volumes, volumeChangeForProvider;
 import '../widgets.dart';
 import 'cover_picker_page.dart';
 import 'novel_page.dart';
@@ -44,9 +47,10 @@ int stackEdges(int count) => count <= 1 ? 0 : (count <= 4 ? 1 : (count <= 9 ? 2 
   return (dx: width * ((1 - s) / 2 + 0.026 * k), scale: s, dim: k <= 1 ? 0.0 : 0.12 * (k - 1));
 }
 
-/// 书架卷册模式的一叠书：第一卷的封面压着后面几卷（右边露出一条条真封面的边）。按自己的宽度排，飞的时候整叠一起放大。
+/// 书架卷册模式的一叠书：第一卷的封面压着后面几卷（右边露出一条条真封面的边）。按自身比例错开，飞的时候整叠一起放大。
+/// 主封面高优走缩略图，后置露边低优 + 限制 120px 解码，且高速甩动期间延迟加载只画纯色占位。
 class VolumeStack extends StatelessWidget {
-  const VolumeStack({super.key, required this.cover, this.behind = const [], this.aid});
+  const VolumeStack({super.key, required this.cover, this.behind = const [], this.aid, this.decodeSize});
 
   final String cover;
 
@@ -54,39 +58,131 @@ class VolumeStack extends StatelessWidget {
   final List<String> behind;
   final String? aid;
 
+  /// 外层已算好的逻辑封面尺寸：直传给 [CoverImage] 省掉嵌套 [LayoutBuilder]
+  final Size? decodeSize;
+
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, c) {
-      // 后置卷只露出 ~5px 窄边，限制解码宽度为 120px 大幅降低卷册书架内存峰值
-      Widget sheet(String url, double dim, {required bool front}) => DecoratedBox(
-        decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.32), blurRadius: 4, offset: const Offset(1.5, 0))]),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(6),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              CoverImage(url, aid: front ? aid : null, maxDecodeWidth: front ? null : 120),
-              if (dim > 0) ColoredBox(color: Colors.black.withValues(alpha: dim)),
-            ],
-          ),
+  Widget build(BuildContext context) {
+    Widget frontSheet() => DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(6),
+        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.28), blurRadius: 4, offset: const Offset(1.5, 0))],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: CoverImage(cover, aid: aid, thumbnail: true, decodeSize: decodeSize),
+      ),
+    );
+    // 后置露边只露 ~5px 窄边：去掉重阴影改用轻量描边保留层次感，高速甩动期间先纯色占位、停稳再低优加载
+    Widget behindSheet(String url, double dim) => DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.22), width: 0.7),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(6),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            _DeferredBehindCover(url: url, decodeSize: decodeSize),
+            if (dim > 0) ColoredBox(color: Colors.black.withValues(alpha: dim)),
+          ],
         ),
-      );
-      return Stack(
-        fit: StackFit.expand,
-        clipBehavior: Clip.none, // 后面几卷的边在封面右边、自己的范围外面
-        children: [
-          for (var k = behind.length; k >= 1; k--)
-            Builder(
-              builder: (context) {
-                final p = stackPose(k, c.maxWidth);
-                return Transform.translate(offset: Offset(p.dx, 0), child: Transform.scale(scale: p.scale, child: sheet(behind[k - 1], p.dim, front: false)));
-              },
-            ),
-          sheet(cover, 0, front: true),
-        ],
-      );
-    },
-  );
+      ),
+    );
+    return Stack(
+      fit: StackFit.expand,
+      clipBehavior: Clip.none, // 后面几卷的边在封面右边、自己的范围外面
+      children: [
+        for (var k = behind.length; k >= 1; k--)
+          () {
+            // stackPose(k, 1.0).dx 恰好是相对宽度的平移比例，用 FractionalTranslation 省掉 LayoutBuilder 且 Hero 飞行时自动缩放
+            final p = stackPose(k, 1.0);
+            return FractionalTranslation(
+              translation: Offset(p.dx, 0),
+              child: Transform.scale(scale: p.scale, child: behindSheet(behind[k - 1], p.dim)),
+            );
+          }(),
+        frontSheet(),
+      ],
+    );
+  }
+}
+
+/// 卷册后置露边封面：高速甩动时跳过解码与网络请求，先以封面主色纯色占位，减速或停稳后再低优加载 120px 缩略图。
+class _DeferredBehindCover extends ConsumerStatefulWidget {
+  const _DeferredBehindCover({required this.url, this.decodeSize});
+
+  final String url;
+  final Size? decodeSize;
+
+  @override
+  ConsumerState<_DeferredBehindCover> createState() => _DeferredBehindCoverState();
+}
+
+class _DeferredBehindCoverState extends ConsumerState<_DeferredBehindCover> {
+  bool _activated = false;
+  ValueNotifier<bool>? _scrolling;
+
+  void _onScrollingChanged() {
+    if (!mounted || _activated) return;
+    if (_scrolling?.value == false || !Scrollable.recommendDeferredLoadingForContext(context)) {
+      _detach();
+      setState(() => _activated = true);
+    }
+  }
+
+  void _attach(ScrollableState? scrollable) {
+    final notifier = scrollable?.position.isScrollingNotifier;
+    if (identical(_scrolling, notifier)) return;
+    _detach();
+    _scrolling = notifier;
+    _scrolling?.addListener(_onScrollingChanged);
+  }
+
+  void _detach() {
+    _scrolling?.removeListener(_onScrollingChanged);
+    _scrolling = null;
+  }
+
+  @override
+  void didUpdateWidget(_DeferredBehindCover old) {
+    super.didUpdateWidget(old);
+    if (old.url != widget.url && Scrollable.recommendDeferredLoadingForContext(context)) {
+      _activated = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _detach();
+    super.dispose();
+  }
+
+  Color? _placeholderColor() {
+    if (!Hive.isBoxOpen('session')) return null;
+    return savedCoverColor(widget.url);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = ref.read(imageStoreProvider);
+    bool memHit = false;
+    if (widget.url.isNotEmpty) {
+      try {
+        memHit = store.peekThumb(widget.url) != null;
+      } on Object {
+        memHit = store.peek(widget.url) != null;
+      }
+    }
+    if (_activated || memHit || !Scrollable.recommendDeferredLoadingForContext(context)) {
+      _activated = true;
+      _detach();
+      return CoverImage(widget.url, thumbnail: true, lowPriority: true, maxDecodeWidth: 120, decodeSize: widget.decodeSize);
+    }
+    _attach(Scrollable.maybeOf(context));
+    return ColoredBox(color: _placeholderColor() ?? Theme.of(context).colorScheme.surfaceContainerHighest);
+  }
 }
 
 /// 书架封面和轮播最前面那卷之间飞的时候：书架那叠垫底（整叠一起放大），轮播那张跟着动画淡入（返回时淡出），
@@ -140,6 +236,23 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
   bool _list = false; // 展开"全部卷"列表（和详情二选一）
   final _coverKey = GlobalKey(); // 最前面那卷的封面，翻开动画从它的位置开始
   OverlayEntry? _opening; // 正在放的翻开动画
+  Size? _carouselCoverSize;
+  final _precachedVols = <String>{};
+  int _lastPrecachedCur = -1;
+
+  void _precacheAround(int center, List<Vol> vols, String Function(Vol) coverOf) {
+    final size = _carouselCoverSize;
+    if (!mounted || size == null || vols.isEmpty) return;
+    _lastPrecachedCur = center;
+    for (var d = 1; d <= 3; d++) {
+      for (final idx in [center + d, center - d]) {
+        if (idx < 0 || idx >= vols.length) continue;
+        final url = coverOf(vols[idx]);
+        if (url.isEmpty || !_precachedVols.add(url)) continue;
+        NetImage.precache(context, url, size).ignore();
+      }
+    }
+  }
 
   /// 跟随阅读器背景色，避免夜间 / 纯黑阅读模式下翻书动画出现刺眼白闪。
   Color _readerBg(ReaderPrefs prefs, ColorScheme scheme) => switch (prefs.theme) {
@@ -325,7 +438,7 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
   @override
   Widget build(BuildContext context) {
     final aid = widget.aid;
-    ref.watch(volumeChangesProvider);
+    ref.watch(volumeChangeForProvider(aid));
     final novel = ref.watch(novelProvider(aid)).value; // 顺带把目录存下来，也用来显示章节名
     final vols = Volumes.of(aid);
     final title = LibraryStore.shown(aid, novel?.detail.title ?? (LibraryStore.get(aid)?['title'] as String?) ?? ReadingStats.info(aid).title);
@@ -367,7 +480,22 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
         cur: cur,
         intro: _intro,
         coverOf: coverOf,
-        onPage: (i) => setState(() => _cur = i),
+        onPage: (i) {
+          setState(() => _cur = i);
+          _precacheAround(i, vols, coverOf);
+        },
+        onCoverSize: (s) {
+          final changed = _carouselCoverSize == null || (_carouselCoverSize!.width - s.width).abs() > 8;
+          if (changed) {
+            _carouselCoverSize = s;
+            _precachedVols.clear();
+          }
+          if (changed || _lastPrecachedCur != cur) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _precacheAround(cur, vols, coverOf);
+            });
+          }
+        },
         coverKey: _coverKey,
         onTap: (i, v) => _tap(i, v, coverOf(v)),
         onLongPress: (v) => pickVolumeCover(context, aid, v),
@@ -441,6 +569,7 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
         bg: base,
         onClose: () => setState(() => _open = false),
         onCache: (cids) {
+          if (isLocalAid(aid)) return;
           final chs = [for (final cv in novel?.catalogue ?? const <CatVolume>[]) ...cv.chapters];
           final picked = [for (final c in chs) if (cids.contains(c.cid)) c];
           if (picked.isEmpty || novel == null) return;
@@ -577,6 +706,7 @@ class _Carousel extends StatelessWidget {
     required this.intro,
     required this.coverOf,
     required this.onPage,
+    required this.onCoverSize,
     required this.onTap,
     required this.onLongPress,
     required this.coverKey,
@@ -590,6 +720,7 @@ class _Carousel extends StatelessWidget {
   final Animation<double> intro;
   final String Function(Vol) coverOf;
   final ValueChanged<int> onPage;
+  final ValueChanged<Size> onCoverSize;
   final void Function(int, Vol) onTap;
   final ValueChanged<Vol> onLongPress;
   final GlobalKey coverKey;
@@ -603,6 +734,7 @@ class _Carousel extends StatelessWidget {
       builder: (context, c) {
         final h = c.maxHeight * 0.92;
         final w = math.min(h * kCoverAspect, c.maxWidth * 0.72);
+        onCoverSize(Size(w, w / kCoverAspect));
         final route = ModalRoute.of(context)?.animation ?? kAlwaysCompleteAnimation;
         return Stack(
           alignment: Alignment.center,
@@ -719,7 +851,7 @@ class _VolumeCard extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           ColoredBox(color: Colors.white.withValues(alpha: 0.15)),
-          RepaintBoundary(child: NetImage(url, error: const Icon(Icons.menu_book_outlined, color: Colors.white54))),
+          RepaintBoundary(child: NetImage(url, decodeSize: Size(width, width / kCoverAspect), error: const Icon(Icons.menu_book_outlined, color: Colors.white54))),
           ColoredBox(color: Colors.black.withValues(alpha: (shade + (untouched ? 0.2 : 0)).clamp(0, 0.75))),
           if (reading)
             Positioned(
@@ -917,7 +1049,7 @@ class _DetailsState extends State<_Details> {
             ),
             const SizedBox(width: 8),
             IconButton.outlined(
-              tooltip: hz(context, '简介与书评'),
+              tooltip: hz(context, isLocalAid(aid) ? '书籍详情' : '简介与书评'),
               visualDensity: VisualDensity.compact,
               style: IconButton.styleFrom(
                 foregroundColor: Colors.white,
@@ -928,17 +1060,19 @@ class _DetailsState extends State<_Details> {
               }),
               icon: const Icon(Icons.info_outline, size: 20),
             ),
-            const SizedBox(width: 6),
-            IconButton.outlined(
-              tooltip: hz(context, '换封面'),
-              visualDensity: VisualDensity.compact,
-              style: IconButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: const BorderSide(color: Colors.white38),
+            if (!isLocalAid(aid)) ...[
+              const SizedBox(width: 6),
+              IconButton.outlined(
+                tooltip: hz(context, '换封面'),
+                visualDensity: VisualDensity.compact,
+                style: IconButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  side: const BorderSide(color: Colors.white38),
+                ),
+                onPressed: () => pickVolumeCover(context, aid, v),
+                icon: const Icon(Icons.image_outlined, size: 20),
               ),
-              onPressed: () => pickVolumeCover(context, aid, v),
-              icon: const Icon(Icons.image_outlined, size: 20),
-            ),
+            ],
             const SizedBox(width: 6),
             IconButton.outlined(
               tooltip: hz(context, '阅读报告'),
@@ -962,7 +1096,7 @@ class _DetailsState extends State<_Details> {
             enabled: _picked.isEmpty,
             backdrop: Color.alphaBlend(Colors.black.withValues(alpha: 0.18), widget.bg),
             onChanged: () => setState(() {}),
-            onCache: () => widget.onCache([cid]),
+            onCache: isLocalAid(aid) ? null : () => widget.onCache([cid]),
             child: GestureDetector(
               onSecondaryTap: () => _pick(cid),
               child: ListTile(
@@ -1033,13 +1167,14 @@ class _DetailsState extends State<_Details> {
                         ),
                         TextButton(onPressed: () => _mark(true), child: const Text('已读')),
                         TextButton(onPressed: () => _mark(false), child: const Text('未读')),
-                        TextButton(
-                          onPressed: () {
-                            widget.onCache(_picked.toList());
-                            setState(_picked.clear);
-                          },
-                          child: const Text('缓存'),
-                        ),
+                        if (!isLocalAid(aid))
+                          TextButton(
+                            onPressed: () {
+                              widget.onCache(_picked.toList());
+                              setState(_picked.clear);
+                            },
+                            child: const Text('缓存'),
+                          ),
                         // 按钮全摆出来窄屏放不下，不常用的收进"更多"
                         PopupMenuButton<void Function()>(
                           tooltip: hz(context, '更多'),
@@ -1167,7 +1302,7 @@ class _VolList extends StatelessWidget {
                             child: Stack(
                               fit: StackFit.expand,
                               children: [
-                                ColoredBox(color: Colors.white10, child: NetImage(coverOf(v))),
+                                ColoredBox(color: Colors.white10, child: NetImage(coverOf(v), thumbnail: true, decodeSize: Size(w, w / kCoverAspect))),
                                 if (finished)
                                   const Positioned(
                                     top: 5,

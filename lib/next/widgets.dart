@@ -212,18 +212,93 @@ final _urlSrVersionProvider = Provider.autoDispose.family<int, String>((ref, url
   }
 });
 
+bool _shouldWatchSr(String url) => ImageStore.srSupported && (ImageStore.srAutoEnabled || wantsSr(url));
+
+Uint8List? _peekThumbSafe(ImageStore store, String url) {
+  try {
+    return store.peekThumb(url);
+  } on Object {
+    return store.peek(url);
+  }
+}
+
+Future<Uint8List> _loadThumbSafe(ImageStore store, String url, {required bool lowPriority}) {
+  try {
+    return store.loadThumb(url, lowPriority: lowPriority);
+  } on Object {
+    return store.load(url);
+  }
+}
+
+Future<Uint8List> _loadLowSafe(ImageStore store, String url) {
+  try {
+    return store.loadWithPriority(url, lowPriority: true);
+  } on Object {
+    return store.load(url);
+  }
+}
+
+void _cancelThumbSafe(ImageStore store, String url) {
+  try {
+    store.cancelThumb(url);
+  } on Object {
+    store.cancel(url);
+  }
+}
+
+bool _isThumbBakedSafe(ImageStore store, String url) {
+  try {
+    return store.isThumbBaked(url);
+  } on Object {
+    return false;
+  }
+}
+
+bool _wasFromNetworkSafe(ImageStore store, String url) {
+  try {
+    return store.wasLoadedFromNetwork(url);
+  } on Object {
+    return false;
+  }
+}
+
 final imageBytesProvider = FutureProvider.autoDispose.family<Uint8List, String>((ref, url) {
-  ref.watch(_urlSrVersionProvider(url)); // 仅订阅当前图片地址的超分版本号，避免单图超分触发全屏级失效重建
+  if (_shouldWatchSr(url)) ref.watch(_urlSrVersionProvider(url)); // 仅超分适用图订阅超分版本号，非超分图零额外 Riverpod 订阅
   final store = ref.read(imageStoreProvider);
   ref.onDispose(() => store.cancel(url)); // 没人看了（滑出屏幕），还在排队的就别下了
   return store.load(url);
 }, retry: (_, _) => null);
 
+final _imageRequestProvider = FutureProvider.autoDispose.family<Uint8List, ({String url, bool thumbnail, bool lowPriority})>((ref, req) {
+  if (_shouldWatchSr(req.url)) ref.watch(_urlSrVersionProvider(req.url));
+  final store = ref.read(imageStoreProvider);
+  if (req.thumbnail) {
+    ref.onDispose(() => _cancelThumbSafe(store, req.url));
+    return _loadThumbSafe(store, req.url, lowPriority: req.lowPriority);
+  }
+  ref.onDispose(() => store.cancel(req.url));
+  return req.lowPriority ? _loadLowSafe(store, req.url) : store.load(req.url);
+}, retry: (_, _) => null);
+
 class NetImage extends ConsumerWidget {
-  const NetImage(this.url, {super.key, this.fit = BoxFit.cover, this.loading, this.error, this.errorBuilder, this.full = false, this.maxDecodeWidth});
+  const NetImage(
+    this.url, {
+    super.key,
+    this.fit = BoxFit.cover,
+    this.alignment = Alignment.center,
+    this.loading,
+    this.error,
+    this.errorBuilder,
+    this.full = false,
+    this.maxDecodeWidth,
+    this.thumbnail = false,
+    this.lowPriority = false,
+    this.decodeSize,
+  });
 
   final String url;
   final BoxFit fit;
+  final AlignmentGeometry alignment;
   final Widget? loading;
   final Widget? error;
   final Widget Function(VoidCallback retry)? errorBuilder;
@@ -234,51 +309,88 @@ class NetImage extends ConsumerWidget {
   /// 可选解码宽度上限（物理像素，如卷册后置露出边 120px 降低内存峰值）
   final int? maxDecodeWidth;
 
+  /// 是否使用书架级磁盘缩略图（烘焙裁剪框，避免反复解码原图和二次裁剪）
+  final bool thumbnail;
+
+  /// 是否排入低优先级网络队列（如后置露边封面，避免抢占主封面带宽）
+  final bool lowPriority;
+
+  /// 已知的逻辑展示尺寸：传入后直接算解码档位，省掉图片内部的 [LayoutBuilder]
+  final Size? decodeSize;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    Widget fallback() => errorBuilder?.call(() => ref.invalidate(imageBytesProvider(url))) ?? error ?? const SizedBox.shrink();
+    final useDefaultProvider = !thumbnail && !lowPriority;
+    void retry() => useDefaultProvider
+        ? ref.invalidate(imageBytesProvider(url))
+        : ref.invalidate(_imageRequestProvider((url: url, thumbnail: thumbnail, lowPriority: lowPriority)));
+    Widget fallback() => errorBuilder?.call(retry) ?? error ?? const SizedBox.shrink();
     if (url.isEmpty) return fallback();
     final crop = splitCrop(url).crop;
-    if (isWebPreview) return _cropped(Image.network(displayImageUrl(splitCrop(url).url), fit: fit, errorBuilder: (_, _, _) => fallback()), crop);
+    if (isWebPreview) return _cropped(Image.network(displayImageUrl(splitCrop(url).url), fit: fit, alignment: alignment, errorBuilder: (_, _, _) => fallback()), crop);
     final store = ref.read(imageStoreProvider);
-    ref.watch(_urlSrVersionProvider(url));
-    Widget image(Uint8List b, {bool fade = false}) {
+    if (_shouldWatchSr(url)) ref.watch(_urlSrVersionProvider(url));
+    Widget image(Uint8List b, {bool fade = false, bool baked = false}) {
       CoverImage.clearFailed(url);
-      Widget build(ImageProvider p) => _cropped(Image(image: p, fit: fit, gaplessPlayback: true, frameBuilder: fade ? _fadeIn : null, errorBuilder: (_, _, _) => fallback()), crop);
-      if (full) return build(MemoryImage(b));
+      final effectiveCrop = baked ? null : crop;
+      Widget buildImg(ImageProvider p) => _cropped(Image(image: p, fit: fit, alignment: alignment, gaplessPlayback: true, frameBuilder: fade ? _fadeIn : null, errorBuilder: (_, _, _) => fallback()), effectiveCrop);
+      if (full) return buildImg(MemoryImage(b));
       final dpr = MediaQuery.devicePixelRatioOf(context);
-      return LayoutBuilder(
-        builder: (context, c) {
-          // 裁剪时整张图比格子大：裁出来的那块才铺满格子
-          final box = Size(_bucket(c.maxWidth * dpr / (crop?.width ?? 1)), _bucket(c.maxHeight * dpr / (crop?.height ?? 1)));
-          return build(_Fitted(url, b, box, fit == BoxFit.cover, maxDecodeWidth: maxDecodeWidth));
-        },
-      );
+      final cacheKeyUrl = thumbnail ? '$url#thumb' : url;
+      Widget fitFor(Size s) {
+        // 缩略图已烘焙裁剪框时不再除以 crop.width 放大解码宽度
+        final box = Size(_bucket(s.width * dpr / (effectiveCrop?.width ?? 1)), _bucket(s.height * dpr / (effectiveCrop?.height ?? 1)));
+        return buildImg(_Fitted(cacheKeyUrl, b, box, fit == BoxFit.cover, maxDecodeWidth: maxDecodeWidth));
+      }
+
+      if (decodeSize != null) return fitFor(decodeSize!);
+      return LayoutBuilder(builder: (context, c) => fitFor(Size(c.maxWidth, c.maxHeight)));
     }
 
     // 内存里有就同步直接画，返回页面时不会先空一帧再出来
-    final hit = store.peek(url);
-    if (hit != null) return image(hit);
-    // 不在内存里的（刚下载的、从磁盘读的）都短短淡入一下，比突然蹦出来顺眼；内存里有的上面已经同步画了
-    return ref.watch(imageBytesProvider(url)).when(skipLoadingOnRefresh: false, data: (b) => image(b, fade: true), loading: () => loading ?? const SizedBox.shrink(), error: (_, _) => fallback());
+    final hit = thumbnail ? _peekThumbSafe(store, url) : store.peek(url);
+    if (hit != null) return image(hit, baked: thumbnail && _isThumbBakedSafe(store, url));
+    // 本地磁盘秒命中直接显示（无 150ms 淡入延迟），仅网络刚下载完成的图做短淡入
+    final asyncBytes = useDefaultProvider
+        ? ref.watch(imageBytesProvider(url))
+        : ref.watch(_imageRequestProvider((url: url, thumbnail: thumbnail, lowPriority: lowPriority)));
+    return asyncBytes.when(
+      skipLoadingOnRefresh: false,
+      data: (b) => image(b, fade: _wasFromNetworkSafe(store, url), baked: thumbnail && _isThumbBakedSafe(store, url)),
+      loading: () => loading ?? const SizedBox.shrink(),
+      error: (_, _) => fallback(),
+    );
   }
 
   /// 提前下载，并按 [size]（逻辑像素，图片要放进的格子）解码进图片缓存：之后同样大小的 NetImage 直接出图。
   /// 翻页时下一页才建出来，大插图解码要一两百毫秒，不提前做就会先空一下。
   /// [decode] 为 false 时只下载（存进本机），不解码。
-  static Future<void> precache(BuildContext context, String url, Size size, {BoxFit fit = BoxFit.cover, bool decode = true}) async {
+  static Future<void> precache(
+    BuildContext context,
+    String url,
+    Size size, {
+    BoxFit fit = BoxFit.cover,
+    bool decode = true,
+    bool thumbnail = false,
+    bool lowPriority = false,
+    int? maxDecodeWidth,
+  }) async {
     if (url.isEmpty || isWebPreview) return;
+    final store = ProviderScope.containerOf(context, listen: false).read(imageStoreProvider);
     final Uint8List bytes;
     try {
-      bytes = await ProviderScope.containerOf(context, listen: false).read(imageStoreProvider).load(url);
+      bytes = thumbnail
+          ? await _loadThumbSafe(store, url, lowPriority: lowPriority)
+          : (lowPriority ? await _loadLowSafe(store, url) : await store.load(url));
     } catch (_) {
       return; // 下不下来就等真正显示时再说
     }
     if (!decode || !context.mounted) return;
-    final crop = splitCrop(url).crop;
+    final baked = thumbnail && _isThumbBakedSafe(store, url);
+    final crop = baked ? null : splitCrop(url).crop;
     final dpr = MediaQuery.devicePixelRatioOf(context);
     final box = Size(_bucket(size.width * dpr / (crop?.width ?? 1)), _bucket(size.height * dpr / (crop?.height ?? 1)));
-    await precacheImage(_Fitted(url, bytes, box, fit == BoxFit.cover), context, onError: (_, _) {});
+    await precacheImage(_Fitted(thumbnail ? '$url#thumb' : url, bytes, box, fit == BoxFit.cover, maxDecodeWidth: maxDecodeWidth), context, onError: (_, _) {});
   }
 
   /// 往上取到几个固定档位（每档大 25%）：格子大小一直在变时（比如封面飞过去的动画）不用每帧都重新解码
@@ -338,12 +450,24 @@ Widget _fadeIn(BuildContext context, Widget child, int? frame, bool sync) =>
     sync ? child : AnimatedOpacity(opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 150), child: child);
 
 class CoverImage extends ConsumerWidget {
-  const CoverImage(this.url, {super.key, this.aid, this.volumeTitle, this.maxDecodeWidth});
+  const CoverImage(
+    this.url, {
+    super.key,
+    this.aid,
+    this.volumeTitle,
+    this.maxDecodeWidth,
+    this.thumbnail = false,
+    this.lowPriority = false,
+    this.decodeSize,
+  });
 
   final String url;
   final String? aid;
   final String? volumeTitle;
   final int? maxDecodeWidth;
+  final bool thumbnail;
+  final bool lowPriority;
+  final Size? decodeSize;
 
   /// 封面加载失败的短 TTL 记录（30s）：首次偶发失败先轻量重试，避免瞬态抖动直接整轮拉黑。
   static const failedUrlTtl = Duration(seconds: 30);
@@ -384,6 +508,9 @@ class CoverImage extends ConsumerWidget {
           child: NetImage(
             url,
             maxDecodeWidth: maxDecodeWidth,
+            thumbnail: thumbnail,
+            lowPriority: lowPriority,
+            decodeSize: decodeSize,
             error: icon,
             errorBuilder: (retry) {
               final clean = splitCrop(url).url;
@@ -408,7 +535,7 @@ class CoverImage extends ConsumerWidget {
 
 /// 封面 + 书名，点击进入详情。
 class NovelCard extends StatelessWidget {
-  const NovelCard({super.key, required this.title, required this.aid, this.imageUrl, this.onTap, this.badge, this.action});
+  const NovelCard({super.key, required this.title, required this.aid, this.imageUrl, this.onTap, this.badge, this.action, this.thumbnail = true, this.decodeSize, this.cover});
 
   final String title;
   final String aid;
@@ -418,6 +545,13 @@ class NovelCard extends StatelessWidget {
 
   /// 封面右下角的按钮（书架的"继续阅读"）
   final Widget? action;
+
+  /// 网格小封面默认走磁盘缩略图，避免快滑时解码大图卡顿
+  final bool thumbnail;
+  final Size? decodeSize;
+
+  /// 可选自定义封面组件（如书架按 aid 细粒度订阅封面变更）
+  final Widget? cover;
 
   @override
   Widget build(BuildContext context) {
@@ -437,7 +571,7 @@ class NovelCard extends StatelessWidget {
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  CoverImage(imageUrl ?? Wenku8Parser.coverUrl(aid), aid: aid),
+                  cover ?? CoverImage(imageUrl ?? Wenku8Parser.coverUrl(aid), aid: aid, thumbnail: thumbnail, decodeSize: decodeSize),
                   if (badge != null) Positioned(top: 6, right: 6, child: badge!),
                   if (action != null) Positioned(right: 2, bottom: 2, child: action!),
                 ],
@@ -579,20 +713,25 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
           return false;
         },
         child: LayoutBuilder(
-          builder: (context, c) => CustomScrollView(
-            scrollCacheExtent: const ScrollCacheExtent.viewport(0.8), // 提前排上下面几行的封面
-            slivers: [
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                sliver: SliverGrid.builder(
-                  gridDelegate: novelGridDelegate(c.maxWidth, textScale: MediaQuery.textScalerOf(context).scale(1)),
-                  itemCount: items.length,
-                  itemBuilder: (context, i) => NovelCard(title: items[i].title, aid: items[i].aid, imageUrl: items[i].imageUrl),
+          builder: (context, c) {
+            final cols = gridColumns(c.maxWidth);
+            final itemW = math.max(1.0, (c.maxWidth - 32 - 14 * (cols - 1)) / cols);
+            final coverSize = Size(itemW, itemW * 4 / 3);
+            return CustomScrollView(
+              scrollCacheExtent: const ScrollCacheExtent.viewport(0.8), // 提前排上下面几行的封面
+              slivers: [
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  sliver: SliverGrid.builder(
+                    gridDelegate: novelGridDelegate(c.maxWidth, columns: cols, textScale: MediaQuery.textScalerOf(context).scale(1)),
+                    itemCount: items.length,
+                    itemBuilder: (context, i) => NovelCard(title: items[i].title, aid: items[i].aid, imageUrl: items[i].imageUrl, decodeSize: coverSize),
+                  ),
                 ),
-              ),
-              SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.symmetric(vertical: 16), child: footer())),
-            ],
-          ),
+                SliverToBoxAdapter(child: Padding(padding: const EdgeInsets.symmetric(vertical: 16), child: footer())),
+              ],
+            );
+          },
         ),
       ),
     );

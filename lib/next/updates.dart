@@ -9,6 +9,7 @@ import '../data/wenku8/wenku8_exceptions.dart';
 import 'app_prefs.dart';
 import 'data.dart';
 import 'library.dart';
+import 'local_books.dart' show isLocalAid;
 import 'net_state.dart';
 import 'progress.dart';
 import 'read_state.dart';
@@ -182,7 +183,7 @@ class UpdateController extends Notifier<UpdateProgress> {
       final firstRun = UpdateStore.lastCheck == 0; // 第一次要查全部的书，中途关掉下次接着查
       final books = {
         for (final b in all)
-          if ((only == null ? _catOk(b) && !(firstRun && known.containsKey(b.aid)) : only.contains(b.aid)) && _wanted(b, known)) b.aid: (title: b.title, img: b.img),
+          if (!isLocalAid(b.aid) && (only == null ? _catOk(b) && !(firstRun && known.containsKey(b.aid)) : only.contains(b.aid)) && _wanted(b, known)) b.aid: (title: b.title, img: b.img),
       };
       final feed = UpdateStore.feed().map((e) => {'aid': e.aid, 'title': e.title, 'img': e.img, 'chapter': e.chapter, 'cid': e.cid, 'time': e.time.millisecondsSinceEpoch}).toList();
       final at = <String, int>{};

@@ -18,8 +18,10 @@ import '../../models/cat_chapter.dart';
 import '../../models/cat_volume.dart';
 import '../../models/content.dart';
 import '../app_prefs.dart';
+import '../book_search.dart';
 import '../bookmarks.dart';
 import '../cache.dart';
+import '../characters.dart';
 import '../color_picker.dart';
 import '../data.dart';
 import '../env.dart';
@@ -29,7 +31,10 @@ import '../history.dart';
 import '../image_cache.dart' show ImageStore, imageStoreProvider;
 import '../incognito.dart';
 import '../library.dart' show LibraryStore;
+import '../local_books.dart' show LocalBooks, isLocalAid;
 import '../net_state.dart';
+import '../pages/book_search_sheet.dart';
+import '../pages/characters_page.dart';
 import '../pages/novel_page.dart';
 import '../pages/rules_page.dart' show showRuleDialog;
 import '../progress.dart';
@@ -45,8 +50,11 @@ import '../unlock.dart';
 import '../volume_covers.dart';
 import '../volumes.dart';
 import '../widgets.dart';
+import 'auto_scroll.dart';
 import 'paginator.dart';
+import 'reader_bg.dart';
 import 'reader_body.dart';
+import 'reader_chrome.dart';
 import 'reader_sheets.dart';
 import 'reader_tts.dart';
 import 'volume_done.dart';
@@ -191,35 +199,40 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
     if (!cancel.isCancelled) cancel.cancel('chapter disposed');
   });
   final hantOn = ref.watch(readerPrefsProvider.select((p) => p.hant));
-  var raw = await ChapterCache.get(key.$1, key.$2);
-  if (raw != null && isLockedContent(raw)) raw = null; // 以前存下的「因版权问题…」，重新取
-  if (raw == null) {
-    final ticket = ChapterCache.ticket(key.$1, key.$2);
-    try {
-      raw = await _fetchChapterRaw(
-        ref.read(wenku8ClientProvider),
-        ref.read(wenku8UrlsProvider),
-        ref.read(unlockServiceProvider),
-        (c) => ref.read(apiProvider).catalogue(key.$1, cancelToken: c),
-        key.$1,
-        key.$2,
-        cancelToken: cancel,
-        onCloudflare: () => ref.read(sessionProvider.notifier).markNeedsVerify(),
-      );
-    } on ChapterLockedException catch (e) {
-      // 受限书里取不到的章（多半是插图）：给一句说明照常往后翻；不存缓存，下次还会再试
-      final text = formatChapter(e.message);
-      return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
-    }
-    if (Wenku8Parser.isCopyrightLockedText(raw.text) && raw.images.isEmpty) {
-      final text = formatChapter(raw.text);
-      return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
-    }
-    // 读过的章节顺手存下来，断网也能再看；写失败不影响阅读。取的这会儿刚好清了缓存、或者开启了无痕阅读时不写回去
-    if (!Incognito.on) {
+  Content? raw;
+  if (isLocalAid(key.$1)) {
+    raw = await LocalBooks.loadChapter(key.$1, key.$2);
+  } else {
+    raw = await ChapterCache.get(key.$1, key.$2);
+    if (raw != null && isLockedContent(raw)) raw = null; // 以前存下的「因版权问题…」，重新取
+    if (raw == null) {
+      final ticket = ChapterCache.ticket(key.$1, key.$2);
       try {
-        await ChapterCache.put(key.$1, key.$2, raw, ticket: ticket);
-      } catch (_) {}
+        raw = await _fetchChapterRaw(
+          ref.read(wenku8ClientProvider),
+          ref.read(wenku8UrlsProvider),
+          ref.read(unlockServiceProvider),
+          (c) => ref.read(apiProvider).catalogue(key.$1, cancelToken: c),
+          key.$1,
+          key.$2,
+          cancelToken: cancel,
+          onCloudflare: () => ref.read(sessionProvider.notifier).markNeedsVerify(),
+        );
+      } on ChapterLockedException catch (e) {
+        // 受限书里取不到的章（多半是插图）：给一句说明照常往后翻；不存缓存，下次还会再试
+        final text = formatChapter(e.message);
+        return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
+      }
+      if (Wenku8Parser.isCopyrightLockedText(raw.text) && raw.images.isEmpty) {
+        final text = formatChapter(raw.text);
+        return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
+      }
+      // 读过的章节顺手存下来，断网也能再看；写失败不影响阅读。取的这会儿刚好清了缓存、或者开启了无痕阅读时不写回去
+      if (!Incognito.on) {
+        try {
+          await ChapterCache.put(key.$1, key.$2, raw, ticket: ticket);
+        } catch (_) {}
+      }
     }
   }
   // 请求完成后再保活 3 分钟：加载中若用户切章或退出，autoDispose 会立刻触发上面的 CancelToken 取消网络请求
@@ -238,10 +251,12 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
 /// 同样的书签和版面返回同一个 Future：书签列表在可拖动的弹窗里，拖动时每帧都重建，不能每帧都重新整章排版。
 Future<(int, int)?> bookmarkPage(WidgetRef ref, BuildContext context, String aid, String cid, String title, int offset) {
   final prefs = ref.read(readerPrefsProvider);
-  if (prefs.mode == 0 || ChapterCache.length(aid, cid) == null) return Future.value();
+  final local = isLocalAid(aid);
+  final len = local ? LocalBooks.chapterLength(aid, cid) : ChapterCache.length(aid, cid);
+  if (prefs.mode == 0 || (!local && len == null)) return Future.value();
   final size = MediaQuery.sizeOf(context);
   final view = MediaQuery.viewPaddingOf(context);
-  final key = (aid, cid, title, offset, prefs, size, view, PagedBody.lastLayout, ChapterCache.length(aid, cid));
+  final key = (aid, cid, title, offset, prefs, size, view, PagedBody.lastLayout, len);
   final hit = _bookmarkPages.remove(key);
   final future = hit ?? _bookmarkPage(ref, aid, cid, title, offset, prefs, size, view);
   _bookmarkPages[key] = future;
@@ -299,7 +314,7 @@ class ReaderPage extends ConsumerStatefulWidget {
   ConsumerState<ReaderPage> createState() => _ReaderPageState();
 }
 
-class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObserver {
+class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObserver, TickerProviderStateMixin {
   // ---- 阅读统计：只在界面可见时计时 ----
   final _watch = Stopwatch()..start();
 
@@ -318,6 +333,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _background = state != AppLifecycleState.resumed;
+    if (_background) _autoScroll.stop();
     if (!_background) {
       _watch.start();
     } else if (!_tts.isListening) {
@@ -354,7 +370,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   CatChapter? _nextChapter;
   final _nav = ReaderNav();
   late final ReaderTtsController _tts;
+  late final ReaderAutoScrollController _autoScroll;
+  ReaderPaceSnapshot _pace = const ReaderPaceSnapshot();
   int _settingsTab = 0;
+  ({String cid, int start, int end})? _searchFlash;
+  Timer? _searchFlashTimer;
 
   // ---- 网络预取与取消 ----
   final _preloadCancel = CancelToken();
@@ -431,6 +451,37 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   @override
   void initState() {
     super.initState();
+    final initPrefs = ref.read(readerPrefsProvider);
+    _pace = ReaderPaceSnapshot.capture();
+    _autoScroll = ReaderAutoScrollController(
+      createTicker: createTicker,
+      initialSpeed: initPrefs.autoScrollSpeed,
+      initialTurnSeconds: initPrefs.autoTurnSeconds,
+      initialMode: initPrefs.mode,
+      onScrollStep: (dx) {
+        if (!mounted || !ref.read(chapterProvider((widget.aid, _cid))).hasValue) return AutoScrollStep.unavailable;
+        final res = _nav.autoScrollStep?.call(dx);
+        return res == null ? AutoScrollStep.unavailable : (res ? AutoScrollStep.scrolled : AutoScrollStep.reachedEnd);
+      },
+      onNextChapter: () {
+        final next = _nextChapter;
+        if (!mounted || next == null) return false;
+        _go(next.cid, keepAutoScroll: true);
+        return true;
+      },
+      onTurnNext: () {
+        if (!mounted || !ref.read(chapterProvider((widget.aid, _cid))).hasValue) return true;
+        final (curPage, units) = _nav.page.value;
+        if (_nextChapter == null && (units <= 0 || curPage >= units - 1)) return false;
+        _nav.next?.call();
+        return true;
+      },
+      onSpeedChanged: (v) => ref.read(readerPrefsProvider.notifier).update(ref.read(readerPrefsProvider).copyWith(autoScrollSpeed: v)),
+      onTurnSecondsChanged: (v) => ref.read(readerPrefsProvider.notifier).update(ref.read(readerPrefsProvider).copyWith(autoTurnSeconds: v)),
+      onReachedBookEnd: () {
+        if (mounted) ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(content: Text('已读到最后，自动阅读已停止'), duration: Duration(seconds: 2)));
+      },
+    );
     _tts = ReaderTtsController(
       readPrefs: () => ref.read(readerPrefsProvider),
       resolveNoticeMeta: _resolveNoticeMeta,
@@ -450,6 +501,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       _volTurn = now;
       // 菜单开着时按音量键先只收起菜单，再按才翻页
       if (_bar && (call.method == 'volumeUp' || call.method == 'volumeDown')) return _toggleBar();
+      _autoScroll.pauseByUser();
       if (call.method == (inv ? 'volumeUp' : 'volumeDown')) _nav.next?.call();
       if (call.method == (inv ? 'volumeDown' : 'volumeUp')) _nav.prev?.call();
     });
@@ -518,9 +570,23 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   }
 
   Future<void> _startTts(Chapter c) async {
+    _autoScroll.stop();
     final started = await _tts.start(c.text, fromOffset: _offset);
     if (!started && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('这一章没有可以朗读的文字')));
+    }
+  }
+
+  void _toggleAutoScroll(ReaderPrefs prefs) {
+    if (_autoScroll.isActive) {
+      _autoScroll.stop();
+      return;
+    }
+    if (_tts.isSpeaking) _tts.stop();
+    _autoScroll.start(mode: prefs.mode);
+    if (_bar) {
+      setState(() => _bar = false);
+      _setUi();
     }
   }
 
@@ -539,10 +605,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     _syncVolumeKeys(false);
     _vol.setMethodCallHandler(null);
     _clock?.cancel();
+    _searchFlashTimer?.cancel();
     _status.dispose();
     _pos.dispose();
     _slide.dispose();
     _nav.page.dispose();
+    _autoScroll.dispose();
     _tts.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _flushStats();
@@ -579,12 +647,16 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     final shift = HardwareKeyboard.instance.isShiftPressed;
     final scroll = mode == 0;
     if (key == LogicalKeyboardKey.arrowRight || key == LogicalKeyboardKey.pageDown || (key == LogicalKeyboardKey.space && !shift)) {
+      _autoScroll.pauseByUser();
       _nav.next?.call();
     } else if (key == LogicalKeyboardKey.arrowLeft || key == LogicalKeyboardKey.pageUp || (key == LogicalKeyboardKey.space && shift)) {
+      _autoScroll.pauseByUser();
       _nav.prev?.call();
     } else if (key == LogicalKeyboardKey.arrowDown) {
+      _autoScroll.pauseByUser();
       scroll ? _nav.scrollBy?.call(80) : _nav.next?.call();
     } else if (key == LogicalKeyboardKey.arrowUp) {
+      _autoScroll.pauseByUser();
       scroll ? _nav.scrollBy?.call(-80) : _nav.prev?.call();
     } else if (key == LogicalKeyboardKey.bracketRight && next != null) {
       _go(next.cid);
@@ -611,6 +683,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     if (_bar || e is! PointerScrollEvent) return;
     final d = e.scrollDelta.dy != 0 ? e.scrollDelta.dy : e.scrollDelta.dx;
     final turn = _wheelFilter.feed(d, DateTime.now(), kind: e.kind);
+    if (turn != 0) _autoScroll.pauseByUser();
     if (turn > 0) _nav.next?.call();
     if (turn < 0) _nav.prev?.call();
   }
@@ -620,26 +693,35 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     _panDelta += e.panDelta;
     if (_panDelta.dx.abs() < 48 && _panDelta.dy.abs() < 56) return;
     _panTurned = true;
+    _autoScroll.pauseByUser();
     final forward = _panDelta.dx.abs() >= _panDelta.dy.abs() ? _panDelta.dx < 0 : _panDelta.dy < 0;
     forward ? _nav.next?.call() : _nav.prev?.call();
   }
 
   void _toggleBar() {
-    setState(() => _bar = !_bar);
+    final nextBar = !_bar;
+    if (nextBar) _autoScroll.pauseByUser();
+    setState(() => _bar = nextBar);
     _setUi();
   }
 
   /// 跳到某章的某个位置。[offset] 默认章首；往前翻章时传 [kToEnd]，落在上一章的最后一页。
   /// 手动切章会停掉朗读（[keepTts] 是朗读自己读完一章后的自动续读）；往后翻时把离开的这章标为已读。
   /// [lead] 和 [seamless] 是从正文翻进相邻章节时用的：画面已经翻到位了，不再放换章动画。
-  void _go(String cid, {int offset = 0, bool keepTts = false, int lead = 0, bool seamless = false}) {
+  void _go(String cid, {int offset = 0, bool keepTts = false, bool keepAutoScroll = false, int lead = 0, bool seamless = false}) {
     if (cid == _cid && offset == _offset) return;
     if (cid != _cid && ref.read(readerPrefsProvider).chapterToast) {
       final t = ref.read(novelProvider(widget.aid)).value?.catalogue.expand((v) => v.chapters).where((c) => c.cid == cid).firstOrNull?.title;
       if (t != null) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t), duration: const Duration(seconds: 2)));
     }
     _flushStats(); // 离开这章前把时间记到这章
+    _pace = ReaderPaceSnapshot.capture();
     if (!keepTts && _tts.isSpeaking) _tts.stop();
+    if (keepAutoScroll || _autoScroll.isStepping) {
+      _autoScroll.notifyChapterSwitched();
+    } else {
+      _autoScroll.pauseByUser();
+    }
     final next = _nextChapter;
     final forward = next != null && cid == next.cid;
     final leavingLocked = ref.read(chapterProvider((widget.aid, _cid))).value?.locked == true;
@@ -760,8 +842,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
 
   void _saveOffset(int offset) {
     if (_back != null && !_scrubbing && offset != _offset && ++_backTurns >= 3) _back = null;
-    // 翻了页（点、滑、音量键）就收起菜单；拖底部进度条跳页、朗读跟着翻页时不收
-    if (_bar && !_scrubbing && !_tts.isFollowing && offset != _offset) {
+    // 翻了页（点、滑、音量键）就收起菜单；拖底部进度条跳页、朗读/自动阅读跟着翻页时不收
+    if (_bar && !_scrubbing && !_tts.isFollowing && !_autoScroll.isStepping && offset != _offset) {
       setState(() => _bar = false);
       _setUi();
     }
@@ -995,6 +1077,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     ref.listen(incognitoProvider, (_, _) => _tick());
     final incognito = ref.watch(incognitoProvider);
     final prefs = ref.watch(readerPrefsProvider);
+    final bgImagePath = ref.watch(readerBgImageProvider);
+    _autoScroll.syncPrefs(mode: prefs.mode, scrollSpeed: prefs.autoScrollSpeed, turnSeconds: prefs.autoTurnSeconds);
     _syncVolumeKeys(prefs.volumeKeys);
     _applyChrome(prefs);
     final appTheme = Theme.of(context);
@@ -1042,6 +1126,31 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     final noted = RuleNotes.of(widget.aid).keys.toSet();
     final addon = ref.watch(unlockAddonProvider);
     final bottomPad = MediaQuery.viewPaddingOf(context).bottom;
+    final topPad = MediaQuery.viewPaddingOf(context).top;
+    final readerBg = ReaderBackground(
+      baseColor: palette.bg,
+      fgColor: palette.fg,
+      texture: prefs.bgTexture,
+      imagePath: bgImagePath,
+      imageOpacity: prefs.bgImageOpacity,
+    );
+    final hasCustomBg = readerBg.hasCustomLayer;
+    final bgKey = Object.hash(prefs.bgTexture, bgImagePath, prefs.bgImageOpacity, _searchFlash?.cid, _searchFlash?.start);
+    final chromeConfig = ReaderChromeConfig(
+      headerLeft: prefs.headerLeft,
+      headerRight: prefs.headerRight,
+      footerLeft: prefs.footerLeft,
+      footerRight: prefs.footerRight,
+      bookTitle: _bodyTitle(_bookTitle ?? ''),
+      volumeEta: (frac) => resolveVolumeEtaText(
+        aid: widget.aid,
+        cid: _cid,
+        currentChapterChars: content.value?.text.length ?? 0,
+        chapterFraction: frac,
+        volumeProgress: _volumeProgress(frac),
+        pace: _pace,
+      ),
+    );
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,
@@ -1069,6 +1178,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                 prefs,
                 Stack(
                   children: [
+                    Positioned.fill(child: readerBg),
                     _chapterSwitch(
                       prefs,
                       KeyedSubtree(
@@ -1100,17 +1210,21 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                               _initial = null;
                             }
                             _recordChapter(_cid, title);
-                            InlineSpan spanOfHighlight(int from, int to, (int, int)? hl) =>
-                                buildSpan(c, from, to, style, noted, _tts.text == c.text ? hl : null, accent);
+                            InlineSpan spanOfHighlight(int from, int to, (int, int)? hl) {
+                              final activeHl = _tts.text == c.text
+                                  ? hl
+                                  : (_searchFlash != null && _searchFlash!.cid == _cid ? (_searchFlash!.start, _searchFlash!.end) : null);
+                              return buildSpan(c, from, to, style, noted, activeHl, accent);
+                            }
                             InlineSpan spanOf(int from, int to) => spanOfHighlight(from, to, _tts.highlight.value);
                             final key = ValueKey((_cid, _epoch, prefs.mode));
-                            void onMark(Mark m) => _editNote(m.rule);
+                            void onMark(Mark m) => _onMarkTap(m, palette, accent);
                             final fallbackCover = novel?.detail.imgUrl ?? '';
                             // 相邻章节：有缓存、或者预加载已经取了才接上，不为这个多联网（预加载关了、不在 Wi-Fi 时就还是原来的换章动画）
                             ChapterPeek? peek(CatChapter? ch) {
                               if (ch == null) return null;
                               final p = chapterProvider((widget.aid, ch.cid));
-                              if (!ChapterCache.has(widget.aid, ch.cid) && !ref.exists(p)) return null;
+                              if (!isLocalAid(widget.aid) && !ChapterCache.has(widget.aid, ch.cid) && !ref.exists(p)) return null;
                               final v = ref.watch(p).value;
                               if (v == null) return null;
                               return ChapterPeek(
@@ -1149,6 +1263,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     hasSelection: () => _hasSelection,
                                     onPullDown: _addBookmark,
                                     marked: () => Bookmarks.has(widget.aid, _cid, _offset),
+                                    onUserInteract: _autoScroll.pauseByUser,
+                                    showHeader: prefs.showStatus && chromeConfig.hasHeader,
                                   )
                                 : PagedBody(
                                     key: key,
@@ -1176,6 +1292,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     onPullDown: _addBookmark,
                                     marked: () => Bookmarks.has(widget.aid, _cid, _offset),
                                     background: palette.bg,
+                                    pageBackground: hasCustomBg ? readerBg : null,
+                                    backgroundKey: bgKey,
+                                    chromeConfig: chromeConfig,
+                                    onUserInteract: _autoScroll.pauseByUser,
                                     color: palette.fg,
                                     startOffset: _offset,
                                     onOffset: _saveOffset,
@@ -1244,14 +1364,52 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                           ),
                         ),
                       ),
-                    if (prefs.mode == 0 && prefs.showStatus && content.hasValue)
+                    if (prefs.mode == 0 && prefs.showStatus && chromeConfig.hasHeader && content.hasValue)
                       Positioned(
+                        key: const ValueKey('reader_scroll_header'),
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        child: IgnorePointer(
+                          child: ColoredBox(
+                            color: palette.bg.withValues(alpha: hasCustomBg ? 0.82 : 1.0),
+                            child: Padding(
+                              padding: EdgeInsets.fromLTRB(prefs.margin, topPad + 8, prefs.margin, 6),
+                              child: ValueListenableBuilder<int>(
+                                valueListenable: _pos,
+                                builder: (_, pos, _) {
+                                  final c = content.value!;
+                                  final len = c.text.length;
+                                  final imgs = c.images.length;
+                                  final frac = len > 0 ? (pos / len).clamp(0.0, 1.0) : (imgs > 1 && pos > 0 ? ((pos - 1) / (imgs - 1)).clamp(0.0, 1.0) : 0.0);
+                                  final volPct = (_volumeProgress(frac) * 100).floor();
+                                  final needEta = chromeConfig.headerLeft == ReaderChromeField.volumeEta || chromeConfig.headerRight == ReaderChromeField.volumeEta;
+                                  return ReaderChromeRow(
+                                    leftField: chromeConfig.headerLeft,
+                                    rightField: chromeConfig.headerRight,
+                                    style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.5)),
+                                    chapterTitle: _bodyTitle(title),
+                                    bookTitle: chromeConfig.bookTitle,
+                                    status: _status,
+                                    pageProgress: '本章 ${(frac * 100).floor()}% · 本卷 $volPct%',
+                                    volumeEta: needEta ? (chromeConfig.volumeEta?.call(frac) ?? '本卷 $volPct%') : '',
+                                    volumeProgressText: '本卷 $volPct%',
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (prefs.mode == 0 && prefs.showStatus && chromeConfig.hasFooter && content.hasValue)
+                      Positioned(
+                        key: const ValueKey('reader_scroll_footer'),
                         left: 0,
                         right: 0,
                         bottom: 0,
                         child: IgnorePointer(
                           child: ColoredBox(
-                            color: palette.bg,
+                            color: palette.bg.withValues(alpha: hasCustomBg ? 0.82 : 1.0),
                             child: Padding(
                               padding: EdgeInsets.fromLTRB(prefs.margin, 6, prefs.margin, bottomPad + 8),
                               child: ValueListenableBuilder<int>(
@@ -1260,11 +1418,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                   final c = content.value!;
                                   final len = c.text.length;
                                   final imgs = c.images.length;
-                                  final f = len > 0 ? (pos / len).clamp(0.0, 1.0) : (imgs > 1 && pos > 0 ? ((pos - 1) / (imgs - 1)).clamp(0.0, 1.0) : 0.0);
-                                  return ReaderFooter(
-                                    status: _status,
-                                    right: '本章 ${(f * 100).floor()}% · 本卷 ${(_volumeProgress(f) * 100).floor()}%',
+                                  final frac = len > 0 ? (pos / len).clamp(0.0, 1.0) : (imgs > 1 && pos > 0 ? ((pos - 1) / (imgs - 1)).clamp(0.0, 1.0) : 0.0);
+                                  final volPct = (_volumeProgress(frac) * 100).floor();
+                                  final needEta = chromeConfig.footerLeft == ReaderChromeField.volumeEta || chromeConfig.footerRight == ReaderChromeField.volumeEta;
+                                  return ReaderChromeRow(
+                                    leftField: chromeConfig.footerLeft,
+                                    rightField: chromeConfig.footerRight,
                                     style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.5)),
+                                    chapterTitle: _bodyTitle(title),
+                                    bookTitle: chromeConfig.bookTitle,
+                                    status: _status,
+                                    pageProgress: '本章 ${(frac * 100).floor()}% · 本卷 $volPct%',
+                                    volumeEta: needEta ? (chromeConfig.volumeEta?.call(frac) ?? '本卷 $volPct%') : '',
+                                    volumeProgressText: '本卷 $volPct%',
                                   );
                                 },
                               ),
@@ -1272,31 +1438,55 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                           ),
                         ),
                       ),
-                    // 亮度遮罩：盖住正文和页脚，不盖菜单栏和朗读条，不挡点击
-                    if (prefs.dim > 0) Positioned.fill(child: IgnorePointer(child: ColoredBox(color: Colors.black.withValues(alpha: prefs.dim)))),
-                    // 朗读中且菜单收起时：底部浮现紧凑应用内播放控制条
+                    // 亮度遮罩：盖住正文和页脚，不盖菜单栏和朗读/自动阅读条，不挡点击
+                    if (prefs.dim > 0) Positioned.fill(key: const ValueKey('reader_dim'), child: IgnorePointer(child: ColoredBox(color: Colors.black.withValues(alpha: prefs.dim)))),
+                    // 翻页模式自动翻页的极细底部倒计时进度条
+                    Positioned(
+                      key: const ValueKey('reader_auto_turn_progress'),
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: ReaderAutoTurnProgressBar(controller: _autoScroll, palette: palette, accent: accent),
+                    ),
+                    // 朗读中或自动阅读中且菜单收起时：底部浮现紧凑胶囊控制条
                     if (!_bar)
                       Positioned(
+                        key: const ValueKey('reader_float_bar'),
                         left: 16,
                         right: 16,
                         bottom: bottomPad + 36,
                         child: ValueListenableBuilder<bool>(
                           valueListenable: _tts.active,
                           builder: (_, speaking, _) {
-                            if (!speaking) return const SizedBox.shrink();
-                            return Center(
-                              child: ReaderTtsBar(
-                                tts: _tts,
-                                palette: palette,
-                                accent: accent,
-                                onOpenSettings: () => _openTtsSheet(palette, accent),
-                              ),
+                            if (speaking) {
+                              return Center(
+                                child: ReaderTtsBar(
+                                  tts: _tts,
+                                  palette: palette,
+                                  accent: accent,
+                                  onOpenSettings: () => _openTtsSheet(palette, accent),
+                                ),
+                              );
+                            }
+                            return ListenableBuilder(
+                              listenable: _autoScroll,
+                              builder: (_, _) {
+                                if (!_autoScroll.isActive) return const SizedBox.shrink();
+                                return Center(
+                                  child: ReaderAutoScrollBar(
+                                    controller: _autoScroll,
+                                    palette: palette,
+                                    accent: accent,
+                                  ),
+                                );
+                              },
                             );
                           },
                         ),
                       ),
-                    // 顶部菜单栏：滑动 + 渐隐平滑过渡
+                    // 顶部菜单栏：滑动 + 渐隐平滑过渡（固定 Key 防止条件插入的悬浮条导致与底部栏错位复用动画状态）
                     Positioned(
+                      key: const ValueKey('reader_top_bar'),
                       top: 0,
                       left: 0,
                       right: 0,
@@ -1331,7 +1521,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                       ),
                                       if (incognito)
                                         Padding(
-                                          padding: const EdgeInsets.only(right: 8),
+                                          padding: const EdgeInsets.only(right: 4),
                                           child: Container(
                                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                             decoration: BoxDecoration(color: palette.fg.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(999)),
@@ -1345,7 +1535,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                             ),
                                           ),
                                         ),
-                                      const SizedBox(width: 8),
+                                      IconButton(
+                                        tooltip: hz(context, '书内搜索'),
+                                        visualDensity: VisualDensity.compact,
+                                        icon: Icon(Icons.search, size: 22, color: palette.fg),
+                                        onPressed: () => _openSearchSheet(novel?.catalogue ?? const [], palette, accent),
+                                      ),
+                                      IconButton(
+                                        tooltip: hz(context, '人物词典'),
+                                        visualDensity: VisualDensity.compact,
+                                        icon: Icon(Icons.people_outline, size: 22, color: palette.fg),
+                                        onPressed: _openCharactersPage,
+                                      ),
+                                      const SizedBox(width: 4),
                                     ],
                                   ),
                                 ),
@@ -1357,6 +1559,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                     ),
                     // 底部菜单栏：滑动 + 渐隐平滑过渡
                     Positioned(
+                      key: const ValueKey('reader_bottom_bar'),
                       bottom: 0,
                       left: 0,
                       right: 0,
@@ -1389,7 +1592,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                                 embedded: true,
                                                 onOpenSettings: () => _openTtsSheet(palette, accent),
                                               )
-                                            : const SizedBox.shrink(),
+                                            : ListenableBuilder(
+                                                listenable: _autoScroll,
+                                                builder: (_, _) => _autoScroll.isActive
+                                                    ? ReaderAutoScrollBar(
+                                                        controller: _autoScroll,
+                                                        palette: palette,
+                                                        accent: accent,
+                                                        embedded: true,
+                                                      )
+                                                    : const SizedBox.shrink(),
+                                              ),
                                       ),
                                       // 拖的是本章的页（滚动模式是本章的比例），拖的时候上面显示章节名和页码，松手跳过去；跨章用两边的按钮或目录
                                       if (content.hasValue)
@@ -1494,37 +1707,49 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                         ),
                                       ValueListenableBuilder<bool>(
                                         valueListenable: _tts.active,
-                                        builder: (_, speaking, _) => Row(
-                                          children: [
-                                            for (final item in <(IconData, String, VoidCallback, VoidCallback?)>[
-                                              (Icons.format_list_bulleted_rounded, '目录', () => _openCatalogueSheet(novel?.catalogue ?? const [], palette, accent), null),
-                                              (Bookmarks.has(widget.aid, _cid, _offset) ? Icons.bookmark : Icons.bookmark_border, '书签', _addBookmark, null),
-                                              (
-                                                speaking ? Icons.stop_circle_outlined : Icons.record_voice_over_outlined,
-                                                speaking ? '停止' : '朗读',
-                                                () => speaking ? _tts.stop() : content.whenData(_startTts),
-                                                () => _openTtsSheet(palette, accent),
-                                              ),
-                                              (Icons.settings_outlined, '设置', () => _openSettingsSheet(palette, accent), null),
-                                            ])
-                                              Expanded(
-                                                child: InkWell(
-                                                  onTap: item.$3,
-                                                  onLongPress: item.$4,
-                                                  child: Padding(
-                                                    padding: const EdgeInsets.symmetric(vertical: 8),
-                                                    child: Column(
-                                                      mainAxisSize: MainAxisSize.min,
-                                                      children: [
-                                                        Icon(item.$1, size: 21, weight: 300, color: palette.fg.withValues(alpha: 0.85)),
-                                                        const SizedBox(height: 3),
-                                                        Text(item.$2, style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.65))),
-                                                      ],
+                                        builder: (_, speaking, _) => ListenableBuilder(
+                                          listenable: _autoScroll,
+                                          builder: (_, _) {
+                                            final autoActive = _autoScroll.isActive;
+                                            return Row(
+                                              children: [
+                                                for (final item in <(IconData, String, VoidCallback, VoidCallback?)>[
+                                                  (Icons.format_list_bulleted_rounded, '目录', () => _openCatalogueSheet(novel?.catalogue ?? const [], palette, accent), null),
+                                                  (Bookmarks.has(widget.aid, _cid, _offset) ? Icons.bookmark : Icons.bookmark_border, '书签', _addBookmark, null),
+                                                  (
+                                                    autoActive ? Icons.stop_circle_outlined : Icons.slow_motion_video_rounded,
+                                                    autoActive ? '停自动' : '自动阅读',
+                                                    () => _toggleAutoScroll(prefs),
+                                                    null,
+                                                  ),
+                                                  (
+                                                    speaking ? Icons.stop_circle_outlined : Icons.record_voice_over_outlined,
+                                                    speaking ? '停止' : '朗读',
+                                                    () => speaking ? _tts.stop() : content.whenData(_startTts),
+                                                    () => _openTtsSheet(palette, accent),
+                                                  ),
+                                                  (Icons.settings_outlined, '设置', () => _openSettingsSheet(palette, accent), null),
+                                                ])
+                                                  Expanded(
+                                                    child: InkWell(
+                                                      onTap: item.$3,
+                                                      onLongPress: item.$4,
+                                                      child: Padding(
+                                                        padding: const EdgeInsets.symmetric(vertical: 8),
+                                                        child: Column(
+                                                          mainAxisSize: MainAxisSize.min,
+                                                          children: [
+                                                            Icon(item.$1, size: 21, weight: 300, color: palette.fg.withValues(alpha: 0.85)),
+                                                            const SizedBox(height: 3),
+                                                            Text(item.$2, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.65))),
+                                                          ],
+                                                        ),
+                                                      ),
                                                     ),
                                                   ),
-                                                ),
-                                              ),
-                                          ],
+                                              ],
+                                            );
+                                          },
                                         ),
                                       ),
                                     ],
@@ -1575,7 +1800,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     if (!mounted || _preloadCancel.isCancelled) return;
     if (!_inFlightPrefetch.add(cid)) return;
     try {
-      if (!ChapterCache.has(widget.aid, cid) && !Incognito.on) {
+      if (!isLocalAid(widget.aid) && !ChapterCache.has(widget.aid, cid) && !Incognito.on) {
         final ticket = ChapterCache.ticket(widget.aid, cid);
         final raw = await runInBackground(
           () => _fetchChapterRaw(
@@ -1610,6 +1835,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   /// 后台把整本的正文存到离线缓存（不含插图），一章一章慢慢取；先往后，再补前面。退出阅读器就停，下次打开接着来。
   /// 每章之前都重新看一遍设置和网络：中途关掉开关、离开 Wi-Fi（开了仅 Wi-Fi 时）就停。
   Future<void> _cacheBook(List<CatChapter> chapters, int index) async {
+    if (isLocalAid(widget.aid)) return;
     for (final c in [...chapters.skip(index + 1), ...chapters.take(index)]) {
       if (!mounted || _preloadCancel.isCancelled || Incognito.on) return;
       if (ChapterCache.has(widget.aid, c.cid) || _inFlightPrefetch.contains(c.cid)) continue;
@@ -1667,10 +1893,98 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       },
       onSelectBookmark: (b) => _go(b.cid, offset: b.offset),
       onEditNote: _editNote,
+      onOpenCharacters: _openCharactersPage,
       onBookmarksChanged: () {
         if (mounted) setState(() {});
       },
     );
+  }
+
+  /// 点击正文高亮词：若绑定了人物词典词条优先弹出「角色浮窗底栏」，否则走原备注编辑逻辑。
+  void _onMarkTap(Mark m, ReaderPalette palette, Color accent) {
+    final char = BookCharacters.byRuleId(widget.aid, m.rule.id);
+    if (char == null) {
+      _editNote(m.rule);
+      return;
+    }
+    final catalogue = ref.read(novelProvider(widget.aid)).value?.catalogue ?? const <CatVolume>[];
+    showCharacterReaderSheet(
+      context,
+      aid: widget.aid,
+      character: char,
+      currentCid: _cid,
+      palette: palette,
+      accent: accent,
+      onSearchAppearances: (terms) {
+        if (terms.isEmpty) return;
+        _openSearchSheet(
+          catalogue,
+          palette,
+          accent,
+          initialQuery: terms.length > 1 ? terms.map(RegExp.escape).join('|') : terms.first,
+          initialRegex: terms.length > 1,
+          initialScope: BookSearchScope.allCached,
+        );
+      },
+      onOpenDictionary: _openCharactersPage,
+      onChanged: () {
+        if (mounted) {
+          ref.invalidate(chapterProvider);
+          setState(() {});
+        }
+      },
+    );
+  }
+
+  void _openSearchSheet(
+    List<CatVolume> catalogue,
+    ReaderPalette palette,
+    Color accent, {
+    String? initialQuery,
+    bool initialRegex = false,
+    BookSearchScope? initialScope,
+  }) {
+    final currentText = ref.read(chapterProvider((widget.aid, _cid))).value?.text;
+    showBookSearchSheet(
+      context,
+      aid: widget.aid,
+      catalogue: catalogue,
+      currentCid: _cid,
+      currentChapterText: currentText,
+      initialQuery: initialQuery,
+      initialRegex: initialRegex,
+      initialScope: initialScope,
+      palette: palette,
+      accent: accent,
+      onSelectHit: _jumpToSearchHit,
+    );
+  }
+
+  void _jumpToSearchHit(BookSearchHit hit) {
+    _searchFlashTimer?.cancel();
+    _searchFlash = (cid: hit.cid, start: hit.offset, end: hit.offset + hit.matchLength);
+    _searchFlashTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _searchFlash = null);
+    });
+    if (hit.cid == _cid && hit.offset == _offset) {
+      setState(() => _bar = false);
+      _setUi();
+      return;
+    }
+    _markBack();
+    _go(hit.cid, offset: hit.offset);
+  }
+
+  Future<void> _openCharactersPage() async {
+    _flushStats();
+    if (!_tts.isSpeaking) _watch.stop();
+    _syncVolumeKeys(false);
+    await context.push(Routes.characters(widget.aid));
+    if (!mounted) return;
+    ref.invalidate(chapterProvider);
+    if (!_background) _watch.start();
+    _syncVolumeKeys(ref.read(readerPrefsProvider).volumeKeys);
+    setState(() {});
   }
 
   void _openTtsSheet(ReaderPalette palette, Color accent) {

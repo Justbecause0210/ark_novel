@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart' hide Text;
-import 'package:flutter/rendering.dart' show RenderAbstractViewport;
+import 'package:flutter/rendering.dart' show RenderAbstractViewport, ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -64,8 +64,11 @@ class _RecommendTabState extends ConsumerState<_RecommendTab> with AutomaticKeep
                 : LayoutBuilder(
               builder: (context, c) {
                 final cols = gridColumns(c.maxWidth) >= 6 ? 6 : 3;
+                final itemW = ((c.maxWidth - 32 - 14 * (cols - 1)) / cols).clamp(1.0, double.infinity);
+                final coverSize = Size(itemW, itemW * 4 / 3);
                 final delegate = SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52);
                 return CustomScrollView(
+                  scrollCacheExtent: const ScrollCacheExtent.viewport(0.8),
                   slivers: [
                     for (final block in blocks) ...[
                       SliverPadding(
@@ -78,7 +81,7 @@ class _RecommendTabState extends ConsumerState<_RecommendTab> with AutomaticKeep
                         sliver: SliverGrid.builder(
                           gridDelegate: delegate,
                           itemCount: block.list.length,
-                          itemBuilder: (_, i) => NovelCard(title: block.list[i].title, aid: block.list[i].aid, imageUrl: block.list[i].imageUrl),
+                          itemBuilder: (_, i) => NovelCard(title: block.list[i].title, aid: block.list[i].aid, imageUrl: block.list[i].imageUrl, decodeSize: coverSize),
                         ),
                       ),
                     ],
