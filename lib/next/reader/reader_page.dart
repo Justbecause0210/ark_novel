@@ -1135,7 +1135,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       imageOpacity: prefs.bgImageOpacity,
     );
     final hasCustomBg = readerBg.hasCustomLayer;
-    final bgKey = Object.hash(prefs.bgTexture, bgImagePath, prefs.bgImageOpacity);
+    final bgKey = Object.hash(prefs.bgTexture, bgImagePath, prefs.bgImageOpacity, _searchFlash?.cid, _searchFlash?.start);
     final chromeConfig = ReaderChromeConfig(
       headerLeft: prefs.headerLeft,
       headerRight: prefs.headerRight,
@@ -1366,6 +1366,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                       ),
                     if (prefs.mode == 0 && prefs.showStatus && chromeConfig.hasHeader && content.hasValue)
                       Positioned(
+                        key: const ValueKey('reader_scroll_header'),
                         left: 0,
                         right: 0,
                         top: 0,
@@ -1402,6 +1403,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                       ),
                     if (prefs.mode == 0 && prefs.showStatus && chromeConfig.hasFooter && content.hasValue)
                       Positioned(
+                        key: const ValueKey('reader_scroll_footer'),
                         left: 0,
                         right: 0,
                         bottom: 0,
@@ -1437,9 +1439,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                         ),
                       ),
                     // 亮度遮罩：盖住正文和页脚，不盖菜单栏和朗读/自动阅读条，不挡点击
-                    if (prefs.dim > 0) Positioned.fill(child: IgnorePointer(child: ColoredBox(color: Colors.black.withValues(alpha: prefs.dim)))),
+                    if (prefs.dim > 0) Positioned.fill(key: const ValueKey('reader_dim'), child: IgnorePointer(child: ColoredBox(color: Colors.black.withValues(alpha: prefs.dim)))),
                     // 翻页模式自动翻页的极细底部倒计时进度条
                     Positioned(
+                      key: const ValueKey('reader_auto_turn_progress'),
                       left: 0,
                       right: 0,
                       bottom: 0,
@@ -1448,6 +1451,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                     // 朗读中或自动阅读中且菜单收起时：底部浮现紧凑胶囊控制条
                     if (!_bar)
                       Positioned(
+                        key: const ValueKey('reader_float_bar'),
                         left: 16,
                         right: 16,
                         bottom: bottomPad + 36,
@@ -1480,8 +1484,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                           },
                         ),
                       ),
-                    // 顶部菜单栏：滑动 + 渐隐平滑过渡
+                    // 顶部菜单栏：滑动 + 渐隐平滑过渡（固定 Key 防止条件插入的悬浮条导致与底部栏错位复用动画状态）
                     Positioned(
+                      key: const ValueKey('reader_top_bar'),
                       top: 0,
                       left: 0,
                       right: 0,
@@ -1554,6 +1559,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                     ),
                     // 底部菜单栏：滑动 + 渐隐平滑过渡
                     Positioned(
+                      key: const ValueKey('reader_bottom_bar'),
                       bottom: 0,
                       left: 0,
                       right: 0,
