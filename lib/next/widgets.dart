@@ -16,11 +16,11 @@ import 'package:flutter/services.dart';
 import 'data.dart' show PageResult;
 import 'image_cache.dart';
 import 'env.dart';
-import 'router.dart';
+import 'routes.dart';
 import 'session.dart';
 import 'theme_doodle.dart';
 import 'text.dart';
-import 'volumes.dart';
+import 'volume_covers.dart';
 
 /// 宽屏（平板、电脑）上把内容限制在 760 宽并居中。
 Widget contentWidth(Widget child) => Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 760), child: child));
@@ -45,7 +45,11 @@ class LoginPrompt extends StatelessWidget {
             const SizedBox(height: 8),
             Text(detail, textAlign: TextAlign.center, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
             const SizedBox(height: 24),
-            FilledButton(onPressed: () => context.push(Routes.login), child: const Text('去登录')),
+            FilledButton(
+              style: FilledButton.styleFrom(minimumSize: const Size(160, 48), padding: const EdgeInsets.symmetric(horizontal: 24)),
+              onPressed: () => context.push(Routes.login),
+              child: const Text('去登录'),
+            ),
           ],
         ),
       ),
@@ -55,7 +59,17 @@ class LoginPrompt extends StatelessWidget {
 
 /// 错误 / 空状态。出错时给"重试"，没登录时额外给"去登录"。可滚动，保证下拉刷新可用。
 class StatePanel extends ConsumerWidget {
-  const StatePanel({super.key, required this.title, this.detail, this.onRetry, this.error, this.sourceHtml});
+  const StatePanel({
+    super.key,
+    required this.title,
+    this.detail,
+    this.onRetry,
+    this.error,
+    this.sourceHtml,
+    this.icon,
+    this.actions = const [],
+    this.showEmptyArt = true,
+  });
 
   final String title;
   final String? detail;
@@ -67,6 +81,15 @@ class StatePanel extends ConsumerWidget {
   /// 解析失败的页面源码（搜索用），给"复制页面源码"按钮
   final String? sourceHtml;
 
+  /// 普通配色空状态的可选图标（角色主题优先展示 `art.empty` 插画）
+  final IconData? icon;
+
+  /// 底部附加操作按钮（如书架空态的「登录」「去发现页」）
+  final List<Widget> actions;
+
+  /// 空状态时是否展示角色主题插画 `art.empty`
+  final bool showEmptyArt;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (error is Wenku8LoginRequiredException) {
@@ -75,66 +98,97 @@ class StatePanel extends ConsumerWidget {
     final theme = Theme.of(context);
     final guest = ref.watch(sessionProvider) is! SessionLoggedIn;
     final art = CharacterArt.of(context);
+    final isError = error != null || onRetry != null;
     final shownDetail = error != null ? friendlyError(error!) : detail;
     final canSwitchNode = error != null && !isCloudflare(error!) && !isWebPreview && ref.watch(nodeProvider) == Wenku8Node.wwwWenku8Net;
-    return ListView(
-      padding: const EdgeInsets.all(32),
-      children: [
-        if (art == null)
-          const SizedBox(height: 80)
-        else
-          // 角色主题：出错时抱头慌张，没内容时托腮发呆
-          Padding(padding: const EdgeInsets.only(top: 24, bottom: 12), child: Image.asset(error != null || onRetry != null ? art.error : art.empty, height: 140)),
-        Text(title, textAlign: TextAlign.center, style: theme.textTheme.titleLarge),
-        if (shownDetail != null && shownDetail.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Text(
-            shownDetail,
-            textAlign: TextAlign.center,
-            maxLines: 4,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-          ),
-        ],
-        if (onRetry != null) ...[
-          const SizedBox(height: 24),
-          Center(child: OutlinedButton(onPressed: onRetry, child: const Text('重试'))),
-        ],
-        if (error != null && isCloudflare(error!))
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Center(child: FilledButton(style: FilledButton.styleFrom(minimumSize: const Size(160, 44)), onPressed: () => context.push(Routes.verify), child: const Text('去验证'))),
-          ),
-        if (canSwitchNode)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Center(
-              child: TextButton(
-                onPressed: () async {
-                  await ref.read(nodeProvider.notifier).set(Wenku8Node.wwwWenku8Cc);
-                  onRetry?.call();
-                },
-                child: const Text('连不上？切到备用节点 wenku8.cc'),
+    return Semantics(
+      container: true,
+      liveRegion: error != null,
+      child: ListView(
+        padding: const EdgeInsets.all(32),
+        children: [
+          if (art != null && (isError || showEmptyArt))
+            // 角色主题：出错时抱头慌张，没内容时托腮发呆
+            Padding(
+              padding: const EdgeInsets.only(top: 24, bottom: 12),
+              child: Image.asset(isError ? art.error : art.empty, height: 140, excludeFromSemantics: true),
+            )
+          else if (icon != null) ...[
+            const SizedBox(height: 64),
+            ExcludeSemantics(child: Icon(icon, size: 48, color: theme.colorScheme.primary.withValues(alpha: 0.75))),
+            const SizedBox(height: 16),
+          ] else
+            const SizedBox(height: 80),
+          Semantics(header: true, child: Text(title, textAlign: TextAlign.center, style: theme.textTheme.titleLarge)),
+          if (shownDetail != null && shownDetail.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              shownDetail,
+              textAlign: TextAlign.center,
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+            ),
+          ],
+          if (onRetry != null) ...[
+            const SizedBox(height: 24),
+            Center(
+              child: OutlinedButton(
+                style: OutlinedButton.styleFrom(minimumSize: const Size(140, 44), padding: const EdgeInsets.symmetric(horizontal: 24)),
+                onPressed: onRetry,
+                child: const Text('重试'),
               ),
             ),
-          ),
-        if (onRetry != null && sourceHtml != null)
-          Center(
-            child: TextButton(
-              onPressed: () async {
-                await Clipboard.setData(ClipboardData(text: sourceHtml!));
-                if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已复制页面源码，可以粘贴给开发者排查')));
-              },
-              child: const Text('复制页面源码'),
+          ],
+          if (error != null && isCloudflare(error!))
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Center(
+                child: FilledButton(
+                  style: FilledButton.styleFrom(minimumSize: const Size(160, 44), padding: const EdgeInsets.symmetric(horizontal: 24)),
+                  onPressed: () async {
+                    final ok = await context.push<bool>(Routes.verify);
+                    if (ok == true && context.mounted) onRetry?.call();
+                  },
+                  child: const Text('去验证'),
+                ),
+              ),
             ),
-          ),
-        if (onRetry != null && guest) ...[
-          const SizedBox(height: 12),
-          Center(
-            child: TextButton(onPressed: () => context.push(Routes.login), child: const Text('可能需要登录，去登录')),
-          ),
+          if (actions.isNotEmpty) ...[
+            const SizedBox(height: 24),
+            Wrap(alignment: WrapAlignment.center, spacing: 12, runSpacing: 10, children: actions),
+          ],
+          if (canSwitchNode)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Center(
+                child: TextButton(
+                  onPressed: () async {
+                    await ref.read(nodeProvider.notifier).set(Wenku8Node.wwwWenku8Cc);
+                    onRetry?.call();
+                  },
+                  child: const Text('连不上？切到备用节点 wenku8.cc'),
+                ),
+              ),
+            ),
+          if (onRetry != null && sourceHtml != null)
+            Center(
+              child: TextButton(
+                onPressed: () async {
+                  await Clipboard.setData(ClipboardData(text: sourceHtml!));
+                  if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已复制页面源码，可以粘贴给开发者排查')));
+                },
+                child: const Text('复制页面源码'),
+              ),
+            ),
+          if (onRetry != null && guest) ...[
+            const SizedBox(height: 12),
+            Center(
+              child: TextButton(onPressed: () => context.push(Routes.login), child: const Text('可能需要登录，去登录')),
+            ),
+          ],
         ],
-      ],
+      ),
     );
   }
 }
@@ -149,15 +203,24 @@ final srVersionProvider = Provider<int>((ref) {
   return n.value;
 });
 
+/// 按图片地址细粒度订阅超分版本号；若测试桩仅实现了旧 `srVersion` 未实现 `srNotifierFor`，自动回退避免破坏旧桩。
+final _urlSrVersionProvider = Provider.autoDispose.family<int, String>((ref, url) {
+  try {
+    return ref.watch(srVersionForProvider(url));
+  } on Object {
+    return ref.watch(srVersionProvider);
+  }
+});
+
 final imageBytesProvider = FutureProvider.autoDispose.family<Uint8List, String>((ref, url) {
-  ref.watch(srVersionProvider); // 放大好了重新取
+  ref.watch(_urlSrVersionProvider(url)); // 仅订阅当前图片地址的超分版本号，避免单图超分触发全屏级失效重建
   final store = ref.read(imageStoreProvider);
   ref.onDispose(() => store.cancel(url)); // 没人看了（滑出屏幕），还在排队的就别下了
   return store.load(url);
 }, retry: (_, _) => null);
 
 class NetImage extends ConsumerWidget {
-  const NetImage(this.url, {super.key, this.fit = BoxFit.cover, this.loading, this.error, this.errorBuilder, this.full = false});
+  const NetImage(this.url, {super.key, this.fit = BoxFit.cover, this.loading, this.error, this.errorBuilder, this.full = false, this.maxDecodeWidth});
 
   final String url;
   final BoxFit fit;
@@ -168,6 +231,9 @@ class NetImage extends ConsumerWidget {
   /// 按原图大小解码（能放大看的地方用）；默认按格子大小解码，见 [_Fitted]
   final bool full;
 
+  /// 可选解码宽度上限（物理像素，如卷册后置露出边 120px 降低内存峰值）
+  final int? maxDecodeWidth;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     Widget fallback() => errorBuilder?.call(() => ref.invalidate(imageBytesProvider(url))) ?? error ?? const SizedBox.shrink();
@@ -175,8 +241,9 @@ class NetImage extends ConsumerWidget {
     final crop = splitCrop(url).crop;
     if (isWebPreview) return _cropped(Image.network(displayImageUrl(splitCrop(url).url), fit: fit, errorBuilder: (_, _, _) => fallback()), crop);
     final store = ref.read(imageStoreProvider);
-    ref.watch(srVersionProvider);
+    ref.watch(_urlSrVersionProvider(url));
     Widget image(Uint8List b, {bool fade = false}) {
+      CoverImage.clearFailed(url);
       Widget build(ImageProvider p) => _cropped(Image(image: p, fit: fit, gaplessPlayback: true, frameBuilder: fade ? _fadeIn : null, errorBuilder: (_, _, _) => fallback()), crop);
       if (full) return build(MemoryImage(b));
       final dpr = MediaQuery.devicePixelRatioOf(context);
@@ -184,7 +251,7 @@ class NetImage extends ConsumerWidget {
         builder: (context, c) {
           // 裁剪时整张图比格子大：裁出来的那块才铺满格子
           final box = Size(_bucket(c.maxWidth * dpr / (crop?.width ?? 1)), _bucket(c.maxHeight * dpr / (crop?.height ?? 1)));
-          return build(_Fitted(url, b, box, fit == BoxFit.cover));
+          return build(_Fitted(url, b, box, fit == BoxFit.cover, maxDecodeWidth: maxDecodeWidth));
         },
       );
     }
@@ -233,12 +300,13 @@ class NetImage extends ConsumerWidget {
 /// 按格子大小解码。高清封面原图 1440×2048，原样解码一张占 12 MB，Flutter 的图片缓存（100 MB）装不下一屏书架，滑回来又得重新解码。
 /// 按地址认图（不按字节对象）：内存里的字节被挤掉、再从磁盘读回来时，Flutter 图片缓存里解码好的那张还能接着用。
 class _Fitted extends ImageProvider<_Fitted> {
-  const _Fitted(this.url, this.bytes, this.box, this.cover);
+  const _Fitted(this.url, this.bytes, this.box, this.cover, {this.maxDecodeWidth});
 
   final String url;
   final Uint8List bytes;
   final Size box; // 物理像素；无限表示这个方向不限
   final bool cover; // 铺满格子（取两边缩放比里大的那个），否则整张放进格子
+  final int? maxDecodeWidth;
 
   @override
   Future<_Fitted> obtainKey(ImageConfiguration configuration) => SynchronousFuture(this);
@@ -250,28 +318,59 @@ class _Fitted extends ImageProvider<_Fitted> {
     await ui.ImmutableBuffer.fromUint8List(bytes),
     getTargetSize: (w, h) {
       final sx = box.width / w, sy = box.height / h;
-      final s = sx.isInfinite ? sy : (sy.isInfinite ? sx : (cover ? math.max(sx, sy) : math.min(sx, sy)));
-      return s >= 1 ? const ui.TargetImageSize() : ui.TargetImageSize(width: (w * s).ceil());
+      var s = sx.isInfinite ? sy : (sy.isInfinite ? sx : (cover ? math.max(sx, sy) : math.min(sx, sy)));
+      if (maxDecodeWidth != null && w > maxDecodeWidth!) {
+        s = math.min(s, maxDecodeWidth! / w);
+      }
+      return s >= 1 ? const ui.TargetImageSize() : ui.TargetImageSize(width: math.max(1, (w * s).ceil()));
     },
   );
 
   // 带上字节数：同一个地址换成放大清晰度后的图时不会拿到原图解码好的那张
   @override
-  bool operator ==(Object other) => other is _Fitted && other.url == url && other.bytes.length == bytes.length && other.box == box && other.cover == cover;
+  bool operator ==(Object other) => other is _Fitted && other.url == url && other.bytes.length == bytes.length && other.box == box && other.cover == cover && other.maxDecodeWidth == maxDecodeWidth;
 
   @override
-  int get hashCode => Object.hash(url, bytes.length, box, cover);
+  int get hashCode => Object.hash(url, bytes.length, box, cover, maxDecodeWidth);
 }
 
 Widget _fadeIn(BuildContext context, Widget child, int? frame, bool sync) =>
     sync ? child : AnimatedOpacity(opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 150), child: child);
 
 class CoverImage extends ConsumerWidget {
-  const CoverImage(this.url, {super.key, this.aid, this.volumeTitle});
+  const CoverImage(this.url, {super.key, this.aid, this.volumeTitle, this.maxDecodeWidth});
 
   final String url;
   final String? aid;
   final String? volumeTitle;
+  final int? maxDecodeWidth;
+
+  /// 封面加载失败的短 TTL 记录（30s）：首次偶发失败先轻量重试，避免瞬态抖动直接整轮拉黑。
+  static const failedUrlTtl = Duration(seconds: 30);
+  static final _failedUrls = <String, DateTime>{};
+
+  @visibleForTesting
+  static DateTime Function() clock = DateTime.now;
+
+  static void _pruneFailed(DateTime now) {
+    _failedUrls.removeWhere((_, at) => now.difference(at) >= failedUrlTtl);
+  }
+
+  /// 手动重试或刷新时清除失败记录（传入 [url] 仅清该图，留空全清）。
+  static void clearFailed([String? url]) {
+    if (url == null) {
+      _failedUrls.clear();
+    } else {
+      _failedUrls.remove(splitCrop(url).url);
+    }
+  }
+
+  @visibleForTesting
+  static bool isMarkedFailed(String url) {
+    final now = clock();
+    _pruneFailed(now);
+    return _failedUrls.containsKey(splitCrop(url).url);
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -284,14 +383,22 @@ class CoverImage extends ConsumerWidget {
         child: SizedBox.expand(
           child: NetImage(
             url,
+            maxDecodeWidth: maxDecodeWidth,
             error: icon,
-            errorBuilder: aid == null
-                ? null
-                : (_) {
-                    final queue = ref.read(volumeCoverQueueProvider);
-                    Future.microtask(() => queue.reportCoverFailed(aid!, url, volumeTitle: volumeTitle));
-                    return icon;
-                  },
+            errorBuilder: (retry) {
+              final clean = splitCrop(url).url;
+              if (clean.isEmpty) return icon;
+              final now = clock();
+              _pruneFailed(now);
+              if (!_failedUrls.containsKey(clean)) {
+                _failedUrls[clean] = now;
+                Future.microtask(retry);
+              } else if (aid != null) {
+                final queue = ref.read(volumeCoverQueueProvider);
+                Future.microtask(() => queue.reportCoverFailed(aid!, url, volumeTitle: volumeTitle));
+              }
+              return icon;
+            },
           ),
         ),
       ),
@@ -315,19 +422,31 @@ class NovelCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return InkWell(
-      borderRadius: BorderRadius.circular(10),
-      onTap: onTap ?? () => context.push(Routes.novel(aid)),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AspectRatio(
-            aspectRatio: 3 / 4,
-            child: Stack(fit: StackFit.expand, children: [CoverImage(imageUrl ?? Wenku8Parser.coverUrl(aid), aid: aid), if (badge != null) Positioned(top: 6, right: 6, child: badge!), if (action != null) Positioned(right: 2, bottom: 2, child: action!)]),
-          ),
-          const SizedBox(height: 8),
-          Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(height: 1.3)),
-        ],
+    return Semantics(
+      container: true,
+      label: title,
+      button: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap ?? () => context.push(Routes.novel(aid)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AspectRatio(
+              aspectRatio: 3 / 4,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CoverImage(imageUrl ?? Wenku8Parser.coverUrl(aid), aid: aid),
+                  if (badge != null) Positioned(top: 6, right: 6, child: badge!),
+                  if (action != null) Positioned(right: 2, bottom: 2, child: action!),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(height: 1.3)),
+          ],
+        ),
       ),
     );
   }
@@ -335,8 +454,13 @@ class NovelCard extends StatelessWidget {
 
 int gridColumns(double width) => (width / 132).floor().clamp(3, 8);
 
-SliverGridDelegate novelGridDelegate(double width) =>
-    SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: gridColumns(width), mainAxisSpacing: 20, crossAxisSpacing: 14, childAspectRatio: 0.52);
+SliverGridDelegate novelGridDelegate(double width, {int? columns, double textScale = 1.0, double horizontalPadding = 32}) {
+  final cols = columns ?? gridColumns(width);
+  final scale = textScale.clamp(1.0, 1.6);
+  final itemW = math.max(1.0, (width - horizontalPadding - 14 * (cols - 1)) / cols);
+  final mainExtent = itemW * 4 / 3 + 8 + 42 * scale;
+  return SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 20, crossAxisSpacing: 14, mainAxisExtent: mainExtent);
+}
 
 /// 分页的书籍网格：下拉刷新，滑到底自动加载下一页。[fetch] 变化（用 [Key] 区分）时整体重新加载。
 class PagedNovelGrid extends ConsumerStatefulWidget {
@@ -461,7 +585,7 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                 sliver: SliverGrid.builder(
-                  gridDelegate: novelGridDelegate(c.maxWidth),
+                  gridDelegate: novelGridDelegate(c.maxWidth, textScale: MediaQuery.textScalerOf(context).scale(1)),
                   itemCount: items.length,
                   itemBuilder: (context, i) => NovelCard(title: items[i].title, aid: items[i].aid, imageUrl: items[i].imageUrl),
                 ),
@@ -488,7 +612,7 @@ class _GridSkeleton extends StatelessWidget {
     return GridView.builder(
       physics: const NeverScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      gridDelegate: novelGridDelegate(width),
+      gridDelegate: novelGridDelegate(width, textScale: MediaQuery.textScalerOf(context).scale(1)),
       itemCount: 12,
       itemBuilder: (context, i) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,

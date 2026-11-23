@@ -2,10 +2,10 @@ import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../cover_color.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../stats.dart';
-import '../volumes.dart';
+import '../volume_covers.dart';
+import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
 import '../widgets.dart';
 import '../text.dart';
 
@@ -93,28 +93,35 @@ class _YearHeader extends StatelessWidget {
                   ),
                   const SizedBox(width: 20),
                   Expanded(
-                    child: SizedBox(
-                      height: 64,
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          for (var m = 0; m < 12; m++)
-                            Expanded(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        for (var m = 0; m < 12; m++)
+                          Expanded(
+                            child: Semantics(
+                              label: '${m + 1}月读完 ${perMonth[m]} 卷',
                               child: Column(
+                                mainAxisSize: MainAxisSize.min,
                                 mainAxisAlignment: MainAxisAlignment.end,
                                 children: [
-                                  Container(
-                                    margin: const EdgeInsets.symmetric(horizontal: 2),
-                                    height: 44 * perMonth[m] / most + 2,
-                                    decoration: BoxDecoration(color: perMonth[m] == 0 ? theme.colorScheme.outlineVariant : theme.colorScheme.primary, borderRadius: BorderRadius.circular(2)),
+                                  SizedBox(
+                                    height: 46,
+                                    child: Align(
+                                      alignment: Alignment.bottomCenter,
+                                      child: Container(
+                                        margin: const EdgeInsets.symmetric(horizontal: 2),
+                                        height: 44 * perMonth[m] / most + 2,
+                                        decoration: BoxDecoration(color: perMonth[m] == 0 ? theme.colorScheme.outlineVariant : theme.colorScheme.primary, borderRadius: BorderRadius.circular(2)),
+                                      ),
+                                    ),
                                   ),
                                   const SizedBox(height: 4),
-                                  Text('${m + 1}', style: theme.textTheme.labelSmall?.copyWith(fontSize: 9, color: theme.colorScheme.onSurfaceVariant)),
+                                  Text('${m + 1}', maxLines: 1, softWrap: false, style: theme.textTheme.labelSmall?.copyWith(fontSize: 9, color: theme.colorScheme.onSurfaceVariant)),
                                 ],
                               ),
                             ),
-                        ],
-                      ),
+                          ),
+                      ],
                     ),
                   ),
                 ],
@@ -138,7 +145,6 @@ class _VolumeTile extends ConsumerWidget {
     final (aid, index, v, at) = entry;
     final info = ReadingStats.info(aid);
     final cover = ref.read(volumeCoverQueueProvider).volCover(aid, v, info.img);
-    ref.watch(coverColorProvider(cover)); // 顺手把背景色算好存下，点进报告时直接用
     final stars = Volumes.rating(aid, v.title);
     final d = DateTime.fromMillisecondsSinceEpoch(at);
     return InkWell(

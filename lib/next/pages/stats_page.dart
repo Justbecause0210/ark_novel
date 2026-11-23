@@ -9,9 +9,10 @@ import '../cache.dart';
 import '../history.dart';
 import '../progress.dart';
 import '../read_state.dart';
-import '../router.dart';
+import '../routes.dart';
 import '../stats.dart';
-import '../volumes.dart';
+import '../volume_covers.dart';
+import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
 import '../widgets.dart';
 import '../text.dart';
 
@@ -135,9 +136,10 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
     String cover(String aid, String img) => queue.bookCover(aid, img.isNotEmpty ? img : Wenku8Parser.coverUrl(aid));
 
+    final cardRadius = (theme.cardTheme.shape as RoundedRectangleBorder?)?.borderRadius ?? BorderRadius.circular(16);
     Widget card(Widget child, {VoidCallback? onTap}) => Material(
       color: scheme.surfaceContainerLowest,
-      borderRadius: BorderRadius.circular(16),
+      borderRadius: cardRadius,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onTap,
@@ -150,6 +152,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     final nonZero = bars.where((b) => b.$2 > 0);
     final avg = nonZero.isEmpty ? 0 : nonZero.fold(0, (a, b) => a + b.$2) ~/ nonZero.length;
     const chartH = 120.0;
+    final labelH = math.max(20.0, MediaQuery.textScalerOf(context).scale(16));
     final picked = _picked != null && _picked! < bars.length ? bars[_picked!] : null;
     // 柱状图下面列出读了哪几本：点了柱子是那一天（那个月），没点是整段时间
     final from = bars.first.$4;
@@ -252,64 +255,84 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                       ),
                       const SizedBox(height: 16),
                       SizedBox(
-                        height: chartH + 20,
-                        child: Stack(
-                          children: [
-                            Row(
-                              crossAxisAlignment: CrossAxisAlignment.end,
-                              children: [
-                                for (final (i, (label, sec, _, _)) in bars.indexed)
-                                  Expanded(
-                                    child: MouseRegion(
-                                      cursor: SystemMouseCursors.click,
-                                      child: GestureDetector(
-                                        behavior: HitTestBehavior.opaque,
-                                        onTap: () => setState(() => _picked = _picked == i ? null : i),
-                                      child: Padding(
-                                        padding: EdgeInsets.symmetric(horizontal: _range == 1 ? 1 : 4),
-                                        child: Column(
-                                          mainAxisAlignment: MainAxisAlignment.end,
-                                          children: [
-                                            AnimatedContainer(
-                                              duration: const Duration(milliseconds: 300),
-                                              curve: Curves.easeOutCubic,
-                                              height: math.max(2, chartH * sec / maxBar), // 最高的正好顶满，不能再加，否则超出 2 像素
-                                              decoration: BoxDecoration(
-                                                color: _picked != null
-                                                    ? (_picked == i ? scheme.primary : scheme.primary.withValues(alpha: 0.25))
-                                                    : (sec >= avg && avg > 0 ? scheme.primary : scheme.primary.withValues(alpha: 0.45)),
-                                                borderRadius: BorderRadius.circular(_range == 1 ? 2 : 5),
-                                              ),
-                                            ),
-                                            SizedBox(
-                                              height: 20,
-                                              child: Center(
-                                                child: Text(
-                                                  label,
-                                                  maxLines: 1,
-                                                  softWrap: false,
-                                                  overflow: TextOverflow.visible,
-                                                  style: theme.textTheme.labelSmall?.copyWith(color: _picked == i ? scheme.primary : scheme.onSurfaceVariant, fontWeight: _picked == i ? FontWeight.w700 : null),
+                        height: chartH + labelH,
+                        child: LayoutBuilder(
+                          builder: (context, c) {
+                            void pickAt(double dx) {
+                              if (bars.isEmpty || c.maxWidth <= 0) return;
+                              final idx = (dx / c.maxWidth * bars.length).floor().clamp(0, bars.length - 1);
+                              if (_picked != idx) setState(() => _picked = idx);
+                            }
+
+                            return GestureDetector(
+                              behavior: HitTestBehavior.translucent,
+                              onHorizontalDragStart: (d) => pickAt(d.localPosition.dx),
+                              onHorizontalDragUpdate: (d) => pickAt(d.localPosition.dx),
+                              child: Stack(
+                                children: [
+                                  Row(
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: [
+                                      for (final (i, (label, sec, fullDate, _)) in bars.indexed)
+                                        Expanded(
+                                          child: Semantics(
+                                            button: true,
+                                            selected: _picked == i,
+                                            label: '$fullDate，${sec == 0 ? '未阅读' : _duration(sec)}',
+                                            child: MouseRegion(
+                                              cursor: SystemMouseCursors.click,
+                                              child: GestureDetector(
+                                                behavior: HitTestBehavior.opaque,
+                                                onTap: () => setState(() => _picked = _picked == i ? null : i),
+                                                child: Padding(
+                                                  padding: EdgeInsets.symmetric(horizontal: _range == 1 ? 1 : 4),
+                                                  child: Column(
+                                                    mainAxisAlignment: MainAxisAlignment.end,
+                                                    children: [
+                                                      AnimatedContainer(
+                                                        duration: const Duration(milliseconds: 300),
+                                                        curve: Curves.easeOutCubic,
+                                                        height: math.max(2, chartH * sec / maxBar), // 最高的正好顶满，不能再加，否则超出 2 像素
+                                                        decoration: BoxDecoration(
+                                                          color: _picked != null
+                                                              ? (_picked == i ? scheme.primary : scheme.primary.withValues(alpha: 0.25))
+                                                              : (sec >= avg && avg > 0 ? scheme.primary : scheme.primary.withValues(alpha: 0.45)),
+                                                          borderRadius: BorderRadius.circular(_range == 1 ? 2 : 5),
+                                                        ),
+                                                      ),
+                                                      SizedBox(
+                                                        height: labelH,
+                                                        child: Center(
+                                                          child: Text(
+                                                            label,
+                                                            maxLines: 1,
+                                                            softWrap: false,
+                                                            overflow: TextOverflow.visible,
+                                                            style: theme.textTheme.labelSmall?.copyWith(color: _picked == i ? scheme.primary : scheme.onSurfaceVariant, fontWeight: _picked == i ? FontWeight.w700 : null),
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
                                                 ),
                                               ),
                                             ),
-                                          ],
+                                          ),
                                         ),
-                                      ),
-                                      ),
-                                    ),
+                                    ],
                                   ),
-                              ],
-                            ),
-                            // 平均线
-                            if (avg > 0)
-                              Positioned(
-                                left: 0,
-                                right: 0,
-                                bottom: 20 + chartH * avg / maxBar,
-                                child: IgnorePointer(child: Container(height: 1, color: scheme.onSurfaceVariant.withValues(alpha: 0.5))),
+                                  // 平均线
+                                  if (avg > 0)
+                                    Positioned(
+                                      left: 0,
+                                      right: 0,
+                                      bottom: labelH + chartH * avg / maxBar,
+                                      child: IgnorePointer(child: Container(height: 1, color: scheme.onSurfaceVariant.withValues(alpha: 0.5))),
+                                    ),
+                                ],
                               ),
-                          ],
+                            );
+                          },
                         ),
                       ),
                       if (booksInRange.isNotEmpty) ...[
@@ -402,20 +425,23 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                         children: [
                           for (var m = 0; m < 12; m++)
                             Expanded(
-                              child: Column(
-                                children: [
-                                  Text(perMonth[m] == 0 ? '' : '${perMonth[m]}', style: theme.textTheme.labelSmall),
-                                  Container(
-                                    height: math.max(2, 36.0 * perMonth[m] / maxMonth),
-                                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                                    decoration: BoxDecoration(
-                                      color: m > now.month - 1 ? scheme.onSurface.withValues(alpha: 0.06) : scheme.primary.withValues(alpha: perMonth[m] == 0 ? 0.15 : 0.8),
-                                      borderRadius: BorderRadius.circular(3),
+                              child: Semantics(
+                                label: '${m + 1}月读完 ${perMonth[m]} 卷',
+                                child: Column(
+                                  children: [
+                                    Text(perMonth[m] == 0 ? '' : '${perMonth[m]}', style: theme.textTheme.labelSmall),
+                                    Container(
+                                      height: math.max(2, 36.0 * perMonth[m] / maxMonth),
+                                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                                      decoration: BoxDecoration(
+                                        color: m > now.month - 1 ? scheme.onSurface.withValues(alpha: 0.06) : scheme.primary.withValues(alpha: perMonth[m] == 0 ? 0.15 : 0.8),
+                                        borderRadius: BorderRadius.circular(3),
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text('${m + 1}', style: muted),
-                                ],
+                                    const SizedBox(height: 4),
+                                    Text('${m + 1}', style: muted),
+                                  ],
+                                ),
                               ),
                             ),
                         ],
@@ -545,29 +571,44 @@ class _ManageStatsPageState extends State<_ManageStatsPage> {
   }
 }
 
-/// GitHub 那样的阅读日历：一列一周（周一在上），越往右越近，颜色越深读得越久。格子数按宽度放得下多少周算。
-class _Heatmap extends StatelessWidget {
+/// GitHub 那样的阅读日历：一列一周（周一在上），越往右越近，颜色越深读得越久。格子数按宽度放得下多少周算；点击格子查看单日详情。
+class _Heatmap extends StatefulWidget {
   const _Heatmap({required this.perDay, required this.now});
 
   final Map<String, int> perDay;
   final DateTime now;
 
+  @override
+  State<_Heatmap> createState() => _HeatmapState();
+}
+
+class _HeatmapState extends State<_Heatmap> {
   static const _cell = 13.0, _gap = 3.0;
+  DateTime? _picked;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final small = Theme.of(context).textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant);
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final small = theme.textTheme.labelSmall?.copyWith(color: scheme.onSurfaceVariant);
+    final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
     Color colorOf(int sec) {
       final m = sec / 60;
       if (m <= 0) return scheme.onSurface.withValues(alpha: 0.06);
       return scheme.primary.withValues(alpha: m < 15 ? 0.3 : (m < 30 ? 0.5 : (m < 60 ? 0.75 : 1)));
     }
 
+    final picked = _picked;
+    final pickedKey = picked == null ? null : ReadingStats.dayKey(picked);
+    final pickedSec = pickedKey == null ? 0 : (widget.perDay[pickedKey] ?? 0);
+    final pickedBooks = pickedKey == null
+        ? const <MapEntry<String, int>>[]
+        : (ReadingStats.booksOn((k) => k == pickedKey).entries.toList()..sort((a, b) => b.value.compareTo(a.value)));
+
     return LayoutBuilder(
       builder: (context, c) {
         final weeks = ((c.maxWidth + _gap) / (_cell + _gap)).floor().clamp(4, 53);
-        final today = DateTime(now.year, now.month, now.day);
+        final today = DateTime(widget.now.year, widget.now.month, widget.now.day);
         final monday = DateTime(today.year, today.month, today.day - (today.weekday - 1));
         final start = DateTime(monday.year, monday.month, monday.day - 7 * (weeks - 1));
         return Column(
@@ -576,28 +617,48 @@ class _Heatmap extends StatelessWidget {
             Row(
               children: [
                 for (var w = 0; w < weeks; w++)
-                  Padding(
-                    padding: EdgeInsets.only(right: w < weeks - 1 ? _gap : 0),
-                    child: Column(
-                      children: [
-                        for (var d = 0; d < 7; d++)
-                          () {
-                            final day = DateTime(start.year, start.month, start.day + w * 7 + d);
-                            return Padding(
-                              padding: EdgeInsets.only(bottom: d < 6 ? _gap : 0),
-                              child: Container(
-                                width: _cell,
-                                height: _cell,
-                                decoration: BoxDecoration(
-                                  color: day.isAfter(today) ? Colors.transparent : colorOf(perDay[ReadingStats.dayKey(day)] ?? 0),
-                                  borderRadius: BorderRadius.circular(3),
-                                  border: day == today ? Border.all(color: scheme.primary, width: 1.2) : null,
+                  Column(
+                    children: [
+                      for (var d = 0; d < 7; d++)
+                        () {
+                          final day = DateTime(start.year, start.month, start.day + w * 7 + d);
+                          final future = day.isAfter(today);
+                          final sec = future ? 0 : (widget.perDay[ReadingStats.dayKey(day)] ?? 0);
+                          final isPicked = !future && picked == day;
+                          final label = '${day.year}年${day.month}月${day.day}日，${sec == 0 ? '未阅读' : _duration(sec)}';
+                          final box = Padding(
+                            padding: EdgeInsets.only(right: w < weeks - 1 ? _gap : 0, bottom: d < 6 ? _gap : 0),
+                            child: Container(
+                              width: _cell,
+                              height: _cell,
+                              decoration: BoxDecoration(
+                                color: future ? Colors.transparent : colorOf(sec),
+                                borderRadius: BorderRadius.circular(3),
+                                border: isPicked
+                                    ? Border.all(color: scheme.onSurface, width: 1.6)
+                                    : (day == today ? Border.all(color: scheme.primary, width: 1.2) : null),
+                              ),
+                            ),
+                          );
+                          if (future) return box;
+                          return Semantics(
+                            button: true,
+                            selected: isPicked,
+                            label: label,
+                            child: Tooltip(
+                              message: label,
+                              child: MouseRegion(
+                                cursor: SystemMouseCursors.click,
+                                child: GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => setState(() => _picked = _picked == day ? null : day),
+                                  child: box,
                                 ),
                               ),
-                            );
-                          }(),
-                      ],
-                    ),
+                            ),
+                          );
+                        }(),
+                    ],
                   ),
               ],
             ),
@@ -611,6 +672,40 @@ class _Heatmap extends StatelessWidget {
                 Text(' 多', style: small),
               ],
             ),
+            if (picked != null) ...[
+              const Divider(height: 20),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '${picked.year}年${picked.month}月${picked.day}日 · ${pickedSec == 0 ? '当天未阅读' : _duration(pickedSec)}',
+                      style: theme.textTheme.bodyMedium?.copyWith(color: scheme.primary, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: hz(context, '关闭单日详情'),
+                    visualDensity: VisualDensity.compact,
+                    iconSize: 18,
+                    icon: const Icon(Icons.close),
+                    onPressed: () => setState(() => _picked = null),
+                  ),
+                ],
+              ),
+              for (final e in pickedBooks.take(5))
+                InkWell(
+                  onTap: () => context.push(Routes.report(e.key)),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Expanded(child: Text(ReadingStats.info(e.key).title, maxLines: 1, overflow: TextOverflow.ellipsis)),
+                        const SizedBox(width: 12),
+                        Text(_duration(e.value), style: muted),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
           ],
         );
       },

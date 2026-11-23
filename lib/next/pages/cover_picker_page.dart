@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../app_prefs.dart';
@@ -13,7 +13,7 @@ import '../cover_trim.dart';
 import '../data.dart';
 import '../image_cache.dart';
 import '../unlock.dart';
-import '../volumes.dart';
+import '../volumes.dart' show Vol, Volumes;
 import '../widgets.dart';
 import '../text.dart';
 
@@ -272,12 +272,15 @@ class _CropPageState extends ConsumerState<_CropPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle.light,
+      child: Scaffold(
         backgroundColor: Colors.black,
-        foregroundColor: Colors.white,
-        title: const Text('框出封面', style: TextStyle(color: Colors.white)),
+        appBar: AppBar(
+          systemOverlayStyle: SystemUiOverlayStyle.light,
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.white,
+          title: const Text('框出封面', style: TextStyle(color: Colors.white)),
         actions: [
           TextButton(
             // 整张也去掉四周的白边（开着自动去白边时）
@@ -347,7 +350,7 @@ class _CropPageState extends ConsumerState<_CropPage> {
                         Switch(
                           value: _trimOn,
                           onChanged: (v) {
-                            AppPrefs.write(P.coverTrim, v);
+                            ref.read(appPrefsProvider.notifier).set(P.coverTrim, v);
                             _trimOn = v;
                             _retrim(px, img, frame);
                           },
@@ -423,6 +426,7 @@ class _CropPageState extends ConsumerState<_CropPage> {
             },
           );
         },
+      ),
       ),
     );
   }
