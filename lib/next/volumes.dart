@@ -4,6 +4,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../models/cat_volume.dart';
 import 'cache.dart';
+import 'local_books.dart' show LocalBooks, isLocalAid;
 import 'progress.dart';
 import 'read_state.dart';
 import 'stats.dart';
@@ -297,7 +298,8 @@ class Volumes {
   /// 这卷读过的字数：读过、而且缓存过（读过的章节都会自动缓存）的章节字数之和。
   static int readChars(String aid, Vol v) {
     final read = ReadState.readView(aid);
-    return v.cids.where(read.contains).fold(0, (a, c) => a + (ChapterCache.length(aid, c) ?? 0));
+    final local = isLocalAid(aid);
+    return v.cids.where(read.contains).fold(0, (a, c) => a + ((local ? LocalBooks.chapterLength(aid, c) : ChapterCache.length(aid, c)) ?? 0));
   }
 }
 

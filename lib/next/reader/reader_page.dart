@@ -29,6 +29,7 @@ import '../history.dart';
 import '../image_cache.dart' show ImageStore, imageStoreProvider;
 import '../incognito.dart';
 import '../library.dart' show LibraryStore;
+import '../local_books.dart' show LocalBooks, isLocalAid;
 import '../net_state.dart';
 import '../pages/novel_page.dart';
 import '../pages/rules_page.dart' show showRuleDialog;
@@ -194,35 +195,40 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
     if (!cancel.isCancelled) cancel.cancel('chapter disposed');
   });
   final hantOn = ref.watch(readerPrefsProvider.select((p) => p.hant));
-  var raw = await ChapterCache.get(key.$1, key.$2);
-  if (raw != null && isLockedContent(raw)) raw = null; // 以前存下的「因版权问题…」，重新取
-  if (raw == null) {
-    final ticket = ChapterCache.ticket(key.$1, key.$2);
-    try {
-      raw = await _fetchChapterRaw(
-        ref.read(wenku8ClientProvider),
-        ref.read(wenku8UrlsProvider),
-        ref.read(unlockServiceProvider),
-        (c) => ref.read(apiProvider).catalogue(key.$1, cancelToken: c),
-        key.$1,
-        key.$2,
-        cancelToken: cancel,
-        onCloudflare: () => ref.read(sessionProvider.notifier).markNeedsVerify(),
-      );
-    } on ChapterLockedException catch (e) {
-      // 受限书里取不到的章（多半是插图）：给一句说明照常往后翻；不存缓存，下次还会再试
-      final text = formatChapter(e.message);
-      return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
-    }
-    if (Wenku8Parser.isCopyrightLockedText(raw.text) && raw.images.isEmpty) {
-      final text = formatChapter(raw.text);
-      return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
-    }
-    // 读过的章节顺手存下来，断网也能再看；写失败不影响阅读。取的这会儿刚好清了缓存、或者开启了无痕阅读时不写回去
-    if (!Incognito.on) {
+  Content? raw;
+  if (isLocalAid(key.$1)) {
+    raw = await LocalBooks.loadChapter(key.$1, key.$2);
+  } else {
+    raw = await ChapterCache.get(key.$1, key.$2);
+    if (raw != null && isLockedContent(raw)) raw = null; // 以前存下的「因版权问题…」，重新取
+    if (raw == null) {
+      final ticket = ChapterCache.ticket(key.$1, key.$2);
       try {
-        await ChapterCache.put(key.$1, key.$2, raw, ticket: ticket);
-      } catch (_) {}
+        raw = await _fetchChapterRaw(
+          ref.read(wenku8ClientProvider),
+          ref.read(wenku8UrlsProvider),
+          ref.read(unlockServiceProvider),
+          (c) => ref.read(apiProvider).catalogue(key.$1, cancelToken: c),
+          key.$1,
+          key.$2,
+          cancelToken: cancel,
+          onCloudflare: () => ref.read(sessionProvider.notifier).markNeedsVerify(),
+        );
+      } on ChapterLockedException catch (e) {
+        // 受限书里取不到的章（多半是插图）：给一句说明照常往后翻；不存缓存，下次还会再试
+        final text = formatChapter(e.message);
+        return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
+      }
+      if (Wenku8Parser.isCopyrightLockedText(raw.text) && raw.images.isEmpty) {
+        final text = formatChapter(raw.text);
+        return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
+      }
+      // 读过的章节顺手存下来，断网也能再看；写失败不影响阅读。取的这会儿刚好清了缓存、或者开启了无痕阅读时不写回去
+      if (!Incognito.on) {
+        try {
+          await ChapterCache.put(key.$1, key.$2, raw, ticket: ticket);
+        } catch (_) {}
+      }
     }
   }
   // 请求完成后再保活 3 分钟：加载中若用户切章或退出，autoDispose 会立刻触发上面的 CancelToken 取消网络请求
@@ -241,10 +247,12 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
 /// 同样的书签和版面返回同一个 Future：书签列表在可拖动的弹窗里，拖动时每帧都重建，不能每帧都重新整章排版。
 Future<(int, int)?> bookmarkPage(WidgetRef ref, BuildContext context, String aid, String cid, String title, int offset) {
   final prefs = ref.read(readerPrefsProvider);
-  if (prefs.mode == 0 || ChapterCache.length(aid, cid) == null) return Future.value();
+  final local = isLocalAid(aid);
+  final len = local ? LocalBooks.chapterLength(aid, cid) : ChapterCache.length(aid, cid);
+  if (prefs.mode == 0 || (!local && len == null)) return Future.value();
   final size = MediaQuery.sizeOf(context);
   final view = MediaQuery.viewPaddingOf(context);
-  final key = (aid, cid, title, offset, prefs, size, view, PagedBody.lastLayout, ChapterCache.length(aid, cid));
+  final key = (aid, cid, title, offset, prefs, size, view, PagedBody.lastLayout, len);
   final hit = _bookmarkPages.remove(key);
   final future = hit ?? _bookmarkPage(ref, aid, cid, title, offset, prefs, size, view);
   _bookmarkPages[key] = future;
@@ -1205,7 +1213,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                             ChapterPeek? peek(CatChapter? ch) {
                               if (ch == null) return null;
                               final p = chapterProvider((widget.aid, ch.cid));
-                              if (!ChapterCache.has(widget.aid, ch.cid) && !ref.exists(p)) return null;
+                              if (!isLocalAid(widget.aid) && !ChapterCache.has(widget.aid, ch.cid) && !ref.exists(p)) return null;
                               final v = ref.watch(p).value;
                               if (v == null) return null;
                               return ChapterPeek(
@@ -1763,7 +1771,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     if (!mounted || _preloadCancel.isCancelled) return;
     if (!_inFlightPrefetch.add(cid)) return;
     try {
-      if (!ChapterCache.has(widget.aid, cid) && !Incognito.on) {
+      if (!isLocalAid(widget.aid) && !ChapterCache.has(widget.aid, cid) && !Incognito.on) {
         final ticket = ChapterCache.ticket(widget.aid, cid);
         final raw = await runInBackground(
           () => _fetchChapterRaw(
@@ -1798,6 +1806,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   /// 后台把整本的正文存到离线缓存（不含插图），一章一章慢慢取；先往后，再补前面。退出阅读器就停，下次打开接着来。
   /// 每章之前都重新看一遍设置和网络：中途关掉开关、离开 Wi-Fi（开了仅 Wi-Fi 时）就停。
   Future<void> _cacheBook(List<CatChapter> chapters, int index) async {
+    if (isLocalAid(widget.aid)) return;
     for (final c in [...chapters.skip(index + 1), ...chapters.take(index)]) {
       if (!mounted || _preloadCancel.isCancelled || Incognito.on) return;
       if (ChapterCache.has(widget.aid, c.cid) || _inFlightPrefetch.contains(c.cid)) continue;

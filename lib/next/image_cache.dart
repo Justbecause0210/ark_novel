@@ -19,6 +19,7 @@ import 'app_prefs.dart';
 import 'cache.dart';
 import 'files.dart';
 import 'library.dart';
+import 'local_books.dart' show LocalBooks, isLocalImageUrl;
 import 'session.dart';
 import 'volumes.dart';
 
@@ -247,9 +248,19 @@ class ImageStore {
       return running;
     }
     if (!fromPrefetch) _inflightRefs[url] = 1;
+    late final Future<Uint8List> f;
+    // 本地导入书籍图片（localimg:// 或本地路径）：直接读本地并放入内存 LRU，不走网络也不进磁盘 imgcache
+    if (isLocalImageUrl(url)) {
+      f = _fetchLocal(url).whenComplete(() {
+        if (identical(_inflight[url], f)) {
+          _inflight.remove(url);
+          _inflightRefs.remove(url);
+        }
+      });
+      return _inflight[url] = f;
+    }
     final token = CancelToken();
     _cancelTokens[url] = token;
-    late final Future<Uint8List> f;
     // 只删自己：被取消后又重新请求时，这里已经换成新的那次了
     f = _fetch(url, lowPriority: lowPriority, cancelToken: token).whenComplete(() {
       if (identical(_inflight[url], f)) {
@@ -261,9 +272,17 @@ class ImageStore {
     return _inflight[url] = f;
   }
 
+  Future<Uint8List> _fetchLocal(String url) async {
+    final bytes = await LocalBooks.readImageBytes(url);
+    if (bytes == null || bytes.isEmpty) throw StateError('local image not found: $url');
+    _put(url, bytes);
+    return bytes;
+  }
+
   /// 已经存在本机的图（内存或磁盘），没有返回 null，不联网
   Future<Uint8List?> cached(String rawUrl) async {
     final url = _norm(rawUrl);
+    if (isLocalImageUrl(url)) return peek(url) ?? await LocalBooks.readImageBytes(url);
     final f = File(p.join((await _cacheDir()).path, _name(url)));
     return peek(url) ?? (await f.exists() ? await f.readAsBytes() : null);
   }
@@ -299,6 +318,11 @@ class ImageStore {
   /// 本地缓存文件的路径（没缓存就先下载）：给通知栏封面这种只认文件的地方用
   Future<String> path(String rawUrl) async {
     final url = _norm(rawUrl);
+    if (isLocalImageUrl(url)) {
+      final localPath = await LocalBooks.resolveImagePath(url);
+      if (localPath == null) throw StateError('local image not found: $url');
+      return localPath;
+    }
     await load(url);
     // 内存里有、磁盘上的文件却可能已经被清理掉了：补写一份，别给出不存在的路径
     final file = File(p.join((await _cacheDir()).path, _name(url)));
@@ -705,6 +729,13 @@ class ImageStore {
       if (_memUsed > _memBytes ~/ 2) return;
       if (raw.isEmpty) continue;
       final url = _norm(raw);
+      if (isLocalImageUrl(url)) {
+        if (_mem.containsKey(url) || _inflight.containsKey(url)) continue;
+        final bytes = await LocalBooks.readImageBytes(url);
+        if (bytes == null || _mem.containsKey(url)) continue;
+        _put(url, bytes);
+        continue;
+      }
       final sr = _srShown(raw, url);
       final memKey = sr ? '$url#sr' : url;
       if (_mem.containsKey(memKey) || _inflight.containsKey(url)) continue;
@@ -733,6 +764,7 @@ class ImageStore {
       _memUsed -= _mem.remove('$url#sr')?.length ?? 0;
       _recentNetworkHits.remove(url);
       _srDone?.remove(name);
+      if (isLocalImageUrl(url)) continue;
       final f = File(p.join(dir.path, name));
       if (await f.exists()) await f.delete();
       if (srDir != null) {

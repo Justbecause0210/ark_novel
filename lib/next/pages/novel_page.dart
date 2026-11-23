@@ -16,8 +16,10 @@ import '../cache.dart';
 import '../chapter_list.dart';
 import '../data.dart';
 import '../env.dart';
+import '../export_book.dart';
 import '../image_cache.dart';
 import '../library.dart';
+import '../local_books.dart';
 import '../stats.dart';
 import '../volume_covers.dart';
 import '../volumes.dart' show Vol, Volumes, volumeChangeForProvider;
@@ -49,6 +51,10 @@ bool isNovelCacheFresh(String base, String aid, {Duration ttl = novelCacheTtl, D
 
 /// 详情 + 目录：存过的先给（不等网络，挂 VPN 时也秒开），缓存过期后再联网取最新的；联网失败而本地有就不报错。
 final novelProvider = StreamProvider.autoDispose.family<NovelPage, String>((ref, aid) async* {
+  if (isLocalAid(aid)) {
+    yield await LocalBooks.loadNovel(aid);
+    return;
+  }
   final api = ref.watch(apiProvider);
   final base = siteBase(ref.watch(nodeProvider));
   final saved = await api.saved(aid);
@@ -185,7 +191,19 @@ class _BodyState extends ConsumerState<_Body> {
   /// 本地书架：先改本地，网站那边由书架同步去推；没登录也能用。有分类时加入后让选分类。
   Future<void> _toggleShelf(bool inLib) async {
     final d = data.detail;
-    if (inLib) return ref.read(libraryProvider.notifier).remove([aid]);
+    if (inLib) {
+      if (isLocalAid(aid)) {
+        final res = await confirmRemoveLocalBooks(context, totalCount: 1, localCount: 1);
+        if (!res.confirmed || !mounted) return;
+        await ref.read(libraryProvider.notifier).remove([aid]);
+        if (res.deleteFiles) {
+          await LocalBooks.delete(aid);
+          if (mounted) context.pop();
+        }
+        return;
+      }
+      return ref.read(libraryProvider.notifier).remove([aid]);
+    }
     final cats = ref.read(libraryProvider).cats;
     // 设置里选了"新书默认分类"就直接放进去，不再问
     final def = AppPrefs.read(P.defaultCat, 'ask');
@@ -254,6 +272,7 @@ class _BodyState extends ConsumerState<_Body> {
     final startCid = progress?.cid ?? _firstCid();
     final muted = theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant);
     final shownTitle = LibraryStore.shown(aid, d.title);
+    final local = isLocalAid(aid);
 
     // 合并每卷的可见章节计算：单次筛选、按展开态懒构建
     final orderedVols = _chl.reverse ? data.catalogue.reversed : data.catalogue;
@@ -305,26 +324,50 @@ class _BodyState extends ConsumerState<_Body> {
                   // 书架上改过名：原名用小字写在下面
                   if (shownTitle != d.title) Text(d.title, style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                   const SizedBox(height: 4),
-                  InkWell(
-                    borderRadius: BorderRadius.circular(6),
-                    onTap: () => context.push(Routes.searchAuthor(d.author)),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
-                      child: Text(d.author, style: theme.textTheme.bodyLarge?.copyWith(color: theme.colorScheme.primary)),
+                  if (local)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text(d.author, style: theme.textTheme.bodyLarge?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                    )
+                  else
+                    InkWell(
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: () => context.push(Routes.searchAuthor(d.author)),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
+                        child: Text(d.author, style: theme.textTheme.bodyLarge?.copyWith(color: theme.colorScheme.primary)),
+                      ),
                     ),
-                  ),
                   const SizedBox(height: 2),
-                  Text([d.status, if (d.isDelisted) '已下架' else '更新于 ${d.lastUpdate}'].join(' · '), style: muted),
-                  if (d.heat != null) Text('热度 ${d.heat}　上升 ${d.trending}', style: muted),
-                  if (d.isAnimated) Text('已动画化', style: muted),
+                  if (local)
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(color: theme.colorScheme.secondaryContainer, borderRadius: BorderRadius.circular(6)),
+                          child: Text(d.status, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSecondaryContainer, fontWeight: FontWeight.w600)),
+                        ),
+                        if (d.lastUpdate != null) Text('导入于 ${d.lastUpdate}', style: muted),
+                      ],
+                    )
+                  else ...[
+                    Text([d.status, if (d.isDelisted) '已下架' else '更新于 ${d.lastUpdate}'].join(' · '), style: muted),
+                    if (d.heat != null) Text('热度 ${d.heat}　上升 ${d.trending}', style: muted),
+                    if (d.isAnimated) Text('已动画化', style: muted),
+                  ],
                 ],
               ),
             ),
           ],
         ),
         const SizedBox(height: 16),
-        Wrap(spacing: 8, runSpacing: 8, children: [for (final t in d.tags.where((e) => e.isNotEmpty)) Chip(label: Text(t))]),
-        const SizedBox(height: 16),
+        if (!local) ...[
+          Wrap(spacing: 8, runSpacing: 8, children: [for (final t in d.tags.where((e) => e.isNotEmpty)) Chip(label: Text(t))]),
+          const SizedBox(height: 16),
+        ],
         Row(
           children: [
             Expanded(
@@ -365,24 +408,37 @@ class _BodyState extends ConsumerState<_Body> {
           ],
         ),
         const SizedBox(height: 8),
-        Row(
-          children: [
-            actionBtn(
-              onPressed: _voting ? null : _vote,
-              icon: _voting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.thumb_up_outlined, size: 18),
-              label: '推荐',
-            ),
-            actionBtn(onPressed: () => _open(Routes.comments(aid)), icon: const Icon(Icons.forum_outlined, size: 18), label: '书评'),
-            if (data.catalogue.isNotEmpty)
-              actionBtn(onPressed: () => _open(Routes.volumes(aid)), icon: const Icon(Icons.view_carousel_outlined, size: 18), label: '分卷'),
-            actionBtn(
-              onPressed: () => launchUrl(Uri.parse('${siteBase(ref.read(nodeProvider))}/book/$aid.htm'), mode: LaunchMode.externalApplication),
-              icon: const Icon(Icons.open_in_browser, size: 18),
-              label: '网页',
-            ),
-          ],
-        ),
-        if (d.isDelisted)
+        if (local)
+          Row(
+            children: [
+              if (data.catalogue.isNotEmpty)
+                actionBtn(onPressed: () => _open(Routes.volumes(aid)), icon: const Icon(Icons.view_carousel_outlined, size: 18), label: '分卷'),
+              actionBtn(
+                onPressed: () => showExportBookDialog(context, ref, aid: aid, novel: data),
+                icon: const Icon(Icons.ios_share_outlined, size: 18),
+                label: '导出',
+              ),
+            ],
+          )
+        else
+          Row(
+            children: [
+              actionBtn(
+                onPressed: _voting ? null : _vote,
+                icon: _voting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.thumb_up_outlined, size: 18),
+                label: '推荐',
+              ),
+              actionBtn(onPressed: () => _open(Routes.comments(aid)), icon: const Icon(Icons.forum_outlined, size: 18), label: '书评'),
+              if (data.catalogue.isNotEmpty)
+                actionBtn(onPressed: () => _open(Routes.volumes(aid)), icon: const Icon(Icons.view_carousel_outlined, size: 18), label: '分卷'),
+              actionBtn(
+                onPressed: () => launchUrl(Uri.parse('${siteBase(ref.read(nodeProvider))}/book/$aid.htm'), mode: LaunchMode.externalApplication),
+                icon: const Icon(Icons.open_in_browser, size: 18),
+                label: '网页',
+              ),
+            ],
+          ),
+        if (!local && d.isDelisted)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Container(
@@ -402,7 +458,7 @@ class _BodyState extends ConsumerState<_Body> {
               ),
             ),
           ),
-        _DownloadRow(aid: aid, title: d.title, data: data),
+        if (!local) _DownloadRow(aid: aid, title: d.title, data: data),
         const SizedBox(height: 8),
         Card(
           child: Padding(
@@ -470,7 +526,10 @@ class _BodyState extends ConsumerState<_Body> {
             ),
           ],
         ),
-        Text('左右滑动章节可标已读或加书签 · 长按或右键章节可多选缓存', style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+        Text(
+          local ? '左右滑动章节可标已读或加书签 · 长按或右键章节可多选' : '左右滑动章节可标已读或加书签 · 长按或右键章节可多选缓存',
+          style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
         const SizedBox(height: 4),
       ],
     );
@@ -486,12 +545,13 @@ class _BodyState extends ConsumerState<_Body> {
               child: Row(
                 children: [
                   Expanded(child: Text(v.title, style: theme.textTheme.titleSmall)),
-                  IconButton(
-                    tooltip: hz(context, '换这一卷的封面'),
-                    visualDensity: VisualDensity.compact,
-                    icon: Icon(Icons.image_outlined, size: 18, color: theme.colorScheme.onSurfaceVariant),
-                    onPressed: () => pickVolumeCover(context, aid, Vol.from(v)),
-                  ),
+                  if (!local)
+                    IconButton(
+                      tooltip: hz(context, '换这一卷的封面'),
+                      visualDensity: VisualDensity.compact,
+                      icon: Icon(Icons.image_outlined, size: 18, color: theme.colorScheme.onSurfaceVariant),
+                      onPressed: () => pickVolumeCover(context, aid, Vol.from(v)),
+                    ),
                   IconButton(
                     tooltip: hz(context, isDone ? '取消本卷已读' : '标记本卷读完'),
                     visualDensity: VisualDensity.compact,
@@ -535,7 +595,7 @@ class _BodyState extends ConsumerState<_Body> {
         title: c.title,
         enabled: _picked.isEmpty,
         onChanged: () => setState(() {}),
-        onCache: () => ref.read(downloadProvider.notifier).start(aid, data.detail.title, [c], total: all.length, img: data.detail.imgUrl, firstCid: all.first.cid),
+        onCache: local ? null : () => ref.read(downloadProvider.notifier).start(aid, data.detail.title, [c], total: all.length, img: data.detail.imgUrl, firstCid: all.first.cid),
         child: GestureDetector(
           onSecondaryTap: () => _pick(c.cid),
           child: ListTile(
@@ -611,17 +671,18 @@ class _BodyState extends ConsumerState<_Body> {
                         Expanded(child: Text('已选 ${_picked.length} 章', maxLines: 1, overflow: TextOverflow.ellipsis)),
                         TextButton(onPressed: () => _markPicked(true), child: const Text('已读')),
                         TextButton(onPressed: () => _markPicked(false), child: const Text('未读')),
-                        TextButton(
-                          onPressed: () {
-                            final chosen = all.where((c) => _picked.contains(c.cid)).toList();
-                            if (chosen.isNotEmpty) {
-                              ref.read(downloadProvider.notifier).start(aid, data.detail.title, chosen, total: all.length, img: data.detail.imgUrl, firstCid: all.first.cid);
-                              _snack(context, '已开始缓存 ${chosen.length} 章');
-                            }
-                            setState(_picked.clear);
-                          },
-                          child: const Text('缓存'),
-                        ),
+                        if (!local)
+                          TextButton(
+                            onPressed: () {
+                              final chosen = all.where((c) => _picked.contains(c.cid)).toList();
+                              if (chosen.isNotEmpty) {
+                                ref.read(downloadProvider.notifier).start(aid, data.detail.title, chosen, total: all.length, img: data.detail.imgUrl, firstCid: all.first.cid);
+                                _snack(context, '已开始缓存 ${chosen.length} 章');
+                              }
+                              setState(_picked.clear);
+                            },
+                            child: const Text('缓存'),
+                          ),
                         // 按钮全摆出来窄屏放不下，不常用的收进"更多"
                         PopupMenuButton<void Function()>(
                           tooltip: hz(context, '更多'),
@@ -630,6 +691,14 @@ class _BodyState extends ConsumerState<_Body> {
                             // 从第一章选到已选的最后一章，方便"之前的全部标为已读"
                             PopupMenuItem(value: () => setState(() => _picked.addAll(all.take(all.lastIndexWhere((c) => _picked.contains(c.cid)) + 1).map((c) => c.cid))), child: const Text('选到开头')),
                             if (_picked.length == 1) PopupMenuItem(value: _markBefore, child: const Text('前面的标为已读')),
+                            PopupMenuItem(
+                              value: () {
+                                final selected = {..._picked};
+                                setState(_picked.clear);
+                                showExportBookDialog(context, ref, aid: aid, novel: data, selectedCids: selected);
+                              },
+                              child: const Text('导出选中章节'),
+                            ),
                           ],
                         ),
                       ],
@@ -658,6 +727,20 @@ class _BodyState extends ConsumerState<_Body> {
                 builder: (context, show, child) => AnimatedOpacity(opacity: show ? 1 : 0, duration: const Duration(milliseconds: 180), child: child),
                 child: Text(shownTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
               ),
+              actions: [
+                PopupMenuButton<String>(
+                  tooltip: hz(context, '更多'),
+                  onSelected: (v) {
+                    if (v == 'export') showExportBookDialog(context, ref, aid: aid, novel: data);
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(
+                      value: 'export',
+                      child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.ios_share_outlined), title: Text('导出为 EPUB / TXT')),
+                    ),
+                  ],
+                ),
+              ],
             ),
             body: body,
           ),
@@ -858,6 +941,8 @@ class _DownloadRow extends ConsumerWidget {
           TextButton(onPressed: () => ref.read(downloadProvider.notifier).cancel(aid), child: const Text('暂停'))
         else ...[
           TextButton(onPressed: cached >= chapters.length ? null : () => ref.read(downloadProvider.notifier).start(aid, title, chapters, img: data.detail.imgUrl), child: const Text('缓存全本')),
+          if (cached > 0)
+            TextButton(onPressed: () => showExportBookDialog(context, ref, aid: aid, novel: data), child: const Text('导出')),
           TextButton(onPressed: () => context.push(Routes.cacheBook(aid)), child: const Text('管理')),
         ],
       ],

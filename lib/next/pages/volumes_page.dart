@@ -13,6 +13,7 @@ import '../cache.dart';
 import '../cover_color.dart';
 import '../image_cache.dart';
 import '../library.dart';
+import '../local_books.dart' show isLocalAid;
 import '../progress.dart';
 import '../read_state.dart';
 import '../routes.dart';
@@ -568,6 +569,7 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
         bg: base,
         onClose: () => setState(() => _open = false),
         onCache: (cids) {
+          if (isLocalAid(aid)) return;
           final chs = [for (final cv in novel?.catalogue ?? const <CatVolume>[]) ...cv.chapters];
           final picked = [for (final c in chs) if (cids.contains(c.cid)) c];
           if (picked.isEmpty || novel == null) return;
@@ -1047,7 +1049,7 @@ class _DetailsState extends State<_Details> {
             ),
             const SizedBox(width: 8),
             IconButton.outlined(
-              tooltip: hz(context, '简介与书评'),
+              tooltip: hz(context, isLocalAid(aid) ? '书籍详情' : '简介与书评'),
               visualDensity: VisualDensity.compact,
               style: IconButton.styleFrom(
                 foregroundColor: Colors.white,
@@ -1058,17 +1060,19 @@ class _DetailsState extends State<_Details> {
               }),
               icon: const Icon(Icons.info_outline, size: 20),
             ),
-            const SizedBox(width: 6),
-            IconButton.outlined(
-              tooltip: hz(context, '换封面'),
-              visualDensity: VisualDensity.compact,
-              style: IconButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: const BorderSide(color: Colors.white38),
+            if (!isLocalAid(aid)) ...[
+              const SizedBox(width: 6),
+              IconButton.outlined(
+                tooltip: hz(context, '换封面'),
+                visualDensity: VisualDensity.compact,
+                style: IconButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  side: const BorderSide(color: Colors.white38),
+                ),
+                onPressed: () => pickVolumeCover(context, aid, v),
+                icon: const Icon(Icons.image_outlined, size: 20),
               ),
-              onPressed: () => pickVolumeCover(context, aid, v),
-              icon: const Icon(Icons.image_outlined, size: 20),
-            ),
+            ],
             const SizedBox(width: 6),
             IconButton.outlined(
               tooltip: hz(context, '阅读报告'),
@@ -1092,7 +1096,7 @@ class _DetailsState extends State<_Details> {
             enabled: _picked.isEmpty,
             backdrop: Color.alphaBlend(Colors.black.withValues(alpha: 0.18), widget.bg),
             onChanged: () => setState(() {}),
-            onCache: () => widget.onCache([cid]),
+            onCache: isLocalAid(aid) ? null : () => widget.onCache([cid]),
             child: GestureDetector(
               onSecondaryTap: () => _pick(cid),
               child: ListTile(
@@ -1163,13 +1167,14 @@ class _DetailsState extends State<_Details> {
                         ),
                         TextButton(onPressed: () => _mark(true), child: const Text('已读')),
                         TextButton(onPressed: () => _mark(false), child: const Text('未读')),
-                        TextButton(
-                          onPressed: () {
-                            widget.onCache(_picked.toList());
-                            setState(_picked.clear);
-                          },
-                          child: const Text('缓存'),
-                        ),
+                        if (!isLocalAid(aid))
+                          TextButton(
+                            onPressed: () {
+                              widget.onCache(_picked.toList());
+                              setState(_picked.clear);
+                            },
+                            child: const Text('缓存'),
+                          ),
                         // 按钮全摆出来窄屏放不下，不常用的收进"更多"
                         PopupMenuButton<void Function()>(
                           tooltip: hz(context, '更多'),

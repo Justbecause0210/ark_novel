@@ -18,6 +18,7 @@ import '../env.dart';
 import '../history.dart';
 import '../image_cache.dart';
 import '../library.dart';
+import '../local_books.dart';
 import '../progress.dart';
 import '../read_state.dart';
 import '../routes.dart';
@@ -182,7 +183,7 @@ List<LibBook> _arrange(Iterable<LibBook> list, ShelfOptions o, String query, Str
   final markedAids = o.bookmarked == 0 ? const <String>{} : Bookmarks.bookmarkedAids();
   final out = list
       .where((b) => q.isEmpty || b.shown.toLowerCase().contains(q) || b.title.toLowerCase().contains(q))
-      .where((b) => _tri(o.unread, () => _unread(b.aid) > 0) && _tri(o.started, () => _started(b.aid)) && _tri(o.cached, () => ChapterCache.count(b.aid) > 0) && _tri(o.bookmarked, () => markedAids.contains(b.aid)) && _tri(o.completed, () => b.done))
+      .where((b) => _tri(o.unread, () => _unread(b.aid) > 0) && _tri(o.started, () => _started(b.aid)) && _tri(o.cached, () => isLocalAid(b.aid) || ChapterCache.count(b.aid) > 0) && _tri(o.bookmarked, () => markedAids.contains(b.aid)) && _tri(o.completed, () => b.done))
       .toList();
   switch (o.sort) {
     case ShelfSort.added:
@@ -433,7 +434,11 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
 
   /// 只检查当前标签里的书的更新
   void _checkTab() {
-    final aids = shelfBooksIn(ref.read(libraryProvider), _curTab).map((b) => b.aid).toSet();
+    final aids = shelfBooksIn(ref.read(libraryProvider), _curTab).map((b) => b.aid).where((a) => !isLocalAid(a)).toSet();
+    if (aids.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('当前分类没有可检查更新的在线书籍')));
+      return;
+    }
     ref.read(updateProvider.notifier).refresh(only: aids);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('正在检查 ${aids.length} 本的更新')));
   }
@@ -524,6 +529,8 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
               _openRandom();
             } else if (v == 'check') {
               _checkTab();
+            } else if (v == 'import_local') {
+              await importLocalBooksFlow(context, ref);
             } else if (v == 'sync_shelf') {
               final err = await ref.read(libraryProvider.notifier).sync(force: true);
               if (!context.mounted) return;
@@ -537,6 +544,8 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
             }
           },
           itemBuilder: (_) => [
+            const PopupMenuItem(value: 'import_local', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.file_open_outlined), title: Text('导入本地书籍（EPUB / TXT）'))),
+            const PopupMenuDivider(),
             const PopupMenuItem(value: 'random', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.casino_outlined), title: Text('随机打开一本'))),
             PopupMenuItem(value: 'check', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: const Icon(Icons.refresh), title: Text('检查「$_curTabName」的更新'))),
             if (ref.read(sessionProvider) is SessionLoggedIn)
@@ -1131,6 +1140,10 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
   /// 书架上的封面是第一卷的卷封面，所以换的是第一卷的
   Future<void> _pickCover() async {
+    if (isLocalAid(_selected.first)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('本地书籍暂不支持在线换封面')));
+      return;
+    }
     final vols = Volumes.of(_selected.first);
     if (vols.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('先打开一次这本书的详情，目录加载后才能选封面')));
@@ -1186,7 +1199,12 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
   /// 选中的书整本下载离线缓存：一本下完再下一本（同时下会被网站限流），在后台跑，进度在离线缓存页看
   void _download() {
-    final aids = [..._selected];
+    final aids = [for (final aid in _selected) if (!isLocalAid(aid)) aid];
+    if (aids.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('本地书籍无需缓存下载')));
+      setState(_selected.clear);
+      return;
+    }
     final container = ProviderScope.containerOf(context); // 书架页关了也接着下
     () async {
       for (final aid in aids) {
@@ -1212,7 +1230,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     try {
       for (final aid in aids) {
         try {
-          final n = await api.novel(aid);
+          final n = isLocalAid(aid) ? await LocalBooks.loadNovel(aid) : await api.novel(aid);
           await ReadState.setRead(aid, [for (final v in n.catalogue) ...v.chapters.map((c) => c.cid)], true);
         } catch (_) {
           failed++;
@@ -1230,7 +1248,21 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
   }
 
   Future<void> _remove() async {
-    final n = _selected.length;
+    final aids = [..._selected];
+    final localAids = [for (final a in aids) if (isLocalAid(a)) a];
+    if (localAids.isNotEmpty) {
+      final res = await confirmRemoveLocalBooks(context, totalCount: aids.length, localCount: localAids.length);
+      if (!res.confirmed || !mounted) return;
+      await ref.read(libraryProvider.notifier).remove(aids);
+      if (res.deleteFiles) {
+        for (final a in localAids) {
+          await LocalBooks.delete(a);
+        }
+      }
+      if (mounted) setState(_selected.clear);
+      return;
+    }
+    final n = aids.length;
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1240,7 +1272,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
       ),
     );
     if (ok != true) return;
-    await ref.read(libraryProvider.notifier).remove(_selected);
+    await ref.read(libraryProvider.notifier).remove(aids);
     if (mounted) setState(_selected.clear);
   }
 
@@ -1303,6 +1335,12 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
                 onPressed: () => context.go(Routes.discover),
                 icon: const Icon(Icons.explore_outlined, size: 18),
                 label: const Text('去发现页逛逛'),
+              ),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
+                onPressed: () => importLocalBooksFlow(context, ref),
+                icon: const Icon(Icons.file_open_outlined, size: 18),
+                label: const Text('导入本地书籍'),
               ),
             ],
           ),
