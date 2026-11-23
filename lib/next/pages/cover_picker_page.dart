@@ -12,6 +12,7 @@ import '../cache.dart';
 import '../cover_trim.dart';
 import '../data.dart';
 import '../image_cache.dart';
+import '../local_books.dart' show LocalBooks, isLocalAid;
 import '../unlock.dart';
 import '../volumes.dart' show Vol, Volumes;
 import '../widgets.dart';
@@ -39,12 +40,13 @@ class _PickerPage extends ConsumerStatefulWidget {
 
 class _PickerPageState extends ConsumerState<_PickerPage> {
   late Future<List<String>> _images = _load();
-  late Future<BgmSeries?> _bgm = ref.read(bangumiProvider).series(widget.aid);
+  late Future<BgmSeries?> _bgm = isLocalAid(widget.aid) ? Future.value(null) : ref.read(bangumiProvider).series(widget.aid);
 
   /// 插图章节缓存过就直接用（若缓存里没有图则重新联网取），没缓存就联网取一次并存下；受限书取不到插图，只能从 Bangumi 挑
   Future<List<String>> _load() async {
     final cid = widget.vol.illus;
     if (cid == null) return const [];
+    if (isLocalAid(widget.aid)) return (await LocalBooks.loadChapter(widget.aid, cid)).images;
     var content = await ChapterCache.get(widget.aid, cid);
     if (content != null && content.images.isEmpty) content = null;
     if (content == null) {

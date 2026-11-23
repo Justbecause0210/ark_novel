@@ -258,4 +258,53 @@ void main() {
     expect(restored.get('bgm:123'), {'id': 42});
     expect(restored.get('ccolor'), {'https://img.example/legacy.jpg': 0xFF654321});
   });
+
+  test('备份包含 reader_bg 目录时完整打包并修正恢复路径；旧版无 reader_bg 目录备份向后兼容', () async {
+    final box = await Hive.openBox('session');
+    await box.putAll({
+      'reader_bg:path': '/data/old_device/files/reader_bg/bg_001.jpg',
+      'r.bgTexture': 1,
+      'r.bgImageOpacity': 0.45,
+    });
+    await Directory(p.join(support, 'reader_bg')).create(recursive: true);
+    await File(p.join(support, 'reader_bg', 'bg_001.jpg')).writeAsString('bg-bytes');
+
+    await Backup.pack(zip, Backup.make(), support);
+
+    // zip 中包含 files/reader_bg/bg_001.jpg
+    final input = InputFileStream(zip);
+    final names = ZipDecoder().decodeStream(input).files.map((f) => f.name).toSet();
+    await input.close();
+    expect(names, {'data.json', 'files/reader_bg/bg_001.jpg'});
+
+    // 清空本机后恢复到新 supportDir
+    await box.clear();
+    await Directory(p.join(support, 'reader_bg')).delete(recursive: true);
+    await box.close();
+
+    await Backup.unpack(zip, support);
+    await Backup.apply(support);
+
+    final restored = await Hive.openBox('session');
+    expect(restored.get('reader_bg:path'), p.join(support, 'reader_bg', 'bg_001.jpg'));
+    expect(File(p.join(support, 'reader_bg', 'bg_001.jpg')).readAsStringSync(), 'bg-bytes');
+    expect(restored.get('r.bgTexture'), 1);
+    expect(restored.get('r.bgImageOpacity'), 0.45);
+    await restored.close();
+
+    // 旧版备份（zip 中没有 files/reader_bg/ 目录且无 reader_bg:path 键）可正常恢复并清掉旧本机残留背景图
+    await writeZip({
+      'data.json': jsonEncode({
+        'backup': 3,
+        'box': {'palette': 6},
+      }),
+    });
+    await Backup.unpack(zip, support);
+    await Backup.apply(support);
+
+    final legacyRestored = await Hive.openBox('session');
+    expect(legacyRestored.get('palette'), 6);
+    expect(legacyRestored.containsKey('reader_bg:path'), isFalse);
+    expect(Directory(p.join(support, 'reader_bg')).listSync(), isEmpty);
+  });
 }

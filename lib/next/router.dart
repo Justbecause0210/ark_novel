@@ -6,6 +6,7 @@ import 'pages/bookmarks_page.dart';
 import 'pages/bookshelf_page.dart';
 import 'pages/categories_page.dart';
 import 'pages/cache_book_page.dart';
+import 'pages/characters_page.dart';
 import 'pages/comments_page.dart';
 import 'pages/discover_page.dart';
 import 'pages/home_shell.dart';
@@ -21,6 +22,7 @@ import 'pages/search_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/storage_page.dart';
 import 'pages/stats_page.dart';
+import 'pages/yearly_report_page.dart';
 import 'pages/updates_page.dart';
 import 'pages/volumes_page.dart';
 import 'pages/wall_page.dart';
@@ -64,6 +66,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: Routes.bookmarks, builder: (_, _) => const BookmarksPage()),
       GoRoute(path: '/report/:aid', builder: (_, state) => ReportPage(aid: state.pathParameters['aid']!, vol: int.tryParse(state.uri.queryParameters['v'] ?? ''))),
       GoRoute(path: Routes.stats, builder: (_, _) => const StatsPage()),
+      GoRoute(path: '/stats/yearly', builder: (_, state) => YearlyReportPage(year: int.tryParse(state.uri.queryParameters['y'] ?? ''))),
       GoRoute(path: Routes.wall, builder: (_, _) => const WallPage()),
       // 卷册：整页只淡入淡出，让从书架飞过来的封面和摊开的各卷当主角
       GoRoute(
@@ -92,6 +95,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         ),
       ),
       GoRoute(path: '/novel/:aid', builder: (_, state) => NovelPageView(aid: state.pathParameters['aid']!)),
+      GoRoute(path: '/novel/:aid/characters', builder: (_, state) => CharactersPage(aid: state.pathParameters['aid']!)),
       GoRoute(path: '/novel/:aid/comments', builder: (_, state) => CommentsPage(aid: state.pathParameters['aid']!)),
       GoRoute(path: '/novel/:aid/comments/:rid', builder: (_, state) => RepliesPage(aid: state.pathParameters['aid']!, rid: state.pathParameters['rid']!)),
       GoRoute(

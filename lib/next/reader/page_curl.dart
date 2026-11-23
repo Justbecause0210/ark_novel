@@ -30,7 +30,7 @@ class PageCurlController {
 ///
 /// 往回翻不卷页：上一页从左边水平滑进来，盖在当前页上（和常见阅读器一致）。
 class PageCurl extends StatefulWidget {
-  const PageCurl({super.key, this.debugT, this.debugDir = 1, this.debugCorner = 1, this.cover = false, this.dual = false, required this.pageCount, this.firstIndex = 0, required this.pageBuilder, required this.initialIndex, required this.background, this.cacheKey, this.cacheInvalidator, this.controller, this.onIndexChanged, this.onReachStart, this.onReachEnd});
+  const PageCurl({super.key, this.debugT, this.debugDir = 1, this.debugCorner = 1, this.cover = false, this.dual = false, required this.pageCount, this.firstIndex = 0, required this.pageBuilder, required this.initialIndex, required this.background, this.pageBackground, this.cacheKey, this.cacheInvalidator, this.controller, this.onIndexChanged, this.onReachStart, this.onReachEnd, this.onUserDragStart});
 
   /// 仅用于 tool/curl_demo.dart 目测：把折叠状态固定在进度 [debugT]（方向 [debugDir]，折角在高度的 [debugCorner] 处）
   final double? debugT;
@@ -52,6 +52,9 @@ class PageCurl extends StatefulWidget {
   final int initialIndex;
   final Color background;
 
+  /// 可选自定义页面背景层（纸张纹理 / 自定义背景图）；为 null 时使用纯色 [background]。
+  final Widget? pageBackground;
+
   /// 翻页动画期间页面缓存的失效签名（字体、主题、正文排版等变化时更新）。
   final Object? cacheKey;
 
@@ -61,6 +64,7 @@ class PageCurl extends StatefulWidget {
   final ValueChanged<int>? onIndexChanged;
   final VoidCallback? onReachStart;
   final VoidCallback? onReachEnd;
+  final VoidCallback? onUserDragStart;
 
   @override
   State<PageCurl> createState() => _PageCurlState();
@@ -200,6 +204,7 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
   }
 
   void _onDragStart(DragStartDetails d) {
+    widget.onUserDragStart?.call();
     _finishNow();
     _startX = d.localPosition.dx;
     _startY = d.localPosition.dy;
@@ -258,12 +263,14 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
           _cornerY = widget.debugCorner * _size.height;
         }
         final bg = widget.background;
-        Widget livePage(int i) => ColoredBox(color: bg, child: SizedBox.expand(child: widget.pageBuilder(context, i, true)));
+        final bgLayer = widget.pageBackground;
+        Widget withBg(Widget child) => bgLayer == null ? ColoredBox(color: bg, child: SizedBox.expand(child: child)) : Stack(fit: StackFit.expand, children: [bgLayer, child]);
+        Widget livePage(int i) => withBg(widget.pageBuilder(context, i, true));
 
         Widget body;
         if (_dir == 0 || widget.pageCount == 0) {
           _animPages.clear();
-          body = widget.pageCount == 0 ? ColoredBox(color: bg) : livePage(_index);
+          body = widget.pageCount == 0 ? (bgLayer ?? ColoredBox(color: bg)) : livePage(_index);
         } else {
           final sig = Object.hash(widget.cacheKey, bg, _size, widget.dual, widget.cover, _invalidations);
           if (sig != _animSig) {
@@ -272,7 +279,7 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
           }
           Widget cachedPage(int i) => _animPages.putIfAbsent(
             (i, sig),
-            () => RepaintBoundary(child: ColoredBox(color: bg, child: SizedBox.expand(child: widget.pageBuilder(context, i, false)))),
+            () => RepaintBoundary(child: withBg(widget.pageBuilder(context, i, false))),
           );
           if (!widget.dual && (_dir == -1 || widget.cover)) {
             // 单页模式下往回翻：上一页从左边滑进来盖住当前页；覆盖模式往后翻：当前页向左滑出，露出下一页

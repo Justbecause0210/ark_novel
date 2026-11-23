@@ -4,6 +4,7 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../models/cat_volume.dart';
 import 'cache.dart';
+import 'local_books.dart' show LocalBooks, isLocalAid;
 import 'progress.dart';
 import 'read_state.dart';
 import 'stats.dart';
@@ -38,6 +39,47 @@ class Volumes {
 
   /// 卷封面、读完状态变了：书架、书籍墙、报告页据此刷新
   static final changes = ValueNotifier<int>(0);
+  static final _aidNotifiers = <String, _AidVolumeNotifier>{};
+  static bool _inSingleNotify = false;
+  static bool _globalBridgeAttached = false;
+
+  static void _ensureGlobalBridge() {
+    if (_globalBridgeAttached) return;
+    _globalBridgeAttached = true;
+    changes.addListener(_onGlobalChange);
+  }
+
+  static void _onGlobalChange() {
+    if (_inSingleNotify) return;
+    for (final n in _aidNotifiers.values.toList()) {
+      n.value++;
+    }
+  }
+
+  /// 按书号获取局部卷数据变更通知器（仅该书变更或全局广播时递增）。
+  static ValueNotifier<int> notifierFor(String aid) {
+    _ensureGlobalBridge();
+    return _aidNotifiers.putIfAbsent(aid, _AidVolumeNotifier.new);
+  }
+
+  static void _releaseNotifierIfUnused(String aid) {
+    final n = _aidNotifiers[aid];
+    if (n != null && !n.active) {
+      _aidNotifiers.remove(aid);
+      n.dispose();
+    }
+  }
+
+  /// 通知单本书的卷数据（封面、读完、评分等）发生变化：只刷新该书局部订阅者并同步递增全局 [changes]。
+  static void notifyAid(String aid) {
+    _aidNotifiers[aid]?.value++;
+    _inSingleNotify = true;
+    try {
+      changes.value++;
+    } finally {
+      _inSingleNotify = false;
+    }
+  }
 
   // 参照 ReadState._sets：Hive 底层对象未换（identical）时复用只读视图，避免书架/3D/翻页高频重复反序列化。
   static final _volsCache = <String, (List, List<Vol>)>{};
@@ -98,7 +140,7 @@ class Volumes {
         if (staleCids.isNotEmpty && Hive.isBoxOpen('chapter_index')) {
           await ChapterCache.removeChapters(aid, staleCids, compact: false);
         }
-        changes.value++;
+        notifyAid(aid);
       }
     }
     await refreshDone(aid);
@@ -136,21 +178,21 @@ class Volumes {
       await _box.put('vpick:$aid', (_picked(aid)..add(title)).toList());
       await _box.put('vpickTs:$aid', {...((_box.get('vpickTs:$aid') as Map?) ?? const {}), title: DateTime.now().millisecondsSinceEpoch});
     }
-    changes.value++;
+    notifyAid(aid);
   }
 
   /// 一次记好几卷的封面（只发一次变化通知）
   static Future<void> setCovers(String aid, Map<String, String> next) async {
     if (next.isEmpty) return;
     await _box.put('vcover2:$aid', {...covers(aid), ...next});
-    changes.value++;
+    notifyAid(aid);
   }
 
   /// 忘掉这本书所有卷的封面记录（没加入书架的书退出详情页时）
   static Future<void> forgetCovers(String aid) async {
     await _box.delete('vcover2:$aid');
     await _box.delete('vpick:$aid');
-    changes.value++;
+    notifyAid(aid);
   }
 
   /// 去掉自选的封面，下次显示时重新自动挑（同时清掉该卷插图章的本地缓存，以便重新联网抓取最新插图）
@@ -162,7 +204,7 @@ class Volumes {
     if (illus != null && Hive.isBoxOpen('chapter_index')) {
       await ChapterCache.removeChapters(aid, [illus], compact: false);
     }
-    changes.value++;
+    notifyAid(aid);
   }
 
   /// 图片缓存清理时要留着的卷封面：书架上这些书显示的那张（第一卷），加上所有手动挑过的
@@ -207,7 +249,7 @@ class Volumes {
     };
     if (first || !mapEquals(old, next)) {
       await _box.put('vdone:$aid', next);
-      changes.value++;
+      notifyAid(aid);
     }
   }
 
@@ -234,7 +276,7 @@ class Volumes {
       'vrate:$aid': {...((_box.get('vrate:$aid') as Map?) ?? const {}), title: stars},
       'vrateTs:$aid': {...((_box.get('vrateTs:$aid') as Map?) ?? const {}), title: DateTime.now().millisecondsSinceEpoch},
     });
-    changes.value++;
+    notifyAid(aid);
   }
 
   // ---- 统计 ----
@@ -256,14 +298,33 @@ class Volumes {
   /// 这卷读过的字数：读过、而且缓存过（读过的章节都会自动缓存）的章节字数之和。
   static int readChars(String aid, Vol v) {
     final read = ReadState.readView(aid);
-    return v.cids.where(read.contains).fold(0, (a, c) => a + (ChapterCache.length(aid, c) ?? 0));
+    final local = isLocalAid(aid);
+    return v.cids.where(read.contains).fold(0, (a, c) => a + ((local ? LocalBooks.chapterLength(aid, c) : ChapterCache.length(aid, c)) ?? 0));
   }
 }
 
-/// 卷数据变了就重建（书架封面、书籍墙）
+class _AidVolumeNotifier extends ValueNotifier<int> {
+  _AidVolumeNotifier() : super(0);
+
+  bool get active => hasListeners;
+}
+
+/// 卷数据变了就重建（书籍墙、统计等全局视图）
 final volumeChangesProvider = Provider<int>((ref) {
   void listener() => ref.invalidateSelf();
   Volumes.changes.addListener(listener);
   ref.onDispose(() => Volumes.changes.removeListener(listener));
   return Volumes.changes.value;
+});
+
+/// 按书号细粒度订阅卷数据变化（封面、读完状态等）：单本书变更只刷新对应书卡片，不重建整个书架。
+final volumeChangeForProvider = Provider.autoDispose.family<int, String>((ref, aid) {
+  final notifier = Volumes.notifierFor(aid);
+  void listener() => ref.invalidateSelf();
+  notifier.addListener(listener);
+  ref.onDispose(() {
+    notifier.removeListener(listener);
+    Volumes._releaseNotifierIfUnused(aid);
+  });
+  return notifier.value;
 });

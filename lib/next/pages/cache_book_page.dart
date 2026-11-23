@@ -3,7 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../cache.dart';
+import '../export_book.dart';
 import '../library.dart' show LibraryStore;
+import '../local_books.dart' show isLocalAid;
 import '../routes.dart';
 import '../widgets.dart';
 import 'novel_page.dart';
@@ -26,15 +28,28 @@ class _CacheBookPageState extends ConsumerState<CacheBookPage> {
   Widget build(BuildContext context) {
     final novel = ref.watch(novelProvider(widget.aid));
     final task = ref.watch(downloadProvider.select((m) => m[widget.aid]));
+    final data = novel.value;
+    final canExport = data != null && ExportBook.availableCount(widget.aid, data.catalogue) > 0;
     return Scaffold(
-      appBar: AppBar(title: const Text('缓存管理')),
+      appBar: AppBar(
+        title: const Text('缓存管理'),
+        actions: [
+          if (canExport)
+            TextButton.icon(
+              onPressed: () => showExportBookDialog(context, ref, aid: widget.aid, novel: data, selectedCids: _picked.isEmpty ? null : {..._picked}),
+              icon: const Icon(Icons.ios_share_outlined, size: 18),
+              label: Text(_picked.isEmpty ? '导出' : '导出选中'),
+            ),
+        ],
+      ),
       body: contentWidth(
         novel.when(
           loading: () => const Center(child: CircularProgressIndicator()),
           error: (e, _) => StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(novelProvider(widget.aid))),
           data: (data) {
           final all = data.catalogue.expand((v) => v.chapters).toList();
-          final cached = ChapterCache.count(widget.aid);
+          final local = isLocalAid(widget.aid);
+          final cached = local ? all.length : ChapterCache.count(widget.aid);
           final running = task?.running ?? false;
           return Column(
             children: [

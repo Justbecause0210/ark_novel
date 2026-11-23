@@ -14,6 +14,7 @@ import 'avatar.dart';
 import 'incognito.dart';
 import 'library.dart';
 import 'pages/bookshelf_page.dart' show shelfOptionsProvider;
+import 'reader/reader_bg.dart' show readerBgImageProvider;
 import 'settings.dart';
 import 'swipe.dart';
 import 'sync_merge.dart';
@@ -270,6 +271,7 @@ void _invalidateSynced(void Function(NotifierProvider<dynamic, dynamic> provider
   invalidate(shelfOptionsProvider);
   invalidate(updateProvider);
   invalidate(avatarProvider);
+  invalidate(readerBgImageProvider);
   invalidate(appPrefsProvider);
   invalidate(readerPrefsProvider);
   invalidate(swipePrefsProvider);

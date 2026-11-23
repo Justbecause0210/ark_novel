@@ -20,6 +20,7 @@ import '../image_cache.dart';
 import '../incognito.dart';
 import '../library.dart';
 import '../reader/reader_body.dart' show TapZoneDiagram;
+import '../reader/reader_chrome.dart' show ReaderChromeField;
 import '../routes.dart';
 import '../security.dart';
 import '../session.dart';
@@ -73,6 +74,7 @@ const _items = <(String, SettingsSection, String)>[
   ('预加载章节', SettingsSection.reading, '预加载 提前 下载 wi-fi 全本 缓存'),
   ('自动跳过已读章节', SettingsSection.reading, '跳过 章节 标题'),
   ('屏幕常亮', SettingsSection.reading, '锁屏 沉浸式 状态栏 页脚'),
+  ('页眉与页脚', SettingsSection.reading, '页眉 页脚 剩余时间 进度 电量 章节名 书名'),
   ('字号', SettingsSection.reading, '字体 大小'),
   ('朗读语速', SettingsSection.reading, '听书 tts'),
   ('章节列表手势', SettingsSection.reading, '左滑 右滑 已读 书签 滑动'),
@@ -455,6 +457,17 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
       _hl('屏幕常亮', XSwitch(title: '屏幕常亮', value: prefs.keepScreenOn, onChanged: (v) => set(prefs.copyWith(keepScreenOn: v)))),
       XSwitch(title: '沉浸式阅读', value: prefs.fullscreen, onChanged: (v) => set(prefs.copyWith(fullscreen: v))),
       XSwitch(title: '页脚信息', value: prefs.showStatus, onChanged: (v) => set(prefs.copyWith(showStatus: v))),
+      _hl(
+        '页眉与页脚',
+        Column(
+          children: [
+            XChoice<int>(title: '页眉左侧', value: prefs.headerLeft, options: ReaderChromeField.labels, onChanged: (v) => set(prefs.copyWith(headerLeft: v))),
+            XChoice<int>(title: '页眉右侧', value: prefs.headerRight, options: ReaderChromeField.labels, onChanged: (v) => set(prefs.copyWith(headerRight: v))),
+            XChoice<int>(title: '页脚左侧', value: prefs.footerLeft, options: ReaderChromeField.labels, onChanged: (v) => set(prefs.copyWith(footerLeft: v))),
+            XChoice<int>(title: '页脚右侧', value: prefs.footerRight, options: ReaderChromeField.labels, onChanged: (v) => set(prefs.copyWith(footerRight: v))),
+          ],
+        ),
+      ),
       const XDivider(),
       const XGroupTitle('文字'),
       _hl(

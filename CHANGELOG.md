@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.5.0...ark_novel-v1.6.0) (2026-11-23)
+
+
+### Features
+
+* 优化书架封面缩略图缓存、卷册懒加载与全站渲染性能 ([e729305](https://github.com/chenshi221/ark_novel/commit/e729305037474dc5661c221f3a94ad5aa428868c))
+* 支持本地 EPUB / TXT 书籍导入阅读与已缓存书籍导出 ([ab04254](https://github.com/chenshi221/ark_novel/commit/ab0425478723d30970865d1770e811904851eb20))
+* 新增 Bangumi 信息卡、人物/设定词典与书内全文搜索 ([7e2f740](https://github.com/chenshi221/ark_novel/commit/7e2f740767c8dd3642dbfb41f2ec1700a97be652))
+* 新增阅读器自动阅读、背景纹理与自定义页眉页脚，支持阅读目标与年度阅读报告 ([3a3effe](https://github.com/chenshi221/ark_novel/commit/3a3effe4f73d5fae8227554d49ae66ac27d09dbe))
+
+
+### Bug Fixes
+
+* 修复唤起阅读器菜单时底部栏滑出方向错位 ([c9c8d7d](https://github.com/chenshi221/ark_novel/commit/c9c8d7d6d6ff81bc2843c97efda40a193abd2923))
+
 ## [1.5.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.4.0...ark_novel-v1.5.0) (2026-11-22)
 
 

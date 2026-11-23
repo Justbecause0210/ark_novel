@@ -13,6 +13,7 @@ import '../models/content.dart';
 import 'data.dart';
 import 'image_cache.dart';
 import 'library.dart';
+import 'local_books.dart' show isLocalAid;
 import 'read_state.dart';
 import 'session.dart' show friendlyError;
 import 'unlock.dart';
@@ -109,6 +110,7 @@ class ChapterCache {
 
   /// 写入一章。给了 [ticket] 且这期间这章（或整本）被删过时不写，返回 false。
   static Future<bool> put(String aid, String cid, Content c, {(int, int)? ticket}) async {
+    if (isLocalAid(aid)) return false;
     if (ticket != null && ticket != ChapterCache.ticket(aid, cid)) return false;
     await _text.put('$aid:$cid', _pack(c.text, c.images));
     if (ticket != null && ticket != ChapterCache.ticket(aid, cid)) {
@@ -357,7 +359,7 @@ class DownloadController extends Notifier<Map<String, DownloadState>> {
   /// 下载 [chapters] 里还没缓存的章节；[total] 是全书章数，用来显示整本书的进度。
   /// 多书同时触发时排入串行队列逐本下载。
   Future<void> start(String aid, String title, List<CatChapter> chapters, {int? total, String img = '', String firstCid = ''}) async {
-    if (state[aid]?.running ?? false) return;
+    if (isLocalAid(aid) || (state[aid]?.running ?? false)) return;
     final all = total ?? chapters.length;
     _cancelled.remove(aid);
     final run = _runs[aid] = (_runs[aid] ?? 0) + 1;

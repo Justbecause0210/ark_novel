@@ -358,8 +358,21 @@ void main() {
       // 加载态左上角常驻返回按钮可见
       expect(find.byIcon(Icons.arrow_back), findsWidgets);
 
-      // 轻触中央唤出菜单栏（加载中含无限旋转指示器，不能用 pumpAndSettle）
+      // 菜单收起时：顶栏在上方 (0, -1)，底栏在下方 (0, 1)
+      AnimatedSlide slideOf(String key) => t.widget<AnimatedSlide>(find.descendant(of: find.byKey(ValueKey(key)), matching: find.byType(AnimatedSlide)));
+      expect(slideOf('reader_top_bar').offset, const Offset(0, -1));
+      expect(slideOf('reader_bottom_bar').offset, const Offset(0, 1));
+
+      // 轻触中央唤出菜单栏（加载中含无限旋转指示器，不能用 pumpAndSettle；需先起帧再推进 300ms 完成 220ms 滑入）
       await t.tap(find.text('正在加载章节…'));
+      await t.pump();
+      // 滑入动画中途：顶栏应从上方滑下（dy < 0），底栏应从下方滑上（dy > 0），不可错位复用状态
+      await t.pump(const Duration(milliseconds: 60));
+      final topSlideBox = t.widget<SlideTransition>(find.descendant(of: find.byKey(const ValueKey('reader_top_bar')), matching: find.byType(SlideTransition)));
+      final bottomSlideBox = t.widget<SlideTransition>(find.descendant(of: find.byKey(const ValueKey('reader_bottom_bar')), matching: find.byType(SlideTransition)));
+      expect(topSlideBox.position.value.dy, lessThan(0));
+      expect(bottomSlideBox.position.value.dy, greaterThan(0));
+
       await t.pump(const Duration(milliseconds: 300));
       expect(find.text('目录'), findsOneWidget);
       expect(find.text('朗读设置'), findsNothing); // 非朗读时已精简底栏槽位

@@ -2,7 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
 import 'package:flutter/material.dart' hide Text;
-import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/rendering.dart' show RenderProxyBox, ScrollCacheExtent;
 import 'package:flutter/services.dart' show HapticFeedback, LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -18,6 +18,7 @@ import '../env.dart';
 import '../history.dart';
 import '../image_cache.dart';
 import '../library.dart';
+import '../local_books.dart';
 import '../progress.dart';
 import '../read_state.dart';
 import '../routes.dart';
@@ -30,7 +31,7 @@ import '../theme_doodle.dart';
 import '../theme_squire.dart';
 import '../updates.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Volumes, volumeChangesProvider;
+import '../volumes.dart' show Volumes, volumeChangeForProvider;
 import '../widgets.dart';
 import '../x_list.dart';
 import 'categories_page.dart';
@@ -97,6 +98,21 @@ class ShelfOptions {
     bookmarked: (m['bookmarked'] as int?) ?? 0,
     completed: (m['completed'] as int?) ?? 0,
   );
+
+  @override
+  bool operator ==(Object other) =>
+      other is ShelfOptions &&
+      other.sort == sort &&
+      other.reverse == reverse &&
+      other.display == display &&
+      other.unread == unread &&
+      other.started == started &&
+      other.cached == cached &&
+      other.bookmarked == bookmarked &&
+      other.completed == completed;
+
+  @override
+  int get hashCode => Object.hash(sort, reverse, display, unread, started, cached, bookmarked, completed);
 }
 
 class _OptionsController extends Notifier<ShelfOptions> {
@@ -167,7 +183,7 @@ List<LibBook> _arrange(Iterable<LibBook> list, ShelfOptions o, String query, Str
   final markedAids = o.bookmarked == 0 ? const <String>{} : Bookmarks.bookmarkedAids();
   final out = list
       .where((b) => q.isEmpty || b.shown.toLowerCase().contains(q) || b.title.toLowerCase().contains(q))
-      .where((b) => _tri(o.unread, () => _unread(b.aid) > 0) && _tri(o.started, () => _started(b.aid)) && _tri(o.cached, () => ChapterCache.count(b.aid) > 0) && _tri(o.bookmarked, () => markedAids.contains(b.aid)) && _tri(o.completed, () => b.done))
+      .where((b) => _tri(o.unread, () => _unread(b.aid) > 0) && _tri(o.started, () => _started(b.aid)) && _tri(o.cached, () => isLocalAid(b.aid) || ChapterCache.count(b.aid) > 0) && _tri(o.bookmarked, () => markedAids.contains(b.aid)) && _tri(o.completed, () => b.done))
       .toList();
   switch (o.sort) {
     case ShelfSort.added:
@@ -249,6 +265,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
     LibraryStore.syncNotice.removeListener(_onSyncNotice);
     shelfSearching.value = false;
     _resumeHidden.dispose();
+    _resumeHeight.dispose();
     _activeTab.dispose();
     _tc?.dispose();
     _tabScroll.dispose();
@@ -417,7 +434,11 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
 
   /// 只检查当前标签里的书的更新
   void _checkTab() {
-    final aids = shelfBooksIn(ref.read(libraryProvider), _curTab).map((b) => b.aid).toSet();
+    final aids = shelfBooksIn(ref.read(libraryProvider), _curTab).map((b) => b.aid).where((a) => !isLocalAid(a)).toSet();
+    if (aids.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('当前分类没有可检查更新的在线书籍')));
+      return;
+    }
     ref.read(updateProvider.notifier).refresh(only: aids);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('正在检查 ${aids.length} 本的更新')));
   }
@@ -426,7 +447,15 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
 
   /// 往下滑书架时收起「继续阅读」条，往上滑或回到顶上再出来；用累计滑动距离防抖，避免触控板微动或视口变高后回弹反复触发
   final _resumeHidden = ValueNotifier<bool>(false);
+  final _resumeHeight = ValueNotifier<double>(0);
   double _scrollAccum = 0;
+
+  void _setResumeHeight(double h) {
+    if ((_resumeHeight.value - h).abs() <= 0.5) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _resumeHeight.value = h;
+    });
+  }
 
   bool _onShelfScroll(ScrollNotification n) {
     if (n.metrics.axis != Axis.vertical || n is! ScrollUpdateNotification) return false;
@@ -500,6 +529,8 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
               _openRandom();
             } else if (v == 'check') {
               _checkTab();
+            } else if (v == 'import_local') {
+              await importLocalBooksFlow(context, ref);
             } else if (v == 'sync_shelf') {
               final err = await ref.read(libraryProvider.notifier).sync(force: true);
               if (!context.mounted) return;
@@ -513,6 +544,8 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
             }
           },
           itemBuilder: (_) => [
+            const PopupMenuItem(value: 'import_local', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.file_open_outlined), title: Text('导入本地书籍（EPUB / TXT）'))),
+            const PopupMenuDivider(),
             const PopupMenuItem(value: 'random', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.casino_outlined), title: Text('随机打开一本'))),
             PopupMenuItem(value: 'check', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: const Icon(Icons.refresh), title: Text('检查「$_curTabName」的更新'))),
             if (ref.read(sessionProvider) is SessionLoggedIn)
@@ -544,15 +577,34 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
       child: Scaffold(
         resizeToAvoidBottomInset: false, // 外层主界面已经让开了键盘，这里再让一次，书架只剩上面一小截
         appBar: appBar,
-        body: Column(
+        body: Stack(
           children: [
-            if (!_searching && showResumeBar) _ResumeBar(hidden: _resumeHidden),
-            Expanded(
+            Positioned.fill(
               child: NotificationListener<ScrollNotification>(
                 onNotification: _onShelfScroll,
-                child: TabBarView(key: ObjectKey(tc), controller: tc, children: [for (final c in tabs) _Shelf(key: ValueKey(c.id), catId: c.id, activeTab: _activeTab)]),
+                child: TabBarView(
+                  key: ObjectKey(tc),
+                  controller: tc,
+                  children: [
+                    for (final c in tabs)
+                      _Shelf(
+                        key: ValueKey(c.id),
+                        catId: c.id,
+                        activeTab: _activeTab,
+                        topInset: _resumeHeight,
+                        resumeEnabled: !_searching && showResumeBar,
+                      ),
+                  ],
+                ),
               ),
             ),
+            if (!_searching && showResumeBar)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: _ResumeBar(hidden: _resumeHidden, onHeight: _setResumeHeight),
+              ),
           ],
         ),
       ),
@@ -563,11 +615,12 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
 
 /// 书架顶上的「继续阅读」：最近读的一本，点了直接进阅读器（返回回到书架）；关掉后，读到别的书时再出现。
 /// 像音乐 App 的"正在播放"：底色取封面的色调，封面、书名、读到的章节，右边一个大的继续按钮。
-/// 往下滑书架时收起（[hidden]），不一直挡着；设置里可以整个关掉。
+/// 往下滑书架时以纯 GPU 位移与透明度叠加收起（[hidden]），不改下方 TabBarView 高度避免整屏连续 relayout；设置里可以整个关掉。
 class _ResumeBar extends ConsumerWidget {
-  const _ResumeBar({required this.hidden});
+  const _ResumeBar({required this.hidden, required this.onHeight});
 
   final ValueListenable<bool> hidden;
+  final ValueChanged<double> onHeight;
 
   static String _ago(DateTime t) {
     final d = DateTime.now().difference(t);
@@ -583,9 +636,15 @@ class _ResumeBar extends ConsumerWidget {
     valueListenable: Hive.box('session').listenable(keys: ['history2', 'resumeClosed']),
     builder: (context, box, _) {
       final h = ReadingHistory.all().firstOrNull;
-      if (h == null || box.get('resumeClosed') == h.aid) return const SizedBox.shrink();
+      if (h == null || box.get('resumeClosed') == h.aid) {
+        onHeight(0);
+        return const SizedBox.shrink();
+      }
       // 用 Consumer 包一层：_bar 里的 ref.watch 要在一次 build 里执行，换了书（封面变了）旧的订阅才会被清掉
-      final card = RepaintBoundary(child: Consumer(builder: (context, ref, _) => _bar(context, ref, box, h)));
+      final card = _MeasureHeight(
+        onHeight: onHeight,
+        child: RepaintBoundary(child: Consumer(builder: (context, ref, _) => _bar(context, ref, box, h))),
+      );
       return ValueListenableBuilder<bool>(
         valueListenable: hidden,
         builder: (context, isHidden, _) => TweenAnimationBuilder<double>(
@@ -593,29 +652,22 @@ class _ResumeBar extends ConsumerWidget {
           duration: const Duration(milliseconds: 260),
           curve: Curves.easeInOutCubic,
           child: card,
-          builder: (context, t, child) {
-            if (t <= 0.001) return const SizedBox(width: double.infinity);
-            return ClipRect(
-              child: Align(
-                alignment: Alignment.topCenter,
-                heightFactor: t,
-                child: Opacity(
-                  opacity: Curves.easeIn.transform(t),
-                  child: Transform.translate(
-                    offset: Offset(0, -14 * (1 - t)),
-                    child: IgnorePointer(ignoring: isHidden, child: child),
-                  ),
-                ),
+          builder: (context, t, child) => ClipRect(
+            child: IgnorePointer(
+              ignoring: isHidden || t < 0.05,
+              child: FractionalTranslation(
+                translation: Offset(0, -(1 - t)),
+                child: Opacity(opacity: Curves.easeIn.transform(t), child: child),
               ),
-            );
-          },
+            ),
+          ),
         ),
       );
     },
   );
 
   Widget _bar(BuildContext context, WidgetRef ref, Box box, HistoryEntry h) {
-    ref.watch(volumeChangesProvider); // 取到高清封面后换上
+    ref.watch(volumeChangeForProvider(h.aid)); // 仅订阅当前书的高清封面变化
     final cover = ref.read(volumeCoverQueueProvider).bookCover(h.aid, h.img);
     final tint = ref.watch(coverColorProvider(cover)).value ?? savedCoverColor(cover) ?? kNeutralCoverColor;
     final theme = Theme.of(context);
@@ -646,7 +698,7 @@ class _ResumeBar extends ConsumerWidget {
                       height: 64,
                       decoration: BoxDecoration(borderRadius: BorderRadius.circular(6), boxShadow: const [BoxShadow(color: Color(0x55000000), blurRadius: 8, offset: Offset(0, 3))]),
                       clipBehavior: Clip.antiAlias,
-                      child: CoverImage(cover, aid: h.aid),
+                      child: CoverImage(cover, aid: h.aid, thumbnail: true, decodeSize: const Size(46, 64)),
                     ),
                     const SizedBox(width: 14),
                     Expanded(
@@ -888,11 +940,13 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
 }
 
 class _Shelf extends ConsumerStatefulWidget {
-  const _Shelf({super.key, required this.catId, required this.activeTab});
+  const _Shelf({super.key, required this.catId, required this.activeTab, required this.topInset, required this.resumeEnabled});
 
   /// 分类 id：空串是"默认"（全部的书），[_ongoingTab] / [_doneTab] 按是否完结分，其余是自己建的分类
   final String catId;
   final ValueListenable<String> activeTab;
+  final ValueListenable<double> topInset;
+  final bool resumeEnabled;
 
   @override
   ConsumerState<_Shelf> createState() => _ShelfState();
@@ -904,16 +958,101 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
   final _focus = FocusNode(debugLabel: 'shelf-select');
   bool _markingRead = false;
 
+  // 缓存 _arrange() 结果，避免多选、徽章切换等无关重建重复全量筛选排序
+  (Map<String, LibBook>, ShelfOptions, String, String, bool, int, int)? _arrangeKey;
+  List<LibBook> _arrangedBooks = const [];
+  int _arrangeEpoch = 0;
+  List<LibBook>? _lastWarmedBooks;
+
+  // 滚动方向前方预解码状态（主封面缩略图提前解码进 Flutter ImageCache）
+  int _layoutCols = 1;
+  double _layoutRowExtent = 0;
+  double _layoutTopPadding = 0;
+  Size _layoutCoverSize = Size.zero;
+  final _precachedUrls = <String>{};
+  (bool, int, int)? _lastPrecacheSpan;
+  DateTime _lastPrecacheAt = DateTime(0);
+
   @override
   bool get wantKeepAlive => true;
 
-  @override
-  void initState() {
-    super.initState();
-    // 这个标签里的封面先从磁盘读进内存，往下滑时直接就有，不用等读盘
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) ref.read(imageStoreProvider).warm([for (final b in shelfBooksIn(ref.read(libraryProvider), widget.catId)) _cover(b)]);
-    });
+  List<LibBook> _getArranged(LibraryState lib, ShelfOptions o, String query, bool updateRunning, int seed) {
+    final k = _arrangeKey;
+    if (k != null &&
+        identical(k.$1, lib.books) &&
+        k.$2 == o &&
+        k.$3 == query &&
+        k.$4 == widget.catId &&
+        k.$5 == updateRunning &&
+        k.$6 == seed &&
+        k.$7 == _arrangeEpoch) {
+      return _arrangedBooks;
+    }
+    final list = _arrange(shelfBooksIn(lib, widget.catId), o, query, widget.catId);
+    _arrangeKey = (lib.books, o, query, widget.catId, updateRunning, seed, _arrangeEpoch);
+    _arrangedBooks = list;
+    return list;
+  }
+
+  void _syncLayoutMetrics({required int cols, required double rowExtent, required double topPadding, required Size coverSize}) {
+    if ((_layoutCoverSize.width - coverSize.width).abs() > 4 || (_layoutCoverSize.height - coverSize.height).abs() > 4) {
+      _precachedUrls.clear();
+      _lastPrecacheSpan = null;
+    }
+    _layoutCols = cols;
+    _layoutRowExtent = rowExtent;
+    _layoutTopPadding = topPadding;
+    _layoutCoverSize = coverSize;
+  }
+
+  /// 监听书架垂直滑动方向，在前进方向前方约 1.5~2 屏对主封面主动预解码（带节流与去重）。
+  bool _onShelfScrollPrecache(ScrollNotification n) {
+    if (isWebPreview || n.metrics.axis != Axis.vertical || n is! ScrollUpdateNotification || n.metrics.outOfRange) return false;
+    final dy = n.scrollDelta ?? 0;
+    if (dy == 0 || _layoutRowExtent <= 0 || _layoutCols <= 0 || _layoutCoverSize.isEmpty || _arrangedBooks.isEmpty) return false;
+    final now = DateTime.now();
+    if (now.difference(_lastPrecacheAt) < const Duration(milliseconds: 80)) return false;
+
+    final viewport = n.metrics.viewportDimension;
+    if (viewport <= 0) return false;
+    final pixels = n.metrics.pixels;
+    final forward = dy > 0;
+    final aheadStartPx = forward ? pixels + viewport * 0.6 : math.max(0.0, pixels - viewport * 1.8);
+    final aheadEndPx = forward ? pixels + viewport * 2.4 : math.max(0.0, pixels - viewport * 0.1);
+    final totalRows = (_arrangedBooks.length + _layoutCols - 1) ~/ _layoutCols;
+    if (totalRows <= 0) return false;
+    final startRow = (((aheadStartPx - _layoutTopPadding) / _layoutRowExtent).floor()).clamp(0, totalRows - 1);
+    final endRow = (((aheadEndPx - _layoutTopPadding) / _layoutRowExtent).ceil()).clamp(0, totalRows - 1);
+    if (endRow < startRow) return false;
+
+    final span = (forward, startRow, endRow);
+    if (_lastPrecacheSpan == span) return false;
+    _lastPrecacheSpan = span;
+    _lastPrecacheAt = now;
+
+    final startIdx = (startRow * _layoutCols).clamp(0, _arrangedBooks.length - 1);
+    final endIdx = math.min(_arrangedBooks.length - 1, (endRow + 1) * _layoutCols - 1);
+    if (_precachedUrls.length > 300) _precachedUrls.clear();
+
+    var queued = 0;
+    if (forward) {
+      for (var i = startIdx; i <= endIdx && queued < 24; i++) {
+        final url = _cover(_arrangedBooks[i]);
+        if (url.isNotEmpty && _precachedUrls.add(url)) {
+          queued++;
+          NetImage.precache(context, url, _layoutCoverSize, thumbnail: true, lowPriority: true).ignore();
+        }
+      }
+    } else {
+      for (var i = endIdx; i >= startIdx && queued < 24; i--) {
+        final url = _cover(_arrangedBooks[i]);
+        if (url.isNotEmpty && _precachedUrls.add(url)) {
+          queued++;
+          NetImage.precache(context, url, _layoutCoverSize, thumbnail: true, lowPriority: true).ignore();
+        }
+      }
+    }
+    return false;
   }
 
   void _syncSelecting() {
@@ -1001,6 +1140,10 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
   /// 书架上的封面是第一卷的卷封面，所以换的是第一卷的
   Future<void> _pickCover() async {
+    if (isLocalAid(_selected.first)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('本地书籍暂不支持在线换封面')));
+      return;
+    }
     final vols = Volumes.of(_selected.first);
     if (vols.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('先打开一次这本书的详情，目录加载后才能选封面')));
@@ -1056,7 +1199,12 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
   /// 选中的书整本下载离线缓存：一本下完再下一本（同时下会被网站限流），在后台跑，进度在离线缓存页看
   void _download() {
-    final aids = [..._selected];
+    final aids = [for (final aid in _selected) if (!isLocalAid(aid)) aid];
+    if (aids.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('本地书籍无需缓存下载')));
+      setState(_selected.clear);
+      return;
+    }
     final container = ProviderScope.containerOf(context); // 书架页关了也接着下
     () async {
       for (final aid in aids) {
@@ -1082,7 +1230,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     try {
       for (final aid in aids) {
         try {
-          final n = await api.novel(aid);
+          final n = isLocalAid(aid) ? await LocalBooks.loadNovel(aid) : await api.novel(aid);
           await ReadState.setRead(aid, [for (final v in n.catalogue) ...v.chapters.map((c) => c.cid)], true);
         } catch (_) {
           failed++;
@@ -1093,11 +1241,28 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     }
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(failed == 0 ? '已标为已读' : '$failed 本没取到目录，其余已标为已读')));
-    setState(_selected.clear);
+    setState(() {
+      _arrangeEpoch++;
+      _selected.clear();
+    });
   }
 
   Future<void> _remove() async {
-    final n = _selected.length;
+    final aids = [..._selected];
+    final localAids = [for (final a in aids) if (isLocalAid(a)) a];
+    if (localAids.isNotEmpty) {
+      final res = await confirmRemoveLocalBooks(context, totalCount: aids.length, localCount: localAids.length);
+      if (!res.confirmed || !mounted) return;
+      await ref.read(libraryProvider.notifier).remove(aids);
+      if (res.deleteFiles) {
+        for (final a in localAids) {
+          await LocalBooks.delete(a);
+        }
+      }
+      if (mounted) setState(_selected.clear);
+      return;
+    }
+    final n = aids.length;
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1107,7 +1272,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
       ),
     );
     if (ok != true) return;
-    await ref.read(libraryProvider.notifier).remove(_selected);
+    await ref.read(libraryProvider.notifier).remove(aids);
     if (mounted) setState(_selected.clear);
   }
 
@@ -1118,111 +1283,167 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     final perCat = ref.watch(appPref(P.perCat, false));
     if (perCat) ref.watch(appPrefProvider('shelf.tab.${widget.catId}'));
     final o = shelfOptionsFor(ref.watch(shelfOptionsProvider), widget.catId);
-    if (o.sort == ShelfSort.random) ref.watch(appPref('shelf.seed', 1));
+    final seed = o.sort == ShelfSort.random ? ref.watch(appPref('shelf.seed', 1)) : 0;
     final colsKey = MediaQuery.orientationOf(context) == Orientation.landscape ? P.colsLandscape : P.colsPortrait;
     final customCols = ref.watch(appPref(colsKey, 0));
     ref.watch(appPref(P.unreadBadge, true));
     ref.watch(appPref(P.cacheBadge, false));
     ref.watch(appPref(P.resumeButton, true));
     final query = ref.watch(shelfQueryProvider);
-    ref.watch(updateProvider.select((p) => p.running)); // 检查完更新后刷新未读数（不在中间进度跳动时反复重排全表）
-    ref.watch(volumeChangesProvider); // 取到卷封面后换上
+    final updateRunning = ref.watch(updateProvider.select((p) => p.running)); // 检查完更新后刷新未读数（不在中间进度跳动时反复重排全表）
     final theme = Theme.of(context);
     final textScale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 1.5);
-    final inCat = shelfBooksIn(lib, widget.catId); // 搜索也只在这个标签里找，别的标签找到几本标在标签上
-    final books = _arrange(inCat, o, query, widget.catId);
+    final books = _getArranged(lib, o, query, updateRunning, seed);
+    if (!identical(_lastWarmedBooks, books)) {
+      _lastWarmedBooks = books;
+      _precachedUrls.clear();
+      _lastPrecacheSpan = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || isWebPreview) return;
+        // 按当前实际排序顺序预热缩略图到独立 16 MB 内存缓存
+        ref.read(imageStoreProvider).warm([for (final b in books) _cover(b)], thumbnail: true);
+      });
+    }
     final loggedIn = ref.watch(sessionProvider) is SessionLoggedIn;
     final cols = customCols == 0 ? null : customCols;
 
-    final Widget body;
-    if (lib.books.isEmpty) {
-      body = StatePanel(
-        title: '书架还是空的',
-        detail: loggedIn ? '可以下拉同步网站书架，或去「发现」与「搜索」找书加入书架。' : '登录轻小说文库账号可同步云端书架；不登录也可在「发现」页把喜欢的书加入本地书架。',
-        icon: Icons.auto_stories_outlined,
-        actions: [
-          if (!loggedIn)
-            FilledButton.icon(
-              style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
-              onPressed: () => context.push(Routes.login),
-              icon: const Icon(Icons.login, size: 18),
-              label: const Text('登录文库账号'),
-            )
-          else
-            FilledButton.icon(
-              style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
-              onPressed: _refresh,
-              icon: const Icon(Icons.cloud_download_outlined, size: 18),
-              label: const Text('同步网站书架'),
-            ),
-          OutlinedButton.icon(
-            style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
-            onPressed: () => context.go(Routes.discover),
-            icon: const Icon(Icons.explore_outlined, size: 18),
-            label: const Text('去发现页逛逛'),
+    Widget buildBody(double inset) {
+      if (lib.books.isEmpty) {
+        return Padding(
+          padding: EdgeInsets.only(top: inset),
+          child: StatePanel(
+            title: '书架还是空的',
+            detail: loggedIn ? '可以下拉同步网站书架，或去「发现」与「搜索」找书加入书架。' : '登录轻小说文库账号可同步云端书架；不登录也可在「发现」页把喜欢的书加入本地书架。',
+            icon: Icons.auto_stories_outlined,
+            actions: [
+              if (!loggedIn)
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+                  onPressed: () => context.push(Routes.login),
+                  icon: const Icon(Icons.login, size: 18),
+                  label: const Text('登录文库账号'),
+                )
+              else
+                FilledButton.icon(
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+                  onPressed: _refresh,
+                  icon: const Icon(Icons.cloud_download_outlined, size: 18),
+                  label: const Text('同步网站书架'),
+                ),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
+                onPressed: () => context.go(Routes.discover),
+                icon: const Icon(Icons.explore_outlined, size: 18),
+                label: const Text('去发现页逛逛'),
+              ),
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
+                onPressed: () => importLocalBooksFlow(context, ref),
+                icon: const Icon(Icons.file_open_outlined, size: 18),
+                label: const Text('导入本地书籍'),
+              ),
+            ],
           ),
-        ],
-      );
-    } else if (books.isEmpty) {
-      body = StatePanel(title: inCat.isEmpty ? '这个分类还没有书' : (query.isEmpty ? '没有符合条件的书' : '这个分类里没有「$query」'), detail: inCat.isEmpty && !widget.catId.startsWith('auto:') ? '在书架长按书本，选"分类"放进来。' : null);
-    } else if (o.sort == ShelfSort.custom && query.isEmpty && !o.filtering) {
-      body = _reorderable(books, autoSwitched: o.display != 2);
-    } else if (o.display == 2) {
-      body = ListView.builder(padding: const EdgeInsets.only(bottom: 24), itemCount: books.length, itemBuilder: (context, i) => _listTile(books[i]));
-    } else if (o.display == 4) {
-      // 正好一屏高；外面套一层能滚的，下拉同步照常可用
-      body = LayoutBuilder(
-        builder: (context, c) => SingleChildScrollView(
-          physics: const AlwaysScrollableScrollPhysics(),
-          child: SizedBox(
-            height: c.maxHeight,
-            child: ValueListenableBuilder<String>(
-              valueListenable: widget.activeTab,
-              builder: (context, tab, _) => Shelf3DView(
-                books: books,
-                // 每个标签记住上次停在哪本，只存在本机（不进备份、不同步）
-                initialAid: Hive.box('session').get('shelf3d:${widget.catId}') as String?,
-                onFocusChanged: (aid) => Hive.box('session').put('shelf3d:${widget.catId}', aid),
-                selected: _selected,
-                heroEnabled: tab == widget.catId,
-                coverOf: _cover,
-                badgeOf: _badge,
-                subtitleOf: _shelf3dLine,
-                actionOf: _shelf3dAction,
-                onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid)),
-                onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid)),
-                onToggleSelect: (b) => _toggle(b.aid),
+        );
+      }
+      if (books.isEmpty) {
+        final inCatEmpty = shelfBooksIn(lib, widget.catId).isEmpty;
+        return Padding(
+          padding: EdgeInsets.only(top: inset),
+          child: StatePanel(title: inCatEmpty ? '这个分类还没有书' : (query.isEmpty ? '没有符合条件的书' : '这个分类里没有「$query」'), detail: inCatEmpty && !widget.catId.startsWith('auto:') ? '在书架长按书本，选"分类"放进来。' : null),
+        );
+      }
+      if (o.sort == ShelfSort.custom && query.isEmpty && !o.filtering) {
+        _syncLayoutMetrics(cols: 1, rowExtent: 72, topPadding: inset, coverSize: const Size(40, 54));
+        return _reorderable(books, autoSwitched: o.display != 2, topPadding: inset);
+      }
+      if (o.display == 2) {
+        _syncLayoutMetrics(cols: 1, rowExtent: 72, topPadding: inset, coverSize: const Size(40, 54));
+        return ListView.builder(padding: EdgeInsets.fromLTRB(0, inset, 0, 24), itemCount: books.length, itemBuilder: (context, i) => _listTile(books[i]));
+      }
+      if (o.display == 4) {
+        // 正好一屏高；外面套一层能滚的，下拉同步照常可用
+        return LayoutBuilder(
+          builder: (context, c) => SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            child: SizedBox(
+              height: c.maxHeight,
+              child: Padding(
+                padding: EdgeInsets.only(top: inset),
+                child: ValueListenableBuilder<String>(
+                  valueListenable: widget.activeTab,
+                  builder: (context, tab, _) => Shelf3DView(
+                    books: books,
+                    // 每个标签记住上次停在哪本，只存在本机（不进备份、不同步）
+                    initialAid: Hive.box('session').get('shelf3d:${widget.catId}') as String?,
+                    onFocusChanged: (aid) => Hive.box('session').put('shelf3d:${widget.catId}', aid),
+                    selected: _selected,
+                    heroEnabled: tab == widget.catId,
+                    coverOf: _cover,
+                    badgeOf: _badge,
+                    subtitleOf: _shelf3dLine,
+                    actionOf: _shelf3dAction,
+                    onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid)),
+                    onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid)),
+                    onToggleSelect: (b) => _toggle(b.aid),
+                  ),
+                ),
               ),
             ),
           ),
-        ),
-      );
-    } else if (o.display == 3) {
-      body = LayoutBuilder(
+        );
+      }
+      if (o.display == 3) {
+        return LayoutBuilder(
+          builder: (context, c) {
+            final n = cols ?? (c.maxWidth / 140).floor().clamp(2, 8);
+            final cellW = (c.maxWidth - 32 - 14 * (n - 1)) / n;
+            final coverW = math.max(1.0, cellW - _edges);
+            final coverH = coverW / kCoverAspect;
+            final coverSize = Size(coverW, coverH);
+            final mainExtent = coverH + 6 + 44 * textScale;
+            final topPad = 12 + inset;
+            _syncLayoutMetrics(cols: n, rowExtent: mainExtent + 16, topPadding: topPad, coverSize: coverSize);
+            return GridView.builder(
+              scrollCacheExtent: const ScrollCacheExtent.viewport(1), // 上下各多备一屏，快速滑动时封面也已经解码好
+              padding: EdgeInsets.fromLTRB(16, topPad, 16, 24),
+              // 一格 = 封面（右边留出后面几卷的边）+ 下面两行字（随系统字号伸缩防溢出）
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: n, mainAxisSpacing: 16, crossAxisSpacing: 14, mainAxisExtent: mainExtent),
+              itemCount: books.length,
+              itemBuilder: (context, i) => _stackTile(books[i], coverSize: coverSize),
+            );
+          },
+        );
+      }
+      return LayoutBuilder(
         builder: (context, c) {
-          final n = cols ?? (c.maxWidth / 140).floor().clamp(2, 8);
-          final w = (c.maxWidth - 32 - 14 * (n - 1)) / n;
+          final compact = o.display == 1;
+          final n = cols ?? (compact ? (c.maxWidth / 104).floor().clamp(3, 10) : gridColumns(c.maxWidth));
+          final topPad = 8 + inset;
+          final Size coverSize;
+          final double rowExtent;
+          if (compact) {
+            final itemW = math.max(1.0, (c.maxWidth - 32 - 8 * (n - 1)) / n);
+            final itemH = itemW / 0.72;
+            coverSize = Size(itemW, itemH);
+            rowExtent = itemH + 8;
+          } else {
+            final itemW = math.max(1.0, (c.maxWidth - 32 - 14 * (n - 1)) / n);
+            final coverH = itemW * 4 / 3;
+            coverSize = Size(itemW, coverH);
+            rowExtent = coverH + 8 + 42 * textScale.clamp(1.0, 1.6) + 20;
+          }
+          _syncLayoutMetrics(cols: n, rowExtent: rowExtent, topPadding: topPad, coverSize: coverSize);
           return GridView.builder(
-            scrollCacheExtent: const ScrollCacheExtent.viewport(1), // 上下各多备一屏，快速滑动时封面也已经解码好
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-            // 一格 = 封面（右边留出后面几卷的边）+ 下面两行字（随系统字号伸缩防溢出）
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: n, mainAxisSpacing: 16, crossAxisSpacing: 14, mainAxisExtent: (w - _edges) / kCoverAspect + 6 + 44 * textScale),
+            scrollCacheExtent: const ScrollCacheExtent.viewport(1),
+            padding: EdgeInsets.fromLTRB(16, topPad, 16, 24),
+            gridDelegate: compact
+                ? SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: n, mainAxisSpacing: 8, crossAxisSpacing: 8, childAspectRatio: 0.72)
+                : novelGridDelegate(c.maxWidth, columns: n, textScale: textScale),
             itemCount: books.length,
-            itemBuilder: (context, i) => _stackTile(books[i]),
+            itemBuilder: (context, i) => _gridTile(books[i], compact: compact, coverSize: coverSize),
           );
         },
-      );
-    } else {
-      body = LayoutBuilder(
-        builder: (context, c) => GridView.builder(
-          scrollCacheExtent: const ScrollCacheExtent.viewport(1),
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-          gridDelegate: o.display == 1
-              ? SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols ?? (c.maxWidth / 104).floor().clamp(3, 10), mainAxisSpacing: 8, crossAxisSpacing: 8, childAspectRatio: 0.72)
-              : novelGridDelegate(c.maxWidth, columns: cols, textScale: textScale),
-          itemCount: books.length,
-          itemBuilder: (context, i) => _gridTile(books[i], compact: o.display == 1),
-        ),
       );
     }
 
@@ -1242,7 +1463,18 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
           },
           child: Column(
             children: [
-              Expanded(child: RefreshIndicator(onRefresh: _refresh, child: body)),
+              Expanded(
+                child: ValueListenableBuilder<double>(
+                  valueListenable: widget.topInset,
+                  builder: (context, rawInset, _) {
+                    final inset = widget.resumeEnabled ? rawInset : 0.0;
+                    return NotificationListener<ScrollNotification>(
+                      onNotification: _onShelfScrollPrecache,
+                      child: RefreshIndicator(edgeOffset: inset, onRefresh: _refresh, child: buildBody(inset)),
+                    );
+                  },
+                ),
+              ),
               if (_selected.isNotEmpty)
                 Material(
                   elevation: 3,
@@ -1308,7 +1540,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
   void _openAndRefresh(String route) {
     context.push(route).then((_) {
-      if (mounted) setState(() {});
+      if (mounted) setState(() => _arrangeEpoch++);
     });
   }
 
@@ -1372,14 +1604,21 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     );
   }
 
-  Widget _gridTile(LibBook b, {required bool compact}) {
+  Widget _gridTile(LibBook b, {required bool compact, required Size coverSize}) {
     final resume = _resume(b);
     final badge = _badge(b);
     if (!compact) {
       return GestureDetector(
         onLongPress: () => _toggle(b.aid),
         onSecondaryTap: () => _toggle(b.aid),
-        child: NovelCard(title: b.shown, aid: b.aid, imageUrl: _cover(b), onTap: () => _tap(b), badge: badge, action: resume),
+        child: NovelCard(
+          title: b.shown,
+          aid: b.aid,
+          cover: _ShelfBookCover(aid: b.aid, fallbackImg: b.img, decodeSize: coverSize),
+          onTap: () => _tap(b),
+          badge: badge,
+          action: resume,
+        ),
       );
     }
     // 紧凑：书名压在封面底部的渐变上
@@ -1392,7 +1631,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
         child: Stack(
           fit: StackFit.expand,
           children: [
-            CoverImage(_cover(b), aid: b.aid),
+            _ShelfBookCover(aid: b.aid, fallbackImg: b.img, decodeSize: coverSize),
             DecoratedBox(
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(10),
@@ -1409,68 +1648,15 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
   }
 
   /// 卷册：第一卷封面在最前，右边露出后面几卷真封面的一窄条边（卷越多条数越多，单卷没有），书名和读到第几卷在封面下面。
-  Widget _stackTile(LibBook b) {
-    final vols = Volumes.of(b.aid);
-    final at = readingVolume(b.aid);
-    final doneMap = Volumes.done(b.aid);
-    final allDone = vols.isNotEmpty && vols.every((v) => doneMap.containsKey(v.title));
+  Widget _stackTile(LibBook b, {required Size coverSize}) {
     final badge = _badge(b);
-    final queue = ref.read(volumeCoverQueueProvider);
-    final behind = [for (final v in vols.skip(1).take(stackEdges(vols.length))) queue.volCover(b.aid, v, b.img)];
-    final theme = Theme.of(context);
     return MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: () => _selected.isEmpty ? _openAndRefresh(Routes.volumes(b.aid)) : _toggle(b.aid),
         onLongPress: () => _toggle(b.aid),
         onSecondaryTap: () => _toggle(b.aid),
-        child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, c) {
-                final w = math.min(c.maxWidth - _edges, c.maxHeight * kCoverAspect);
-                final h = w / kCoverAspect;
-                return Stack(
-                  clipBehavior: Clip.none, // 后面几卷的边在封面右边、Stack 外面
-                  children: [
-                    // 整叠放进 Hero：点开时一起飞过去放大（只有当前标签页开启 Hero，避免保活的相邻标签撞 tag）
-                    SizedBox(
-                      width: w,
-                      height: h,
-                      child: ValueListenableBuilder<String>(
-                        valueListenable: widget.activeTab,
-                        builder: (context, tab, child) => HeroMode(enabled: tab == widget.catId, child: child!),
-                        child: Hero(tag: 'vols:${b.aid}', flightShuttleBuilder: volumeHeroShuttle, child: VolumeStack(cover: _cover(b), behind: behind, aid: b.aid)),
-                      ),
-                    ),
-                    if (badge != null) Positioned(top: 6, right: 6, child: badge),
-                    if (vols.length == 1)
-                      Positioned(
-                        left: 6,
-                        top: h - 6 - 20,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(4)),
-                          child: const Text('单卷', style: TextStyle(color: Colors.white, fontSize: 11)),
-                        ),
-                      ),
-                  ],
-                );
-              },
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(b.shown, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
-          Text(
-            vols.isEmpty ? '还没有分卷信息' : [if (allDone) '已读完' else if (at >= 0) '读到第 ${at + 1} 卷', '共 ${vols.length} 卷'].join(' · '),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
-          ),
-        ],
-        ),
+        child: _ShelfStackTile(book: b, catId: widget.catId, activeTab: widget.activeTab, badge: badge, coverSize: coverSize),
       ),
     );
   }
@@ -1483,7 +1669,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
       onSecondaryTap: () => _toggle(b.aid),
       child: ListTile(
         selected: _selected.contains(b.aid),
-        leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(b), aid: b.aid)),
+        leading: SizedBox(width: 40, height: 54, child: _ShelfBookCover(aid: b.aid, fallbackImg: b.img, decodeSize: const Size(40, 54))),
         title: Text(b.shown, maxLines: 2, overflow: TextOverflow.ellipsis),
         subtitle: Text([if (n > 0) '未读 $n 章', if (cached > 0) '已缓存 $cached 章', if (b.done) '已完结', if (p == null) '还没读'].join(' · ')),
         trailing: _selected.contains(b.aid) ? Icon(Icons.check_circle, color: Theme.of(context).colorScheme.primary) : _resume(b),
@@ -1494,22 +1680,139 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
   }
 
   /// 自定义排序：列表形式，拖动右侧把手调整，每个分类单独记顺序。
-  Widget _reorderable(List<LibBook> books, {required bool autoSwitched}) => ReorderableListView.builder(
-    padding: const EdgeInsets.only(bottom: 24),
+  Widget _reorderable(List<LibBook> books, {required bool autoSwitched, required double topPadding}) => ReorderableListView.builder(
+    padding: EdgeInsets.fromLTRB(0, topPadding, 0, 24),
     header: autoSwitched ? const XNote('自定义排序下自动切换为列表视图，按住右侧把手可拖动调整顺序。') : null,
     itemCount: books.length,
     onReorderItem: (from, to) {
       final list = [...books];
       list.insert(to, list.removeAt(from));
       Hive.box('session').put('shelfOrder:lib:${widget.catId}', [for (final b in list) b.aid]);
-      setState(() {});
+      setState(() => _arrangeEpoch++);
     },
     itemBuilder: (context, i) => ListTile(
       key: ValueKey(books[i].aid),
-      leading: SizedBox(width: 40, height: 54, child: CoverImage(_cover(books[i]), aid: books[i].aid)),
+      leading: SizedBox(width: 40, height: 54, child: _ShelfBookCover(aid: books[i].aid, fallbackImg: books[i].img, decodeSize: const Size(40, 54))),
       title: Text(books[i].shown, maxLines: 2, overflow: TextOverflow.ellipsis),
       trailing: ReorderableDragStartListener(index: i, child: const Icon(Icons.drag_handle)),
       onTap: () => context.push(Routes.novel(books[i].aid)),
     ),
   );
+}
+
+/// 书架单本封面：按 `aid` 细粒度订阅卷封面变化，后台每抓完一本封面只刷新该书卡片。
+class _ShelfBookCover extends ConsumerWidget {
+  const _ShelfBookCover({required this.aid, required this.fallbackImg, this.decodeSize});
+
+  final String aid;
+  final String fallbackImg;
+  final Size? decodeSize;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(volumeChangeForProvider(aid));
+    final cover = ref.read(volumeCoverQueueProvider).bookCover(aid, fallbackImg);
+    return CoverImage(cover, aid: aid, thumbnail: true, decodeSize: decodeSize);
+  }
+}
+
+/// 书架卷册卡片内部：按 `aid` 细粒度订阅该书卷信息与封面变更，复用外层算好的 [coverSize] 省掉嵌套 LayoutBuilder。
+class _ShelfStackTile extends ConsumerWidget {
+  const _ShelfStackTile({required this.book, required this.catId, required this.activeTab, required this.badge, required this.coverSize});
+
+  final LibBook book;
+  final String catId;
+  final ValueListenable<String> activeTab;
+  final Widget? badge;
+  final Size coverSize;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(volumeChangeForProvider(book.aid));
+    final vols = Volumes.of(book.aid);
+    final at = readingVolume(book.aid);
+    final doneMap = Volumes.done(book.aid);
+    final allDone = vols.isNotEmpty && vols.every((v) => doneMap.containsKey(v.title));
+    final queue = ref.read(volumeCoverQueueProvider);
+    final cover = queue.bookCover(book.aid, book.img);
+    final behind = [for (final v in vols.skip(1).take(stackEdges(vols.length))) queue.volCover(book.aid, v, book.img)];
+    final theme = Theme.of(context);
+    final w = coverSize.width;
+    final h = coverSize.height;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.topLeft,
+            child: Stack(
+              clipBehavior: Clip.none, // 后面几卷的边在封面右边、Stack 外面
+              children: [
+                // 整叠放进 Hero：点开时一起飞过去放大（只有当前标签页开启 Hero，避免保活的相邻标签撞 tag）
+                SizedBox(
+                  width: w,
+                  height: h,
+                  child: ValueListenableBuilder<String>(
+                    valueListenable: activeTab,
+                    builder: (context, tab, child) => HeroMode(enabled: tab == catId, child: child!),
+                    child: Hero(tag: 'vols:${book.aid}', flightShuttleBuilder: volumeHeroShuttle, child: VolumeStack(cover: cover, behind: behind, aid: book.aid, decodeSize: coverSize)),
+                  ),
+                ),
+                if (badge != null) Positioned(top: 6, right: 6, child: badge!),
+                if (vols.length == 1)
+                  Positioned(
+                    left: 6,
+                    top: h - 6 - 20,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(4)),
+                      child: const Text('单卷', style: TextStyle(color: Colors.white, fontSize: 11)),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(book.shown, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+        Text(
+          vols.isEmpty ? '还没有分卷信息' : [if (allDone) '已读完' else if (at >= 0) '读到第 ${at + 1} 卷', '共 ${vols.length} 卷'].join(' · '),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+        ),
+      ],
+    );
+  }
+}
+
+/// 测量子节点高度并在高度变化时通知父级（用于「继续阅读条」静态留白，不随滑出动画触发）。
+class _MeasureHeight extends SingleChildRenderObjectWidget {
+  const _MeasureHeight({required this.onHeight, super.child});
+
+  final ValueChanged<double> onHeight;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderMeasureHeight(onHeight);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderMeasureHeight renderObject) => renderObject.onHeight = onHeight;
+}
+
+class _RenderMeasureHeight extends RenderProxyBox {
+  _RenderMeasureHeight(this.onHeight);
+
+  ValueChanged<double> onHeight;
+  double? _lastHeight;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    final h = size.height;
+    if (_lastHeight != h) {
+      _lastHeight = h;
+      onHeight(h);
+    }
+  }
 }
