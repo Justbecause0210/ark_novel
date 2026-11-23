@@ -47,6 +47,56 @@ int? charsPerMinute(Iterable<(int, int)> samples) {
 /// 在读的一本：读到的那卷第几卷、读了几章 / 共几章，按读这本书的速度估计读完这卷还要多少秒（数据不够为 null）
 typedef _Reading = ({String aid, String title, String img, String cid, int vol, int read, int total, int? eta});
 
+/// 统计页昂贵聚合结果的记忆化快照：点击柱状图或热力图单日格子时直接复用，不再全表重算。
+class _StatsSnapshot {
+  const _StatsSnapshot({
+    required this.perDay,
+    required this.perBook,
+    required this.chapters,
+    required this.total,
+    required this.today,
+    required this.weekSum,
+    required this.streak,
+    required this.top,
+    required this.topMeta,
+    required this.reading,
+    required this.doneYearCount,
+    required this.perMonth,
+    required this.maxMonth,
+    required this.speed,
+    required this.dayToBooks,
+  });
+
+  final Map<String, int> perDay;
+  final Map<String, int> perBook;
+  final int chapters;
+  final int total;
+  final int today;
+  final int weekSum;
+  final int streak;
+  final List<MapEntry<String, int>> top;
+  final Map<String, ({String title, String img, int days, int readCount})> topMeta;
+  final List<_Reading> reading;
+  final int doneYearCount;
+  final List<int> perMonth;
+  final int maxMonth;
+  final int? speed;
+
+  /// 日期（`yyyy-MM-dd`）→ {aid → 秒}，单次扫描生成，供柱状图与热力图按日 O(1) 查询。
+  final Map<String, Map<String, int>> dayToBooks;
+
+  List<MapEntry<String, int>> booksMatching(bool Function(String day) inDay) {
+    final agg = <String, int>{};
+    for (final e in dayToBooks.entries) {
+      if (!inDay(e.key)) continue;
+      for (final b in e.value.entries) {
+        agg[b.key] = (agg[b.key] ?? 0) + b.value;
+      }
+    }
+    return agg.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+  }
+}
+
 /// 阅读统计：今天 / 连续天数；周 / 月 / 年时长（点柱子看那天读了哪几本）；在读的书还要多久读完这卷；
 /// 今年每月读完几卷；阅读日历；总计和阅读速度；读得最久的书。
 class StatsPage extends ConsumerStatefulWidget {
@@ -59,6 +109,25 @@ class StatsPage extends ConsumerStatefulWidget {
 class _StatsPageState extends ConsumerState<StatsPage> {
   int _range = 0; // 0 周、1 月、2 年
   int? _picked; // 点中的那根柱子
+  int _reloadEpoch = 0;
+  (int, int, String, int)? _cacheKey;
+  _StatsSnapshot? _snapshot;
+
+  void _onStatsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    ReadingStats.changes.addListener(_onStatsChanged);
+  }
+
+  @override
+  void dispose() {
+    ReadingStats.changes.removeListener(_onStatsChanged);
+    super.dispose();
+  }
 
   /// 柱状图的数据：(标签, 秒, 点中时显示的日期, 日期前缀)。年按自然月合计，前缀是 `yyyy-MM-`，日子的前缀就是整个日期。
   List<(String, int, String, String)> _bars(Map<String, int> perDay, DateTime now) {
@@ -85,10 +154,9 @@ class _StatsPageState extends ConsumerState<StatsPage> {
   }
 
   /// 最近读的几本还没读完的书：读到的那卷（读完了就看下一卷）还剩几章、大概还要多久
-  List<_Reading> _reading() {
+  List<_Reading> _reading(Map<String, Map<String, Map<String, int>>> chapterSecsByBook, int? pace) {
     final out = <_Reading>[];
     final seen = <String>{};
-    final pace = secondsPerChapter(ReadingStats.chapterBooks().expand((a) => ReadingStats.chapterSeconds(a).values)); // 这本书数据不够时用整体的
     for (final h in ReadingHistory.all()) {
       if (out.length >= 4) break;
       if (!seen.add(h.aid)) continue;
@@ -96,14 +164,15 @@ class _StatsPageState extends ConsumerState<StatsPage> {
       final cid = ReadingProgress.of(h.aid)?.cid ?? h.cid;
       var vi = vols.indexWhere((v) => v.cids.contains(cid));
       if (vi < 0) continue;
-      final read = ReadState.read(h.aid);
+      final read = ReadState.readView(h.aid);
       int left(Vol v) => v.textCids.where((c) => !read.contains(c)).length;
       while (vi < vols.length && left(vols[vi]) == 0) {
         vi++;
       }
       if (vi >= vols.length) continue; // 全读完了
       final v = vols[vi];
-      final per = secondsPerChapter(ReadingStats.chapterSeconds(h.aid).values) ?? pace;
+      final bookCh = chapterSecsByBook[h.aid];
+      final per = (bookCh == null ? null : secondsPerChapter(bookCh.values)) ?? pace;
       final info = ReadingStats.info(h.aid);
       out.add((
         aid: h.aid,
@@ -119,20 +188,92 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     return out;
   }
 
+  _StatsSnapshot _computeSnapshot(DateTime now, int volVersion) {
+    final todayKey = ReadingStats.dayKey(now);
+    final key = (ReadingStats.changes.value, volVersion, todayKey, _reloadEpoch);
+    if (_snapshot != null && _cacheKey == key) return _snapshot!;
+
+    final perDay = ReadingStats.perDay();
+    final perBook = ReadingStats.perBook();
+    final chapters = ReadingStats.chapters;
+    final total = perDay.values.fold(0, (a, b) => a + b);
+    final today = perDay[todayKey] ?? 0;
+    final weekSum = [for (var i = 0; i < 7; i++) perDay[ReadingStats.dayKey(DateTime(now.year, now.month, now.day - i))] ?? 0].fold(0, (a, b) => a + b);
+    final streak = readingStreak(perDay, now);
+    final top = perBook.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final topMeta = <String, ({String title, String img, int days, int readCount})>{
+      for (final e in top.take(10))
+        e.key: () {
+          final info = ReadingStats.info(e.key);
+          return (title: info.title, img: info.img, days: ReadingStats.bookDays(e.key).length, readCount: ReadState.readView(e.key).length);
+        }(),
+    };
+
+    // 单次扫描各书章节时长：同时支撑阅读速度、在读预计耗时、柱状图与热力图按日书单
+    final chapterSecsByBook = <String, Map<String, Map<String, int>>>{};
+    final dayToBooks = <String, Map<String, int>>{};
+    final speedSamples = <(int, int)>[];
+    for (final aid in ReadingStats.chapterBooks()) {
+      final ch = ReadingStats.chapterSeconds(aid);
+      chapterSecsByBook[aid] = ch;
+      final readSet = ReadState.readView(aid);
+      for (final ce in ch.entries) {
+        var chTotal = 0;
+        for (final de in ce.value.entries) {
+          chTotal += de.value;
+          final byBook = dayToBooks.putIfAbsent(de.key, () => {});
+          byBook[aid] = (byBook[aid] ?? 0) + de.value;
+        }
+        if (readSet.contains(ce.key)) {
+          if (ChapterCache.length(aid, ce.key) case final n?) speedSamples.add((n, chTotal));
+        }
+      }
+    }
+    final pace = secondsPerChapter(chapterSecsByBook.values.expand((m) => m.values));
+    final reading = _reading(chapterSecsByBook, pace);
+    final doneYear = Volumes.allDone().where((e) => DateTime.fromMillisecondsSinceEpoch(e.$4).year == now.year).toList();
+    final perMonth = List.filled(12, 0);
+    for (final e in doneYear) {
+      perMonth[DateTime.fromMillisecondsSinceEpoch(e.$4).month - 1]++;
+    }
+    final maxMonth = perMonth.fold(1, math.max);
+    final speed = charsPerMinute(speedSamples);
+
+    _cacheKey = key;
+    return _snapshot = _StatsSnapshot(
+      perDay: perDay,
+      perBook: perBook,
+      chapters: chapters,
+      total: total,
+      today: today,
+      weekSum: weekSum,
+      streak: streak,
+      top: top,
+      topMeta: topMeta,
+      reading: reading,
+      doneYearCount: doneYear.length,
+      perMonth: perMonth,
+      maxMonth: maxMonth,
+      speed: speed,
+      dayToBooks: dayToBooks,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    ref.watch(volumeChangesProvider);
+    final volVersion = ref.watch(volumeChangesProvider);
     final queue = ref.read(volumeCoverQueueProvider);
     final now = DateTime.now();
-    final perDay = ReadingStats.perDay();
-    final perBook = ReadingStats.perBook();
-    final total = perDay.values.fold(0, (a, b) => a + b);
-    final today = perDay[ReadingStats.dayKey(now)] ?? 0;
-    final weekSum = [for (var i = 0; i < 7; i++) perDay[ReadingStats.dayKey(DateTime(now.year, now.month, now.day - i))] ?? 0].fold(0, (a, b) => a + b);
-    final streak = readingStreak(perDay, now);
-    final top = perBook.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final snap = _computeSnapshot(now, volVersion);
+    final perDay = snap.perDay;
+    final perBook = snap.perBook;
+    final total = snap.total;
+    final today = snap.today;
+    final weekSum = snap.weekSum;
+    final streak = snap.streak;
+    final top = snap.top;
     final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
     String cover(String aid, String img) => queue.bookCover(aid, img.isNotEmpty ? img : Wenku8Parser.coverUrl(aid));
 
@@ -156,22 +297,12 @@ class _StatsPageState extends ConsumerState<StatsPage> {
     final picked = _picked != null && _picked! < bars.length ? bars[_picked!] : null;
     // 柱状图下面列出读了哪几本：点了柱子是那一天（那个月），没点是整段时间
     final from = bars.first.$4;
-    final booksInRange = ReadingStats.booksOn((d) => picked != null ? d.startsWith(picked.$4) : d.compareTo(from) >= 0).entries.toList()
-      ..sort((a, b) => b.value.compareTo(a.value));
+    final booksInRange = snap.booksMatching((d) => picked != null ? d.startsWith(picked.$4) : d.compareTo(from) >= 0);
 
-    final reading = _reading();
-    final doneYear = Volumes.allDone().where((e) => DateTime.fromMillisecondsSinceEpoch(e.$4).year == now.year).toList();
-    final perMonth = List.filled(12, 0);
-    for (final e in doneYear) {
-      perMonth[DateTime.fromMillisecondsSinceEpoch(e.$4).month - 1]++;
-    }
-    final maxMonth = perMonth.fold(1, math.max);
-    final speed = charsPerMinute([
-      for (final aid in ReadingStats.chapterBooks())
-        for (final e in ReadingStats.chapterSeconds(aid).entries)
-          if (ReadState.isRead(aid, e.key))
-            if (ChapterCache.length(aid, e.key) case final n?) (n, e.value.values.fold(0, (a, b) => a + b)),
-    ]);
+    final reading = snap.reading;
+    final perMonth = snap.perMonth;
+    final maxMonth = snap.maxMonth;
+    final speed = snap.speed;
 
     return Scaffold(
       appBar: AppBar(
@@ -181,13 +312,13 @@ class _StatsPageState extends ConsumerState<StatsPage> {
             TextButton(
               onPressed: () async {
                 await Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const _ManageStatsPage()));
-                if (mounted) setState(() {});
+                if (mounted) setState(() => _reloadEpoch++);
               },
               child: const Text('管理'),
             ),
         ],
       ),
-      body: total == 0 && ReadingStats.chapters == 0
+      body: total == 0 && snap.chapters == 0
           ? const StatePanel(title: '还没有阅读数据', detail: '读几章之后这里会出现统计。')
           : contentWidth(ListView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
@@ -372,7 +503,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                               padding: const EdgeInsets.symmetric(vertical: 6),
                               child: Row(
                                 children: [
-                                  SizedBox(width: 40, height: 56, child: CoverImage(cover(r.aid, r.img))),
+                                  SizedBox(width: 40, height: 56, child: CoverImage(cover(r.aid, r.img), thumbnail: true, decodeSize: const Size(40, 56))),
                                   const SizedBox(width: 12),
                                   Expanded(
                                     child: Column(
@@ -415,7 +546,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                       Row(
                         children: [
                           Expanded(child: Text('今年读完的卷', style: theme.textTheme.titleMedium)),
-                          Text('${doneYear.length} 卷', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600, color: scheme.primary)),
+                          Text('${snap.doneYearCount} 卷', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600, color: scheme.primary)),
                           Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
                         ],
                       ),
@@ -457,7 +588,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                     children: [
                       Text('阅读日历', style: theme.textTheme.titleMedium),
                       const SizedBox(height: 12),
-                      _Heatmap(perDay: perDay, now: now),
+                      _Heatmap(perDay: perDay, now: now, dayToBooks: snap.dayToBooks),
                     ],
                   ),
                 ),
@@ -466,7 +597,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                   [
                     '累计 ${_duration(total)}',
                     '读过 ${perBook.length} 本',
-                    '${ReadingStats.chapters} 章',
+                    '${snap.chapters} 章',
                     if (speed != null) '约 $speed 字/分钟',
                   ].join(' · '),
                   style: muted,
@@ -478,7 +609,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                 for (final e in top.take(10))
                   Builder(
                     builder: (context) {
-                      final info = ReadingStats.info(e.key);
+                      final meta = snap.topMeta[e.key]!;
                       return InkWell(
                         borderRadius: BorderRadius.circular(12),
                         onTap: () => context.push(Routes.report(e.key)),
@@ -487,7 +618,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                           padding: const EdgeInsets.symmetric(vertical: 6),
                           child: Row(
                             children: [
-                              SizedBox(width: 40, height: 56, child: CoverImage(cover(e.key, info.img))),
+                              SizedBox(width: 40, height: 56, child: CoverImage(cover(e.key, meta.img), thumbnail: true, decodeSize: const Size(40, 56))),
                               const SizedBox(width: 12),
                               Expanded(
                                 child: Column(
@@ -495,7 +626,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                                   children: [
                                     Row(
                                       children: [
-                                        Expanded(child: Text(info.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge)),
+                                        Expanded(child: Text(meta.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyLarge)),
                                         Text(_duration(e.value), style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
                                       ],
                                     ),
@@ -506,7 +637,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
                                       child: LinearProgressIndicator(value: e.value / top.first.value, minHeight: 5, color: scheme.primary, backgroundColor: scheme.primary.withValues(alpha: 0.12)),
                                     ),
                                     const SizedBox(height: 4),
-                                    Text('${ReadingStats.bookDays(e.key).length} 天 · ${ReadState.read(e.key).length} 章已读', style: muted),
+                                    Text('${meta.days} 天 · ${meta.readCount} 章已读', style: muted),
                                   ],
                                 ),
                               ),
@@ -573,10 +704,11 @@ class _ManageStatsPageState extends State<_ManageStatsPage> {
 
 /// GitHub 那样的阅读日历：一列一周（周一在上），越往右越近，颜色越深读得越久。格子数按宽度放得下多少周算；点击格子查看单日详情。
 class _Heatmap extends StatefulWidget {
-  const _Heatmap({required this.perDay, required this.now});
+  const _Heatmap({required this.perDay, required this.now, required this.dayToBooks});
 
   final Map<String, int> perDay;
   final DateTime now;
+  final Map<String, Map<String, int>> dayToBooks;
 
   @override
   State<_Heatmap> createState() => _HeatmapState();
@@ -603,7 +735,7 @@ class _HeatmapState extends State<_Heatmap> {
     final pickedSec = pickedKey == null ? 0 : (widget.perDay[pickedKey] ?? 0);
     final pickedBooks = pickedKey == null
         ? const <MapEntry<String, int>>[]
-        : (ReadingStats.booksOn((k) => k == pickedKey).entries.toList()..sort((a, b) => b.value.compareTo(a.value)));
+        : ((widget.dayToBooks[pickedKey] ?? const <String, int>{}).entries.toList()..sort((a, b) => b.value.compareTo(a.value)));
 
     return LayoutBuilder(
       builder: (context, c) {

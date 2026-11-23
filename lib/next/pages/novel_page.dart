@@ -20,7 +20,7 @@ import '../image_cache.dart';
 import '../library.dart';
 import '../stats.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
+import '../volumes.dart' show Vol, Volumes, volumeChangeForProvider;
 import 'categories_page.dart';
 import 'cover_picker_page.dart';
 import '../progress.dart';
@@ -237,7 +237,7 @@ class _BodyState extends ConsumerState<_Body> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final d = data.detail;
-    ref.watch(volumeChangesProvider); // 取到卷封面后换上
+    ref.watch(volumeChangeForProvider(aid)); // 仅订阅本书卷封面/读完状态变化
     final cover = ref.read(volumeCoverQueueProvider).bookCover(aid, d.imgUrl);
     final inLib = ref.watch(libraryProvider.select((s) => s.books.containsKey(aid)));
     final progress = ReadingProgress.of(aid);

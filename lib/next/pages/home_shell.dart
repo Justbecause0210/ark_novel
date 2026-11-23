@@ -96,6 +96,12 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     WidgetsBinding.instance.addPostFrameCallback((_) => _onRemovedElsewhere()); // 主界面重建前就记下的
     Future.microtask(_syncAndCheck);
     Sync.auto();
+    // 空闲时提前加载 imgsr 目录索引，避免首次加载超分封面在热路径扫盘
+    if (!isWebPreview && ImageStore.srSupported) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) ref.read(imageStoreProvider).warmSrIndex().ignore();
+      });
+    }
     // 清缓存、压图这些不急的活等主界面稳定了再做，不和第一屏抢 CPU 和磁盘
     _maintenance = Timer(const Duration(seconds: 6), _tidy);
     _timer = Timer.periodic(const Duration(hours: 1), (_) {

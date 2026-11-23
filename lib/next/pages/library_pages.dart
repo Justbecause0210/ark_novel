@@ -68,47 +68,15 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
     ref.watch(volumeChangesProvider);
     final covers = ref.read(volumeCoverQueueProvider);
     final items = ReadingHistory.all();
-    final rows = <Widget>[];
+    final rows = <_HistoryRow>[];
     String? day;
     for (final e in items) {
       final label = dayLabel(e.time);
       if (label != day) {
         day = label;
-        rows.add(Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(label, style: theme.textTheme.titleSmall?.copyWith(color: scheme.primary))));
+        rows.add(_HistoryDayRow(label));
       }
-      rows.add(
-        Dismissible(
-          key: ValueKey(e.aid),
-          direction: DismissDirection.endToStart,
-          background: Container(
-            color: scheme.error,
-            alignment: Alignment.centerRight,
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.delete_outline, color: scheme.onError),
-                const SizedBox(width: 6),
-                Text('删除', style: TextStyle(color: scheme.onError)),
-              ],
-            ),
-          ),
-          onDismissed: (_) => _deleteOne(e),
-          child: ListTile(
-            leading: SizedBox(width: 40, height: 54, child: CoverImage(covers.bookCover(e.aid, e.img), aid: e.aid)),
-            title: Text(LibraryStore.shown(e.aid, e.title), maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text('${e.chapter} · ${hhmm(e.time)}', maxLines: 1, overflow: TextOverflow.ellipsis),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                IconButton(icon: const Icon(Icons.info_outline, size: 20), tooltip: hz(context, '详情'), onPressed: () => context.push(Routes.novel(e.aid))),
-                IconButton(icon: const Icon(Icons.close, size: 18), tooltip: hz(context, '删除记录'), onPressed: () => _deleteOne(e)),
-              ],
-            ),
-            onTap: () => context.push(Routes.reader(e.aid, e.cid)),
-          ),
-        ),
-      );
+      rows.add(_HistoryEntryRow(e));
     }
     return Scaffold(
       appBar: AppBar(
@@ -137,9 +105,65 @@ class _HistoryPageState extends ConsumerState<HistoryPage> {
             ),
         ],
       ),
-      body: contentWidth(items.isEmpty ? const StatePanel(title: '还没有阅读记录') : ListView(children: rows)),
+      body: contentWidth(
+        items.isEmpty
+            ? const StatePanel(title: '还没有阅读记录')
+            : ListView.builder(
+                itemCount: rows.length,
+                itemBuilder: (context, i) => switch (rows[i]) {
+                  _HistoryDayRow(:final label) => Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(label, style: theme.textTheme.titleSmall?.copyWith(color: scheme.primary))),
+                  _HistoryEntryRow(entry: final e) => Dismissible(
+                    key: ValueKey(e.aid),
+                    direction: DismissDirection.endToStart,
+                    background: Container(
+                      color: scheme.error,
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.delete_outline, color: scheme.onError),
+                          const SizedBox(width: 6),
+                          Text('删除', style: TextStyle(color: scheme.onError)),
+                        ],
+                      ),
+                    ),
+                    onDismissed: (_) => _deleteOne(e),
+                    child: ListTile(
+                      leading: SizedBox(width: 40, height: 54, child: CoverImage(covers.bookCover(e.aid, e.img), aid: e.aid, thumbnail: true, decodeSize: const Size(40, 54))),
+                      title: Text(LibraryStore.shown(e.aid, e.title), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text('${e.chapter} · ${hhmm(e.time)}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(icon: const Icon(Icons.info_outline, size: 20), tooltip: hz(context, '详情'), onPressed: () => context.push(Routes.novel(e.aid))),
+                          IconButton(icon: const Icon(Icons.close, size: 18), tooltip: hz(context, '删除记录'), onPressed: () => _deleteOne(e)),
+                        ],
+                      ),
+                      onTap: () => context.push(Routes.reader(e.aid, e.cid)),
+                    ),
+                  ),
+                },
+              ),
+      ),
     );
   }
+}
+
+sealed class _HistoryRow {
+  const _HistoryRow();
+}
+
+final class _HistoryDayRow extends _HistoryRow {
+  const _HistoryDayRow(this.label);
+
+  final String label;
+}
+
+final class _HistoryEntryRow extends _HistoryRow {
+  const _HistoryEntryRow(this.entry);
+
+  final HistoryEntry entry;
 }
 
 /// 离线缓存：每本书一个进度条，点进去按章节管理；这里可以整本删除。
@@ -204,7 +228,7 @@ class CachePage extends ConsumerWidget {
                         final total = b.value.$2;
                         return ListTile(
                           // 和书架一样的封面（第一卷的高清封面）；以前导入时没记下封面地址的按书号拼
-                          leading: SizedBox(width: 44, height: 59, child: CoverImage(ref.read(volumeCoverQueueProvider).bookCover(b.key, b.value.$3.isNotEmpty ? b.value.$3 : Wenku8Parser.coverUrl(b.key)), aid: b.key)),
+                          leading: SizedBox(width: 44, height: 59, child: CoverImage(ref.read(volumeCoverQueueProvider).bookCover(b.key, b.value.$3.isNotEmpty ? b.value.$3 : Wenku8Parser.coverUrl(b.key)), aid: b.key, thumbnail: true, decodeSize: const Size(44, 59))),
                           title: Text(LibraryStore.shown(b.key, b.value.$1)),
                           subtitle: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,

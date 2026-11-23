@@ -298,7 +298,7 @@ class VolumeCoverQueue {
       _bgmFailed.add(aid);
     } finally {
       _tempFilling.remove(aid);
-      if (changed) Volumes.changes.value++;
+      if (changed) Volumes.notifyAid(aid);
     }
   }
 

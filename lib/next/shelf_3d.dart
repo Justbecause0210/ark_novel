@@ -3,11 +3,13 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart' show PointerScrollEvent, PointerScrollInertiaCancelEvent, PointerSignalEvent;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show HapticFeedback, KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'library.dart';
 import 'pages/cover_picker_page.dart' show kCoverAspect;
 import 'pages/volumes_page.dart' show volumeHeroShuttle;
 import 'text.dart';
+import 'volumes.dart' show volumeChangeForProvider;
 import 'widgets.dart';
 
 /// 立体书架的尺寸和每本书的摆法。
@@ -105,6 +107,23 @@ class _Shelf3DViewState extends State<Shelf3DView> {
   double _wheelAccum = 0;
   double _lastAbsDelta = 0;
   bool _wheelLocked = false;
+  double _lastCoverWidth = 0;
+  final _precached = <String>{};
+  int _lastPrecachedCur = -1;
+
+  void _precacheAround(int center) {
+    if (!mounted || widget.books.isEmpty || _lastCoverWidth <= 0) return;
+    _lastPrecachedCur = center;
+    final size = Size(_lastCoverWidth, _lastCoverWidth / kCoverAspect);
+    for (var d = 1; d <= 3; d++) {
+      for (final idx in [center + d, center - d]) {
+        if (idx < 0 || idx >= widget.books.length) continue;
+        final url = widget.coverOf(widget.books[idx]);
+        if (url.isEmpty || !_precached.add(url)) continue;
+        NetImage.precache(context, url, size).ignore();
+      }
+    }
+  }
 
   @override
   void initState() {
@@ -135,11 +154,19 @@ class _Shelf3DViewState extends State<Shelf3DView> {
     final aid = old.books[_cur.clamp(0, old.books.length - 1)].aid;
     final i = widget.books.indexWhere((b) => b.aid == aid);
     final target = i >= 0 ? i : math.min(_cur, widget.books.length - 1);
-    if (target == _cur) return;
+    if (target == _cur) {
+      if (!identical(old.books, widget.books)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _precacheAround(_cur);
+        });
+      }
+      return;
+    }
     _cur = target;
     widget.onFocusChanged?.call(widget.books[target].aid);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _pc?.hasClients == true) _pc!.jumpToPage(_cur);
+      if (mounted) _precacheAround(_cur);
     });
   }
 
@@ -245,6 +272,16 @@ class _Shelf3DViewState extends State<Shelf3DView> {
         final canScroll = stageH + infoH > height + 1;
         final pc = _controller((Shelf3DLayout.step(w) / c.maxWidth).clamp(0.15, 0.95));
         final cur = _cur.clamp(0, books.length - 1);
+        final widthChanged = (_lastCoverWidth - w).abs() > 8;
+        if (widthChanged) {
+          _lastCoverWidth = w;
+          _precached.clear();
+        }
+        if (widthChanged || _lastPrecachedCur != cur) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _precacheAround(cur);
+          });
+        }
         return Focus(
           autofocus: true,
           focusNode: _focus,
@@ -304,6 +341,7 @@ class _Shelf3DViewState extends State<Shelf3DView> {
               HapticFeedback.selectionClick(); // 每划过一本轻震一下
               setState(() => _cur = i);
               widget.onFocusChanged?.call(books[i].aid);
+              _precacheAround(i);
             },
             itemBuilder: (context, i) => Semantics(
               button: true,
@@ -333,12 +371,18 @@ class _Shelf3DViewState extends State<Shelf3DView> {
     final front = d.abs() < 0.5;
     final dark = Theme.of(context).brightness == Brightness.dark;
     final badge = widget.badgeOf(book);
-    Widget cover = _Cover(
-      url: widget.coverOf(book),
-      shade: pose.shade,
-      selected: widget.selected.contains(book.aid),
-      // 中间那本影子深一点，像被抽出来一点
-      shadow: (dark ? 0.5 : 0.26) * (0.55 + 0.45 * (1 - math.min(d.abs(), 1.0))),
+    Widget cover = Consumer(
+      builder: (context, ref, _) {
+        ref.watch(volumeChangeForProvider(book.aid));
+        return _Cover(
+          url: widget.coverOf(book),
+          decodeSize: Size(w, h),
+          shade: pose.shade,
+          selected: widget.selected.contains(book.aid),
+          // 中间那本影子深一点，像被抽出来一点
+          shadow: (dark ? 0.5 : 0.26) * (0.55 + 0.45 * (1 - math.min(d.abs(), 1.0))),
+        );
+      },
     );
     // 只有中间那本带 Hero：点开时这张封面飞到卷册页最前面那卷
     if (front) {
@@ -451,12 +495,13 @@ class _Shelf3DViewState extends State<Shelf3DView> {
 /// 一本书的封面：圆角、柔和的大阴影，离中间越远越暗；多选选中时描一圈主色。
 /// 阴影、静态封面与动态暗化遮罩分层并用 RepaintBoundary 隔离，避免滑动每帧重绘模糊阴影和离屏光栅化封面。
 class _Cover extends StatelessWidget {
-  const _Cover({required this.url, required this.shade, required this.selected, required this.shadow});
+  const _Cover({required this.url, required this.shade, required this.selected, required this.shadow, this.decodeSize});
 
   final String url;
   final double shade;
   final bool selected;
   final double shadow;
+  final Size? decodeSize;
 
   @override
   Widget build(BuildContext context) {
@@ -483,7 +528,7 @@ class _Cover extends StatelessWidget {
             ),
           ),
         ),
-        RepaintBoundary(child: CoverImage(url)),
+        RepaintBoundary(child: CoverImage(url, decodeSize: decodeSize)),
         if (shade > 0.005)
           DecoratedBox(
             decoration: BoxDecoration(

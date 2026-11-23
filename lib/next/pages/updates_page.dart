@@ -56,30 +56,15 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
       _seen = UpdateStore.lastSeen;
     }
 
-    final rows = <Widget>[];
+    final rows = <_UpdateRow>[const _UpdateStatusRow()];
     String? day;
     for (final e in feed) {
       final label = dayLabel(e.time);
       if (label != day) {
         day = label;
-        rows.add(Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(label, style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary))));
+        rows.add(_UpdateDayRow(label));
       }
-      rows.add(
-        ListTile(
-          leading: SizedBox(width: 40, height: 54, child: CoverImage(covers.bookCover(e.aid, e.img), aid: e.aid)),
-          title: Text(LibraryStore.shown(e.aid, e.title), maxLines: 1, overflow: TextOverflow.ellipsis),
-          subtitle: Text('${e.chapter} · ${hhmm(e.time)}', maxLines: 1, overflow: TextOverflow.ellipsis),
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (e.time.millisecondsSinceEpoch > _seen) ...[Icon(Icons.circle, size: 10, color: theme.colorScheme.primary), const SizedBox(width: 4)],
-              IconButton(icon: const Icon(Icons.info_outline, size: 20), tooltip: hz(context, '书籍详情'), onPressed: () => context.push(Routes.novel(e.aid))),
-            ],
-          ),
-          onTap: () => context.push(Routes.reader(e.aid, e.cid)),
-          onLongPress: () => context.push(Routes.novel(e.aid)),
-        ),
-      );
+      rows.add(_UpdateEntryRow(e));
     }
 
     final statusText = progress.error ??
@@ -120,9 +105,27 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
         ],
       );
     } else {
-      body = ListView(
+      body = ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
-        children: [statusBar, ...rows],
+        itemCount: rows.length,
+        itemBuilder: (context, i) => switch (rows[i]) {
+          _UpdateStatusRow() => statusBar,
+          _UpdateDayRow(:final label) => Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(label, style: theme.textTheme.titleSmall?.copyWith(color: theme.colorScheme.primary))),
+          _UpdateEntryRow(entry: final e) => ListTile(
+            leading: SizedBox(width: 40, height: 54, child: CoverImage(covers.bookCover(e.aid, e.img), aid: e.aid, thumbnail: true, decodeSize: const Size(40, 54))),
+            title: Text(LibraryStore.shown(e.aid, e.title), maxLines: 1, overflow: TextOverflow.ellipsis),
+            subtitle: Text('${e.chapter} · ${hhmm(e.time)}', maxLines: 1, overflow: TextOverflow.ellipsis),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (e.time.millisecondsSinceEpoch > _seen) ...[Icon(Icons.circle, size: 10, color: theme.colorScheme.primary), const SizedBox(width: 4)],
+                IconButton(icon: const Icon(Icons.info_outline, size: 20), tooltip: hz(context, '书籍详情'), onPressed: () => context.push(Routes.novel(e.aid))),
+              ],
+            ),
+            onTap: () => context.push(Routes.reader(e.aid, e.cid)),
+            onLongPress: () => context.push(Routes.novel(e.aid)),
+          ),
+        },
       );
     }
 
@@ -145,4 +148,24 @@ class _UpdatesPageState extends ConsumerState<UpdatesPage> {
       ),
     );
   }
+}
+
+sealed class _UpdateRow {
+  const _UpdateRow();
+}
+
+final class _UpdateStatusRow extends _UpdateRow {
+  const _UpdateStatusRow();
+}
+
+final class _UpdateDayRow extends _UpdateRow {
+  const _UpdateDayRow(this.label);
+
+  final String label;
+}
+
+final class _UpdateEntryRow extends _UpdateRow {
+  const _UpdateEntryRow(this.entry);
+
+  final UpdateEntry entry;
 }
