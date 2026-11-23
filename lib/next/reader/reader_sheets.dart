@@ -212,6 +212,7 @@ Future<void> showReaderCatalogueSheet(
   required void Function(String cid) onSelectChapter,
   required void Function(Bookmark b) onSelectBookmark,
   required void Function(ReplaceRule rule) onEditNote,
+  VoidCallback? onOpenCharacters,
   VoidCallback? onBookmarksChanged,
 }) {
   final sheetTheme = readerThemeData(Theme.of(context), palette, accent);
@@ -234,6 +235,7 @@ Future<void> showReaderCatalogueSheet(
           onSelectChapter: onSelectChapter,
           onSelectBookmark: onSelectBookmark,
           onEditNote: onEditNote,
+          onOpenCharacters: onOpenCharacters,
           onBookmarksChanged: onBookmarksChanged,
         ),
       ),
@@ -268,6 +270,7 @@ class _ReaderCatalogueSheet extends StatefulWidget {
     required this.onSelectChapter,
     required this.onSelectBookmark,
     required this.onEditNote,
+    this.onOpenCharacters,
     this.onBookmarksChanged,
   });
 
@@ -279,6 +282,7 @@ class _ReaderCatalogueSheet extends StatefulWidget {
   final void Function(String cid) onSelectChapter;
   final void Function(Bookmark b) onSelectBookmark;
   final void Function(ReplaceRule rule) onEditNote;
+  final VoidCallback? onOpenCharacters;
   final VoidCallback? onBookmarksChanged;
 
   @override
@@ -462,13 +466,25 @@ class _ReaderCatalogueSheetState extends State<_ReaderCatalogueSheet> with Singl
       default:
         final notes = RuleNotes.of(widget.aid);
         final rules = ReplaceRules.all().where((r) => r.kind == RuleKind.highlight && notes.containsKey(r.id) && (r.aid.isEmpty || r.aid == widget.aid)).toList();
+        final openChars = widget.onOpenCharacters;
         body = rules.isEmpty
             ? ListView(
                 key: const ValueKey('notes-empty'),
                 controller: widget.scrollController,
                 children: [
+                  if (openChars != null)
+                    ListTile(
+                      leading: Icon(Icons.people_outline, color: scheme.primary),
+                      title: const Text('人物 / 设定词典'),
+                      subtitle: Text('管理本书人物档案、自动高亮与防剧透笔记', style: TextStyle(color: scheme.onSurfaceVariant)),
+                      trailing: Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
+                      onTap: () {
+                        Navigator.pop(context);
+                        openChars();
+                      },
+                    ),
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(24, 100, 24, 24),
+                    padding: const EdgeInsets.fromLTRB(24, 80, 24, 24),
                     child: Text('还没有备注。\n选中文字点"高亮"，之后点一下高亮的字就能写备注。', textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
                   ),
                 ],
@@ -476,9 +492,20 @@ class _ReaderCatalogueSheetState extends State<_ReaderCatalogueSheet> with Singl
             : ListView.builder(
                 key: const ValueKey('notes'),
                 controller: widget.scrollController,
-                itemCount: rules.length,
+                itemCount: rules.length + (openChars != null ? 1 : 0),
                 itemBuilder: (context, i) {
-                  final r = rules[i];
+                  if (openChars != null && i == 0) {
+                    return ListTile(
+                      leading: Icon(Icons.people_outline, color: scheme.primary),
+                      title: const Text('人物 / 设定词典'),
+                      trailing: Icon(Icons.chevron_right, color: scheme.onSurfaceVariant),
+                      onTap: () {
+                        Navigator.pop(context);
+                        openChars();
+                      },
+                    );
+                  }
+                  final r = rules[openChars != null ? i - 1 : i];
                   return ListTile(
                     leading: CircleAvatar(radius: 8, backgroundColor: Color(r.color)),
                     title: Text(r.label),

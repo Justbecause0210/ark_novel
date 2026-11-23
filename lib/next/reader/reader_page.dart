@@ -18,8 +18,10 @@ import '../../models/cat_chapter.dart';
 import '../../models/cat_volume.dart';
 import '../../models/content.dart';
 import '../app_prefs.dart';
+import '../book_search.dart';
 import '../bookmarks.dart';
 import '../cache.dart';
+import '../characters.dart';
 import '../color_picker.dart';
 import '../data.dart';
 import '../env.dart';
@@ -31,6 +33,8 @@ import '../incognito.dart';
 import '../library.dart' show LibraryStore;
 import '../local_books.dart' show LocalBooks, isLocalAid;
 import '../net_state.dart';
+import '../pages/book_search_sheet.dart';
+import '../pages/characters_page.dart';
 import '../pages/novel_page.dart';
 import '../pages/rules_page.dart' show showRuleDialog;
 import '../progress.dart';
@@ -369,6 +373,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   late final ReaderAutoScrollController _autoScroll;
   ReaderPaceSnapshot _pace = const ReaderPaceSnapshot();
   int _settingsTab = 0;
+  ({String cid, int start, int end})? _searchFlash;
+  Timer? _searchFlashTimer;
 
   // ---- 网络预取与取消 ----
   final _preloadCancel = CancelToken();
@@ -599,6 +605,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     _syncVolumeKeys(false);
     _vol.setMethodCallHandler(null);
     _clock?.cancel();
+    _searchFlashTimer?.cancel();
     _status.dispose();
     _pos.dispose();
     _slide.dispose();
@@ -1203,11 +1210,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                               _initial = null;
                             }
                             _recordChapter(_cid, title);
-                            InlineSpan spanOfHighlight(int from, int to, (int, int)? hl) =>
-                                buildSpan(c, from, to, style, noted, _tts.text == c.text ? hl : null, accent);
+                            InlineSpan spanOfHighlight(int from, int to, (int, int)? hl) {
+                              final activeHl = _tts.text == c.text
+                                  ? hl
+                                  : (_searchFlash != null && _searchFlash!.cid == _cid ? (_searchFlash!.start, _searchFlash!.end) : null);
+                              return buildSpan(c, from, to, style, noted, activeHl, accent);
+                            }
                             InlineSpan spanOf(int from, int to) => spanOfHighlight(from, to, _tts.highlight.value);
                             final key = ValueKey((_cid, _epoch, prefs.mode));
-                            void onMark(Mark m) => _editNote(m.rule);
+                            void onMark(Mark m) => _onMarkTap(m, palette, accent);
                             final fallbackCover = novel?.detail.imgUrl ?? '';
                             // 相邻章节：有缓存、或者预加载已经取了才接上，不为这个多联网（预加载关了、不在 Wi-Fi 时就还是原来的换章动画）
                             ChapterPeek? peek(CatChapter? ch) {
@@ -1505,7 +1516,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                       ),
                                       if (incognito)
                                         Padding(
-                                          padding: const EdgeInsets.only(right: 8),
+                                          padding: const EdgeInsets.only(right: 4),
                                           child: Container(
                                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                             decoration: BoxDecoration(color: palette.fg.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(999)),
@@ -1519,7 +1530,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                             ),
                                           ),
                                         ),
-                                      const SizedBox(width: 8),
+                                      IconButton(
+                                        tooltip: hz(context, '书内搜索'),
+                                        visualDensity: VisualDensity.compact,
+                                        icon: Icon(Icons.search, size: 22, color: palette.fg),
+                                        onPressed: () => _openSearchSheet(novel?.catalogue ?? const [], palette, accent),
+                                      ),
+                                      IconButton(
+                                        tooltip: hz(context, '人物词典'),
+                                        visualDensity: VisualDensity.compact,
+                                        icon: Icon(Icons.people_outline, size: 22, color: palette.fg),
+                                        onPressed: _openCharactersPage,
+                                      ),
+                                      const SizedBox(width: 4),
                                     ],
                                   ),
                                 ),
@@ -1864,10 +1887,98 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       },
       onSelectBookmark: (b) => _go(b.cid, offset: b.offset),
       onEditNote: _editNote,
+      onOpenCharacters: _openCharactersPage,
       onBookmarksChanged: () {
         if (mounted) setState(() {});
       },
     );
+  }
+
+  /// 点击正文高亮词：若绑定了人物词典词条优先弹出「角色浮窗底栏」，否则走原备注编辑逻辑。
+  void _onMarkTap(Mark m, ReaderPalette palette, Color accent) {
+    final char = BookCharacters.byRuleId(widget.aid, m.rule.id);
+    if (char == null) {
+      _editNote(m.rule);
+      return;
+    }
+    final catalogue = ref.read(novelProvider(widget.aid)).value?.catalogue ?? const <CatVolume>[];
+    showCharacterReaderSheet(
+      context,
+      aid: widget.aid,
+      character: char,
+      currentCid: _cid,
+      palette: palette,
+      accent: accent,
+      onSearchAppearances: (terms) {
+        if (terms.isEmpty) return;
+        _openSearchSheet(
+          catalogue,
+          palette,
+          accent,
+          initialQuery: terms.length > 1 ? terms.map(RegExp.escape).join('|') : terms.first,
+          initialRegex: terms.length > 1,
+          initialScope: BookSearchScope.allCached,
+        );
+      },
+      onOpenDictionary: _openCharactersPage,
+      onChanged: () {
+        if (mounted) {
+          ref.invalidate(chapterProvider);
+          setState(() {});
+        }
+      },
+    );
+  }
+
+  void _openSearchSheet(
+    List<CatVolume> catalogue,
+    ReaderPalette palette,
+    Color accent, {
+    String? initialQuery,
+    bool initialRegex = false,
+    BookSearchScope? initialScope,
+  }) {
+    final currentText = ref.read(chapterProvider((widget.aid, _cid))).value?.text;
+    showBookSearchSheet(
+      context,
+      aid: widget.aid,
+      catalogue: catalogue,
+      currentCid: _cid,
+      currentChapterText: currentText,
+      initialQuery: initialQuery,
+      initialRegex: initialRegex,
+      initialScope: initialScope,
+      palette: palette,
+      accent: accent,
+      onSelectHit: _jumpToSearchHit,
+    );
+  }
+
+  void _jumpToSearchHit(BookSearchHit hit) {
+    _searchFlashTimer?.cancel();
+    _searchFlash = (cid: hit.cid, start: hit.offset, end: hit.offset + hit.matchLength);
+    _searchFlashTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted) setState(() => _searchFlash = null);
+    });
+    if (hit.cid == _cid && hit.offset == _offset) {
+      setState(() => _bar = false);
+      _setUi();
+      return;
+    }
+    _markBack();
+    _go(hit.cid, offset: hit.offset);
+  }
+
+  Future<void> _openCharactersPage() async {
+    _flushStats();
+    if (!_tts.isSpeaking) _watch.stop();
+    _syncVolumeKeys(false);
+    await context.push(Routes.characters(widget.aid));
+    if (!mounted) return;
+    ref.invalidate(chapterProvider);
+    if (!_background) _watch.start();
+    _syncVolumeKeys(ref.read(readerPrefsProvider).volumeKeys);
+    setState(() {});
   }
 
   void _openTtsSheet(ReaderPalette palette, Color accent) {

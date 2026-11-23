@@ -145,35 +145,41 @@ class _PaperTexturePainter extends CustomPainter {
     }
   }
 
-  /// 宣纸细纹：极淡云雾纸浆底 + 柔和纤细长纤维，完全不干扰正文阅读。
+  /// 宣纸细纹：大半径径向柔光云纹（边缘完全透明，无任何硬边色块）+ 纤细自然的纸浆纤维。
   void _paintRicePaper(Canvas canvas, Size size) {
     final rng = math.Random(1024);
-    final cloudPaint = Paint()..style = PaintingStyle.fill;
-    for (var i = 0; i < 24; i++) {
+    final minSide = math.min(size.width, size.height);
+    for (var i = 0; i < 10; i++) {
       final cx = rng.nextDouble() * size.width;
       final cy = rng.nextDouble() * size.height;
-      final rx = 60 + rng.nextDouble() * 140;
-      final ry = 40 + rng.nextDouble() * 100;
+      final radius = minSide * (0.28 + rng.nextDouble() * 0.36);
       final bright = i.isEven;
-      cloudPaint.color = (bright ? Colors.white : fgColor).withValues(alpha: bright ? (isDark ? 0.015 : 0.08) : (isDark ? 0.025 : 0.018));
-      canvas.drawOval(Rect.fromCenter(center: Offset(cx, cy), width: rx, height: ry), cloudPaint);
+      final color = bright ? Colors.white : fgColor;
+      final peak = bright ? (isDark ? 0.018 : 0.06) : (isDark ? 0.025 : 0.016);
+      final rect = Rect.fromCircle(center: Offset(cx, cy), radius: radius);
+      final wash = Paint()
+        ..shader = RadialGradient(
+          colors: [color.withValues(alpha: peak), color.withValues(alpha: peak * 0.35), Colors.transparent],
+          stops: const [0.0, 0.5, 1.0],
+        ).createShader(rect);
+      canvas.drawRect(rect, wash);
     }
 
     final fiberPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
-    final count = ((size.width * size.height) / 3200).round().clamp(90, 260);
+    final count = ((size.width * size.height) / 3600).round().clamp(80, 240);
     for (var i = 0; i < count; i++) {
       final x = rng.nextDouble() * size.width;
       final y = rng.nextDouble() * size.height;
-      final len = 10 + rng.nextDouble() * 34;
+      final len = 8 + rng.nextDouble() * 26;
       final angle = (rng.nextDouble() - 0.5) * 0.65 + (i % 5 == 0 ? math.pi / 2 : 0);
       final dx = math.cos(angle) * len;
       final dy = math.sin(angle) * len;
       fiberPaint
-        ..strokeWidth = 0.5 + rng.nextDouble() * 0.7
-        ..color = (i % 3 == 0 ? Colors.white : fgColor).withValues(alpha: i % 3 == 0 ? (isDark ? 0.03 : 0.09) : (isDark ? 0.045 : 0.032));
-      final ctrl = Offset(x + dx * 0.5 + (rng.nextDouble() - 0.5) * 4, y + dy * 0.5 + (rng.nextDouble() - 0.5) * 4);
+        ..strokeWidth = 0.45 + rng.nextDouble() * 0.55
+        ..color = (i % 3 == 0 ? Colors.white : fgColor).withValues(alpha: i % 3 == 0 ? (isDark ? 0.028 : 0.075) : (isDark ? 0.04 : 0.026));
+      final ctrl = Offset(x + dx * 0.5 + (rng.nextDouble() - 0.5) * 3.5, y + dy * 0.5 + (rng.nextDouble() - 0.5) * 3.5);
       final path = Path()
         ..moveTo(x, y)
         ..quadraticBezierTo(ctrl.dx, ctrl.dy, x + dx, y + dy);
@@ -223,12 +229,14 @@ class _PaperTexturePainter extends CustomPainter {
       canvas.drawLine(Offset(x, 0), Offset(x, size.height), vPaint);
     }
 
-    // 淡雅竖向装订线（偏左一格），柔和克制不抢视线
-    final marginX = math.min(24.0, size.width * 0.06);
-    final marginPaint = Paint()
-      ..color = (isDark ? const Color(0xFFD98A7C) : const Color(0xFFC25E4E)).withValues(alpha: isDark ? 0.12 : 0.10)
-      ..strokeWidth = 0.9;
-    canvas.drawLine(Offset(marginX, 0), Offset(marginX, size.height), marginPaint);
+    // 淡雅竖向装订线：单页竖屏偏左一格，双页宽屏不额外加左红线以免左右页不对称
+    if (size.width < 720) {
+      final marginX = math.min(24.0, size.width * 0.06);
+      final marginPaint = Paint()
+        ..color = (isDark ? const Color(0xFFD98A7C) : const Color(0xFFC25E4E)).withValues(alpha: isDark ? 0.10 : 0.08)
+        ..strokeWidth = 0.85;
+      canvas.drawLine(Offset(marginX, 0), Offset(marginX, size.height), marginPaint);
+    }
   }
 
   @override

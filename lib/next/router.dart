@@ -6,6 +6,7 @@ import 'pages/bookmarks_page.dart';
 import 'pages/bookshelf_page.dart';
 import 'pages/categories_page.dart';
 import 'pages/cache_book_page.dart';
+import 'pages/characters_page.dart';
 import 'pages/comments_page.dart';
 import 'pages/discover_page.dart';
 import 'pages/home_shell.dart';
@@ -94,6 +95,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         ),
       ),
       GoRoute(path: '/novel/:aid', builder: (_, state) => NovelPageView(aid: state.pathParameters['aid']!)),
+      GoRoute(path: '/novel/:aid/characters', builder: (_, state) => CharactersPage(aid: state.pathParameters['aid']!)),
       GoRoute(path: '/novel/:aid/comments', builder: (_, state) => CommentsPage(aid: state.pathParameters['aid']!)),
       GoRoute(path: '/novel/:aid/comments/:rid', builder: (_, state) => RepliesPage(aid: state.pathParameters['aid']!, rid: state.pathParameters['rid']!)),
       GoRoute(

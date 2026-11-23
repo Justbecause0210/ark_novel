@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../data/wenku8/wenku8_parser.dart';
 import '../cache.dart';
+import '../local_books.dart';
 import '../read_state.dart';
 import '../routes.dart';
 import '../stats.dart';
@@ -145,15 +146,14 @@ class YearlySummary {
     final doneVolumes = <(String, int, String, int)>[
       for (final e in Volumes.allDone()) (e.$1, e.$2, e.$3.title, e.$4),
     ];
-    int? cpm;
-    if (Hive.isBoxOpen('chapter_index')) {
-      cpm = charsPerMinute([
-        for (final aid in chapterBooks)
-          for (final e in chapterSecondsByBook[aid]!.entries)
-            if (ReadState.isRead(aid, e.key))
-              if (ChapterCache.length(aid, e.key) case final n?) (n, e.value.values.fold(0, (a, b) => a + b)),
-      ]);
-    }
+    final hasCache = Hive.isBoxOpen('chapter_index');
+    final cpm = charsPerMinute([
+      for (final aid in chapterBooks)
+        for (final e in chapterSecondsByBook[aid]!.entries)
+          if (ReadState.isRead(aid, e.key))
+            if ((isLocalAid(aid) ? LocalBooks.chapterLength(aid, e.key) : (hasCache ? ChapterCache.length(aid, e.key) : null)) case final n?)
+              (n, e.value.values.fold(0, (a, b) => a + b)),
+    ]);
     return buildYearlySummary(
       year: year,
       perDay: perDay,
@@ -784,7 +784,7 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
                                   ),
                                 ),
                               ),
-                              SizedBox(width: 36, height: 50, child: CoverImage(coverOf(book.aid, book.img))),
+                              SizedBox(width: 36, height: 50, child: CoverImage(coverOf(book.aid, book.img), thumbnail: true, decodeSize: const Size(36, 50))),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(
@@ -878,7 +878,7 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
                           padding: const EdgeInsets.symmetric(vertical: 5),
                           child: Row(
                             children: [
-                              SizedBox(width: 32, height: 44, child: CoverImage(coverOf(item.aid, item.img))),
+                              SizedBox(width: 32, height: 44, child: CoverImage(coverOf(item.aid, item.img), thumbnail: true, decodeSize: const Size(32, 44))),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(

@@ -30,6 +30,7 @@ class Routes {
   static String novel(String aid) => '/novel/$aid';
   static String volumes(String aid) => '/volumes/$aid';
   static String comments(String aid) => '/novel/$aid/comments';
+  static String characters(String aid) => '/novel/$aid/characters';
   static String replies(String aid, String rid) => '/novel/$aid/comments/$rid';
   static String reader(String aid, String cid, {int? offset}) => offset == null ? '/reader/$aid/$cid' : '/reader/$aid/$cid?offset=$offset';
 }

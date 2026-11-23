@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'app_prefs.dart';
+import 'characters.dart';
 import 'files.dart';
 import 'library.dart';
 import 'progress.dart';
@@ -104,6 +105,7 @@ class SyncMerge {
       'vrateTs': byAid('vrateTs:'),
       'rules': _box.get('rules') ?? const [],
       'notes': byAid('notes:'),
+      'chars': byAid('chars:'),
       'tomb': tombs(),
       'books': _box.get('lib:books') ?? const {},
       'cats': _box.get('lib:cats') ?? const [],
@@ -323,6 +325,35 @@ class SyncMerge {
         local.putIfAbsent('${n.key}', () => '${n.value}');
       }
       puts['notes:${e.key}'] = local;
+    }
+
+    // 人物/设定词典：按书籍与 id 合并，取修改时间 ts 较新的；删除用 `ch:$aid:$id` 墓碑同步
+    var charsChanged = false;
+    final remoteChars = remote['chars'] is Map ? remote['chars'] as Map : const {};
+    final charAids = <String>{
+      for (final k in remoteChars.keys) '$k',
+      for (final tk in tomb.keys)
+        if (tk.startsWith('ch:') && tk.split(':').length >= 3) tk.split(':')[1],
+    };
+    for (final aid in charAids) {
+      final localRaw = _box.get('chars:$aid');
+      if (localRaw == null && !remoteChars.containsKey(aid)) continue;
+      final merged = _maps(localRaw).where((c) => c['id'] is String && (c['id'] as String).isNotEmpty && !dead('ch:$aid:${c['id']}', ts(c))).toList();
+      final rList = remoteChars[aid];
+      if (rList is List) {
+        for (final r in _maps(rList)) {
+          final id = r['id'];
+          if (id is! String || id.isEmpty || dead('ch:$aid:$id', ts(r))) continue;
+          final i = merged.indexWhere((l) => l['id'] == id);
+          if (i < 0) {
+            merged.add(r);
+          } else if (ts(r) > ts(merged[i])) {
+            merged[i] = r;
+          }
+        }
+      }
+      puts['chars:$aid'] = merged;
+      charsChanged = true;
     }
 
     // 书架分类（例如"在追"）与书架书籍（含重命名 name、所属分类 cats）
@@ -581,6 +612,7 @@ class SyncMerge {
       await Volumes.refreshDone('$aid');
     }
     if (coverChanged) Volumes.changes.value++;
+    if (charsChanged) BookCharacters.changes.value++;
     ReadingStats.changes.value++;
     LibraryStore.noteRemovedElsewhere(readAfter);
     return true;

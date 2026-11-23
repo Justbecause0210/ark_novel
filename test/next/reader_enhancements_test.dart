@@ -1,5 +1,6 @@
 import 'package:ark_novel/next/reader/auto_scroll.dart';
 import 'package:ark_novel/next/reader/reader_bg.dart';
+import 'package:ark_novel/next/reader/reader_body.dart' show readableHighlightColor;
 import 'package:ark_novel/next/reader/reader_chrome.dart';
 import 'package:ark_novel/next/reader/reader_sheets.dart' show ReaderPalette;
 import 'package:flutter/material.dart';
@@ -292,6 +293,16 @@ void main() {
       expect(find.text('狼与香辛料'), findsOneWidget);
       expect(find.text('本卷约剩 25 分钟'), findsOneWidget);
       expect(find.text('第一章'), findsNothing);
+    });
+
+    test('readableHighlightColor：浅色纸面压暗浅黄/黄绿，深色背景提亮深色字', () {
+      const paleLime = Color(0xFFC0CA33);
+      final onLight = readableHighlightColor(paleLime, darkSurface: false);
+      expect(HSLColor.fromColor(onLight).lightness, lessThanOrEqualTo(0.35));
+
+      const deepIndigo = Color(0xFF283593);
+      final onDark = readableHighlightColor(deepIndigo, darkSurface: true);
+      expect(HSLColor.fromColor(onDark).lightness, greaterThanOrEqualTo(0.67));
     });
   });
 }

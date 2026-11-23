@@ -117,6 +117,25 @@ class ReaderNav {
   void Function(double)? toFraction;
 }
 
+/// 按浅色/深色背景自动校正高亮字色，避免浅黄、浅黄绿在浅色纸面发虚，或深紫、深蓝在暗色背景看不清。
+Color readableHighlightColor(Color raw, {required bool darkSurface}) {
+  final hsl = HSLColor.fromColor(raw);
+  if (!darkSurface) {
+    // 黄色～绿青色段（40°~175°）视觉明度更高，需要更深一点才锐利清晰
+    final hue = hsl.hue;
+    final maxLight = (hue >= 38 && hue <= 175) ? 0.34 : 0.42;
+    if (hsl.lightness > maxLight) {
+      return hsl.withLightness(maxLight).withSaturation(math.min(1.0, hsl.saturation * 1.05)).toColor();
+    }
+    return raw;
+  }
+  const minLight = 0.68;
+  if (hsl.lightness < minLight) {
+    return hsl.withLightness(minLight).withSaturation(math.min(0.85, hsl.saturation)).toColor();
+  }
+  return raw;
+}
+
 /// 取出 [from, to) 这一段正文，高亮的地方染色（有备注的加虚线下划线），[hl] 是朗读正在读的那一句。颜色、底色和下划线不改变字形宽度，不影响分页。
 InlineSpan buildSpan(Chapter c, int from, int to, TextStyle base, Set<String> noted, [(int, int)? hl, Color? hlColor]) {
   final cuts = <int>{from, to};
@@ -131,6 +150,7 @@ InlineSpan buildSpan(Chapter c, int from, int to, TextStyle base, Set<String> no
     }
   }
   final pts = cuts.toList()..sort();
+  final darkSurface = (base.color?.computeLuminance() ?? 0) > 0.45;
   final children = <InlineSpan>[];
   var j = 0;
   for (var i = 0; i + 1 < pts.length; i++) {
@@ -142,10 +162,17 @@ InlineSpan buildSpan(Chapter c, int from, int to, TextStyle base, Set<String> no
     final reading = hl != null && a >= hl.$1 && b <= hl.$2;
     TextStyle? style;
     if (m != null) {
-      final color = Color(m.rule.color);
+      final rawColor = Color(m.rule.color);
+      final fg = readableHighlightColor(rawColor, darkSurface: darkSurface);
       style = m.rule.kind == RuleKind.color
-          ? TextStyle(color: color)
-          : TextStyle(color: color, backgroundColor: color.withValues(alpha: 0.13), decoration: noted.contains(m.rule.id) ? TextDecoration.underline : null, decorationStyle: TextDecorationStyle.dotted, decorationColor: color);
+          ? TextStyle(color: fg)
+          : TextStyle(
+              color: fg,
+              backgroundColor: rawColor.withValues(alpha: darkSurface ? 0.18 : 0.11),
+              decoration: noted.contains(m.rule.id) ? TextDecoration.underline : null,
+              decorationStyle: TextDecorationStyle.dotted,
+              decorationColor: fg,
+            );
     }
     if (reading) style = (style ?? const TextStyle()).copyWith(backgroundColor: (hlColor ?? Colors.amber).withValues(alpha: 0.35));
     children.add(TextSpan(text: c.text.substring(a, b), style: style));

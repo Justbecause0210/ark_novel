@@ -285,6 +285,7 @@ class NetImage extends ConsumerWidget {
     this.url, {
     super.key,
     this.fit = BoxFit.cover,
+    this.alignment = Alignment.center,
     this.loading,
     this.error,
     this.errorBuilder,
@@ -297,6 +298,7 @@ class NetImage extends ConsumerWidget {
 
   final String url;
   final BoxFit fit;
+  final AlignmentGeometry alignment;
   final Widget? loading;
   final Widget? error;
   final Widget Function(VoidCallback retry)? errorBuilder;
@@ -325,13 +327,13 @@ class NetImage extends ConsumerWidget {
     Widget fallback() => errorBuilder?.call(retry) ?? error ?? const SizedBox.shrink();
     if (url.isEmpty) return fallback();
     final crop = splitCrop(url).crop;
-    if (isWebPreview) return _cropped(Image.network(displayImageUrl(splitCrop(url).url), fit: fit, errorBuilder: (_, _, _) => fallback()), crop);
+    if (isWebPreview) return _cropped(Image.network(displayImageUrl(splitCrop(url).url), fit: fit, alignment: alignment, errorBuilder: (_, _, _) => fallback()), crop);
     final store = ref.read(imageStoreProvider);
     if (_shouldWatchSr(url)) ref.watch(_urlSrVersionProvider(url));
     Widget image(Uint8List b, {bool fade = false, bool baked = false}) {
       CoverImage.clearFailed(url);
       final effectiveCrop = baked ? null : crop;
-      Widget buildImg(ImageProvider p) => _cropped(Image(image: p, fit: fit, gaplessPlayback: true, frameBuilder: fade ? _fadeIn : null, errorBuilder: (_, _, _) => fallback()), effectiveCrop);
+      Widget buildImg(ImageProvider p) => _cropped(Image(image: p, fit: fit, alignment: alignment, gaplessPlayback: true, frameBuilder: fade ? _fadeIn : null, errorBuilder: (_, _, _) => fallback()), effectiveCrop);
       if (full) return buildImg(MemoryImage(b));
       final dpr = MediaQuery.devicePixelRatioOf(context);
       final cacheKeyUrl = thumbnail ? '$url#thumb' : url;

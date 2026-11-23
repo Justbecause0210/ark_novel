@@ -23,6 +23,7 @@ import '../local_books.dart';
 import '../stats.dart';
 import '../volume_covers.dart';
 import '../volumes.dart' show Vol, Volumes, volumeChangeForProvider;
+import 'book_search_sheet.dart';
 import 'categories_page.dart';
 import 'cover_picker_page.dart';
 import '../progress.dart';
@@ -32,6 +33,7 @@ import '../swipe.dart';
 import '../session.dart';
 import '../updates.dart';
 import '../widgets.dart';
+import '../widgets_bgm.dart';
 import '../text.dart';
 
 /// 详情与目录本地缓存的短保鲜时间（45s）：刚刷新或书架预取后直接复用，避免短时间内重复拉取 2 次网络请求。
@@ -413,6 +415,7 @@ class _BodyState extends ConsumerState<_Body> {
             children: [
               if (data.catalogue.isNotEmpty)
                 actionBtn(onPressed: () => _open(Routes.volumes(aid)), icon: const Icon(Icons.view_carousel_outlined, size: 18), label: '分卷'),
+              actionBtn(onPressed: () => _open(Routes.characters(aid)), icon: const Icon(Icons.people_outline, size: 18), label: '人物'),
               actionBtn(
                 onPressed: () => showExportBookDialog(context, ref, aid: aid, novel: data),
                 icon: const Icon(Icons.ios_share_outlined, size: 18),
@@ -431,6 +434,7 @@ class _BodyState extends ConsumerState<_Body> {
               actionBtn(onPressed: () => _open(Routes.comments(aid)), icon: const Icon(Icons.forum_outlined, size: 18), label: '书评'),
               if (data.catalogue.isNotEmpty)
                 actionBtn(onPressed: () => _open(Routes.volumes(aid)), icon: const Icon(Icons.view_carousel_outlined, size: 18), label: '分卷'),
+              actionBtn(onPressed: () => _open(Routes.characters(aid)), icon: const Icon(Icons.people_outline, size: 18), label: '人物'),
               actionBtn(
                 onPressed: () => launchUrl(Uri.parse('${siteBase(ref.read(nodeProvider))}/book/$aid.htm'), mode: LaunchMode.externalApplication),
                 icon: const Icon(Icons.open_in_browser, size: 18),
@@ -515,6 +519,7 @@ class _BodyState extends ConsumerState<_Body> {
             );
           },
         ),
+        BangumiInfoCard(aid: aid, title: d.title),
         const SizedBox(height: 20),
         Row(
           children: [
@@ -728,6 +733,22 @@ class _BodyState extends ConsumerState<_Body> {
                 child: Text(shownTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
               ),
               actions: [
+                if (data.catalogue.isNotEmpty)
+                  IconButton(
+                    tooltip: hz(context, '书内搜索'),
+                    icon: const Icon(Icons.search),
+                    onPressed: () => showBookSearchSheet(
+                      context,
+                      aid: aid,
+                      catalogue: data.catalogue,
+                      onSelectHit: (hit) => _open(Routes.reader(aid, hit.cid, offset: hit.offset)),
+                    ),
+                  ),
+                IconButton(
+                  tooltip: hz(context, '人物词典'),
+                  icon: const Icon(Icons.people_outline),
+                  onPressed: () => _open(Routes.characters(aid)),
+                ),
                 PopupMenuButton<String>(
                   tooltip: hz(context, '更多'),
                   onSelected: (v) {
