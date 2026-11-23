@@ -41,12 +41,13 @@ jobs:
             echo "::error::Secret ANDROID_DEBUG_KEYSTORE_BASE64 为空！"
             exit 1
           fi
-          # 1. 同时还原到默认 debug 路径和项目 android/app/ 目录下
+          # 同时还原到默认路径、android/ 和 android/app/ 目录下，确保任何相对路径都能找到
           mkdir -p ~/.android
           echo "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" | base64 -d > ~/.android/debug.keystore
+          cp ~/.android/debug.keystore android/release.keystore
           cp ~/.android/debug.keystore android/app/release.keystore
 
-          # 2. 生成标准 key.properties（供支持 key.properties 的项目自动读取）
+          # 生成标准 key.properties
           cat << 'EOF' > android/key.properties
           storePassword=android
           keyPassword=android
@@ -54,13 +55,8 @@ jobs:
           storeFile=release.keystore
           EOF
 
-          # 3. 强制确保 android/app/build.gradle(.kts) 的 release 构建使用固定签名
-          if [ -f "android/app/build.gradle.kts" ]; then
-            sed -i 's/signingConfig = signingConfigs.getByName("debug")/signingConfig = signingConfigs.getByName("debug")/g' android/app/build.gradle.kts
-          fi
-
           echo "=== Keystore SHA-256 指纹 ==="
-          keytool -list -keystore android/app/release.keystore -storepass android | grep "SHA-256"
+          keytool -list -keystore android/release.keystore -storepass android | grep "SHA-256"
 
       - name: Build Split APKs (with 504 retry)
         run: |
