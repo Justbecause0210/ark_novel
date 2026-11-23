@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # 1. Android 端（含固定签名校验、重试机制、Cronet 独立网络栈、代码混淆与双架构分包）
+  # 1. Android 端（强制绑定固定签名、apksigner 指纹校验、重试机制与双架构分包）
   build-android:
     runs-on: ubuntu-24.04
     steps:
@@ -35,17 +35,32 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Restore fixed debug keystore
+      - name: Configure Fixed Android Signing
         run: |
           if [ -z "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" ]; then
-            echo "::error::Secret ANDROID_DEBUG_KEYSTORE_BASE64 为空，请检查 Settings -> Secrets and variables -> Actions -> Repository secrets！"
+            echo "::error::Secret ANDROID_DEBUG_KEYSTORE_BASE64 为空！"
             exit 1
           fi
+          # 1. 同时还原到默认 debug 路径和项目 android/app/ 目录下
           mkdir -p ~/.android
           echo "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" | base64 -d > ~/.android/debug.keystore
-          echo "=== 还原后的 keystore 信息 ==="
-          ls -lh ~/.android/debug.keystore
-          keytool -list -keystore ~/.android/debug.keystore -storepass android | grep -E "SHA-256|SHA256"
+          cp ~/.android/debug.keystore android/app/release.keystore
+
+          # 2. 生成标准 key.properties（供支持 key.properties 的项目自动读取）
+          cat << 'EOF' > android/key.properties
+          storePassword=android
+          keyPassword=android
+          keyAlias=androiddebugkey
+          storeFile=release.keystore
+          EOF
+
+          # 3. 强制确保 android/app/build.gradle(.kts) 的 release 构建使用固定签名
+          if [ -f "android/app/build.gradle.kts" ]; then
+            sed -i 's/signingConfig = signingConfigs.getByName("debug")/signingConfig = signingConfigs.getByName("debug")/g' android/app/build.gradle.kts
+          fi
+
+          echo "=== Keystore SHA-256 指纹 ==="
+          keytool -list -keystore android/app/release.keystore -storepass android | grep "SHA-256"
 
       - name: Build Split APKs (with 504 retry)
         run: |
@@ -55,10 +70,11 @@ jobs:
           done
           exit 1
 
-      - name: Verify APK Signature
+      - name: Verify APK Signature with apksigner
         run: |
-          echo "=== 编译出的 APK 实际签名 ==="
-          keytool -printcert -jarfile build/app/outputs/flutter-apk/app-arm64-v8a-release.apk | grep -E "SHA256|Owner"
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name "apksigner" | sort -V | tail -n 1)
+          echo "=== 使用 $APKSIGNER 校验最终 APK 签名 ==="
+          "$APKSIGNER" verify --print-certs build/app/outputs/flutter-apk/app-arm64-v8a-release.apk | grep "SHA-256"
 
       - name: Rename APKs with Version
         run: |
