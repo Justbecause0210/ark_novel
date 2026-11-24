@@ -197,14 +197,15 @@ String _progress(String aid, Vol v) {
   return ['已读 ${v.textCids.where(read.contains).length} / ${v.textCids.length} 章', if (d != null) '${d.year}.${d.month}.${d.day} 读完'].join(' · ');
 }
 
-/// 没展开时封面下面的一行：卷名和进度
+/// 没展开时封面下面的一行：卷名和进度，切卷时按方向在遮罩内滚入。
 class _Summary extends StatelessWidget {
-  const _Summary({required this.aid, required this.vol, required this.index, required this.count});
+  const _Summary({required this.aid, required this.vol, required this.index, required this.count, this.direction = 1});
 
   final String aid;
   final Vol vol;
   final int index;
   final int count;
+  final int direction;
 
   @override
   Widget build(BuildContext context) {
@@ -216,9 +217,11 @@ class _Summary extends StatelessWidget {
           // 固定两行的高度（随系统字号伸缩）：卷名一行还是两行，下面的字都不动
           SizedBox(
             height: 50 * textScale,
-            child: Center(
+            child: MaskedRollSwitcher(
+              direction: direction,
               child: Text(
                 vol.title,
+                key: ValueKey(index),
                 textAlign: TextAlign.center,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
@@ -227,10 +230,20 @@ class _Summary extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 6),
-          Text(
-            '第 ${index + 1} / $count 卷 · ${_progress(aid, vol)}',
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white70, fontSize: 13),
+          SizedBox(
+            height: 19 * textScale,
+            child: MaskedRollSwitcher(
+              direction: direction,
+              delay: const Duration(milliseconds: 45),
+              child: Text(
+                '第 ${index + 1} / $count 卷 · ${_progress(aid, vol)}',
+                key: ValueKey(index),
+                textAlign: TextAlign.center,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ),
           ),
         ],
       ),
