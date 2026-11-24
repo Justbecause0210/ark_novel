@@ -4,6 +4,9 @@ name: Check
 on:
   pull_request:
     branches: [main]
+  schedule:
+    # 每周一 UTC 03:00 自动执行三端全量编译守卫，防止仅改 lib/ 时遗漏桌面端编译回归
+    - cron: '0 3 * * 1'
   workflow_dispatch:
 
 # 只读代码，不需要写权限
@@ -50,6 +53,11 @@ jobs:
               grep -qE '^(lib|assets|android)/' <<<"$files" && platforms+=android,
               grep -q '^macos/' <<<"$files" && platforms+=macos,
               grep -q '^windows/' <<<"$files" && platforms+=windows,
+              # 改动涉及平台适配、网络适配器、安全存储、字体、TTS 或导出文件流时，同步触发桌面端编译守卫
+              if grep -qE '^lib/next/(net_|session\.dart|web_fetch\.dart|security\.dart|fonts\.dart|export_book\.dart|reader/reader_tts\.dart)' <<<"$files"; then
+                [[ "$platforms" == *macos* ]] || platforms+=macos,
+                [[ "$platforms" == *windows* ]] || platforms+=windows,
+              fi
             fi
           fi
           echo "platforms=$platforms" | tee -a "$GITHUB_OUTPUT"
