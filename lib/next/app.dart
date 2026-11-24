@@ -71,7 +71,7 @@ class _NextAppState extends ConsumerState<NextApp> with WidgetsBindingObserver {
           w = CallbackShortcuts(
             bindings: <ShortcutActivator, VoidCallback>{
               SingleActivator(LogicalKeyboardKey.keyK, meta: isMac, control: !isMac): () => router.push(Routes.search),
-              SingleActivator(LogicalKeyboardKey.comma, meta: isMac, control: !isMac): () => router.push(Routes.settings),
+              SingleActivator(LogicalKeyboardKey.comma, meta: isMac, control: !isMac): () => router.go(Routes.settings),
             },
             child: w,
           );
@@ -100,7 +100,7 @@ class _NextAppState extends ConsumerState<NextApp> with WidgetsBindingObserver {
             PlatformMenuItem(
               label: '设置…',
               shortcut: const SingleActivator(LogicalKeyboardKey.comma, meta: true),
-              onSelected: () => router.push(Routes.settings),
+              onSelected: () => router.go(Routes.settings),
             ),
             if (PlatformProvidedMenuItem.hasMenu(PlatformProvidedMenuItemType.hide)) const PlatformProvidedMenuItem(type: PlatformProvidedMenuItemType.hide),
             if (PlatformProvidedMenuItem.hasMenu(PlatformProvidedMenuItemType.quit)) const PlatformProvidedMenuItem(type: PlatformProvidedMenuItemType.quit),
