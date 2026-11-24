@@ -7,8 +7,10 @@ import 'package:flutter/services.dart' show LogicalKeyboardKey, SystemUiOverlayS
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'app_prefs.dart';
+import 'env.dart';
 import 'hant.dart';
 import 'image_cache.dart';
+import 'pages/home_shell.dart' show shellLibraryPage;
 import 'reader/reader_body.dart' show PagedBody;
 import 'reader/reader_page.dart' show clearReaderBookmarkCaches;
 import 'router.dart';
@@ -47,10 +49,16 @@ class _NextAppState extends ConsumerState<NextApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    final (uiHant, pureBlack) = ref.watch(appPrefsProvider.select((_) => (AppPrefs.read(P.uiHant, false), AppPrefs.read(P.pureBlack, true))));
+    final (uiHant, pureBlack) = ref.watch(appPrefsProvider.select((_) => (AppPrefs.read(P.uiHant, false), AppPrefs.read(P.pureBlack, pureBlackDefault))));
     final hant = uiHant ? ref.watch(_hantProvider).value : null;
     final router = ref.watch(routerProvider);
     final isMac = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    // 菜单栏、快捷键切到主标签页时，先关掉侧栏里打开的资料库页面，不然它还盖在上面
+    void goMain(String route) {
+      shellLibraryPage.value = null;
+      router.go(route);
+    }
+
     final isDesktop = !kIsWeb && (isMac || defaultTargetPlatform == TargetPlatform.windows || defaultTargetPlatform == TargetPlatform.linux);
     final app = MaterialApp.router(
       title: 'Ark Novel',
@@ -71,7 +79,7 @@ class _NextAppState extends ConsumerState<NextApp> with WidgetsBindingObserver {
           w = CallbackShortcuts(
             bindings: <ShortcutActivator, VoidCallback>{
               SingleActivator(LogicalKeyboardKey.keyK, meta: isMac, control: !isMac): () => router.push(Routes.search),
-              SingleActivator(LogicalKeyboardKey.comma, meta: isMac, control: !isMac): () => router.go(Routes.settings),
+              SingleActivator(LogicalKeyboardKey.comma, meta: isMac, control: !isMac): () => goMain(Routes.settings),
             },
             child: w,
           );
@@ -100,7 +108,7 @@ class _NextAppState extends ConsumerState<NextApp> with WidgetsBindingObserver {
             PlatformMenuItem(
               label: '设置…',
               shortcut: const SingleActivator(LogicalKeyboardKey.comma, meta: true),
-              onSelected: () => router.go(Routes.settings),
+              onSelected: () => goMain(Routes.settings),
             ),
             if (PlatformProvidedMenuItem.hasMenu(PlatformProvidedMenuItemType.hide)) const PlatformProvidedMenuItem(type: PlatformProvidedMenuItemType.hide),
             if (PlatformProvidedMenuItem.hasMenu(PlatformProvidedMenuItemType.quit)) const PlatformProvidedMenuItem(type: PlatformProvidedMenuItemType.quit),
@@ -117,22 +125,22 @@ class _NextAppState extends ConsumerState<NextApp> with WidgetsBindingObserver {
             PlatformMenuItem(
               label: '书架',
               shortcut: const SingleActivator(LogicalKeyboardKey.digit1, meta: true),
-              onSelected: () => router.go(Routes.bookshelf),
+              onSelected: () => goMain(Routes.bookshelf),
             ),
             PlatformMenuItem(
               label: '发现',
               shortcut: const SingleActivator(LogicalKeyboardKey.digit2, meta: true),
-              onSelected: () => router.go(Routes.discover),
+              onSelected: () => goMain(Routes.discover),
             ),
             PlatformMenuItem(
               label: '更新',
               shortcut: const SingleActivator(LogicalKeyboardKey.digit3, meta: true),
-              onSelected: () => router.go(Routes.updates),
+              onSelected: () => goMain(Routes.updates),
             ),
             PlatformMenuItem(
               label: '我的',
               shortcut: const SingleActivator(LogicalKeyboardKey.digit4, meta: true),
-              onSelected: () => router.go(Routes.profile),
+              onSelected: () => goMain(Routes.profile),
             ),
           ],
         ),

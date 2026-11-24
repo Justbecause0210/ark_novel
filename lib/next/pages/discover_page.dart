@@ -20,14 +20,50 @@ class DiscoverPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    const tabs = [Tab(child: Text('推荐')), Tab(child: Text('排行')), Tab(child: Text('题材')), Tab(child: Text('完结'))];
+    final search = IconButton(icon: Icon(Icons.search, size: isDesktop ? 20 : null), tooltip: hz(context, '搜索'), onPressed: () => context.push(Routes.search));
+    // 桌面宽屏：标题和分区标签合成一行，和书架、更新页的顶栏一样高；标签用圆角选中块，不拉满整个宽度
+    final singleRow = isDesktop && MediaQuery.sizeOf(context).width >= 720;
+    final scheme = Theme.of(context).colorScheme;
     return DefaultTabController(
       length: 4,
       child: Scaffold(
-        appBar: AppBar(
-          title: const Text('发现'),
-          actions: [IconButton(icon: const Icon(Icons.search), tooltip: hz(context, '搜索'), onPressed: () => context.push(Routes.search))],
-          bottom: const TabBar(tabs: [Tab(child: Text('推荐')), Tab(child: Text('排行')), Tab(child: Text('题材')), Tab(child: Text('完结'))]),
-        ),
+        appBar: singleRow
+            ? AppBar(
+                titleSpacing: 20,
+                title: Row(
+                  children: [
+                    const Text('发现'),
+                    const SizedBox(width: 18),
+                    Flexible(
+                      child: TabBar(
+                        tabs: tabs,
+                        isScrollable: true,
+                        tabAlignment: TabAlignment.start,
+                        dividerHeight: 0,
+                        // 不要按下 / 悬停的整块高亮：它比圆角选中块大一圈，点的时候像残影
+                        overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+                        splashFactory: NoSplash.splashFactory,
+                        labelPadding: const EdgeInsets.symmetric(horizontal: 14),
+                        labelStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+                        unselectedLabelStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500),
+                        labelColor: scheme.onSurface,
+                        unselectedLabelColor: scheme.onSurfaceVariant,
+                        indicatorSize: TabBarIndicatorSize.tab,
+                        indicator: BoxDecoration(color: scheme.surfaceContainerHigh, borderRadius: BorderRadius.circular(8)),
+                        indicatorPadding: const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                    ),
+                  ],
+                ),
+                actions: [search, const SizedBox(width: 8)],
+                bottom: PreferredSize(preferredSize: const Size.fromHeight(1), child: Divider(height: 1, color: scheme.outline.withValues(alpha: 0.6))),
+              )
+            : AppBar(
+                title: const Text('发现'),
+                actions: [search],
+                bottom: const TabBar(tabs: tabs),
+              ),
         body: const TabBarView(children: [_RecommendTab(), _RankingTab(), _CategoryTab(), _CompletedTab()]),
       ),
     );

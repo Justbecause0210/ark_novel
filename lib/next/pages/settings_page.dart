@@ -537,7 +537,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
     return [
       const XGroupTitle('主题'),
       _hl('主题', XSegments<ThemeMode>(value: mode, options: const {ThemeMode.system: '跟随系统', ThemeMode.light: '浅色', ThemeMode.dark: '深色'}, onChanged: (v) => ref.read(themeModeProvider.notifier).set(v))),
-      _hl('纯黑深色', _switch('纯黑深色', P.pureBlack, true, subtitle: '适合 OLED 屏幕')),
+      _hl('纯黑深色', _switch('纯黑深色', P.pureBlack, pureBlackDefault, subtitle: '适合 OLED 屏幕')),
       const XDivider(),
       const XGroupTitle('配色'),
       // 一排色点：点一下换，选中的外面一圈
