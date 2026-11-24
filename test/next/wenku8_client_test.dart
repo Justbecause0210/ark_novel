@@ -228,11 +228,13 @@ void main() {
       final adapter = _CallbackAdapter((options, cancelFuture) async {
         if (options.uri.path == '/1') {
           firstStarted.complete();
-          cancelFuture?.then((_) {
-            if (!firstBlocked.isCompleted) {
-              firstBlocked.completeError(DioException.requestCancelled(requestOptions: options, reason: 'aborted'));
-            }
-          });
+          unawaited(
+            cancelFuture?.then((_) {
+              if (!firstBlocked.isCompleted) {
+                firstBlocked.completeError(DioException.requestCancelled(requestOptions: options, reason: 'aborted'));
+              }
+            }),
+          );
           return firstBlocked.future;
         }
         return _gbk('ok:${options.uri.path}');

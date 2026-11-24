@@ -12,7 +12,6 @@ import 'cover_trim.dart';
 import 'data.dart';
 import 'image_cache.dart';
 import 'library.dart';
-import 'local_books.dart' show isLocalAid;
 import 'unlock.dart';
 import 'volumes.dart';
 
@@ -55,7 +54,6 @@ class VolumeCoverQueue {
     _bgmFailed.clear();
     _failedUrls.clear();
     for (final aid in aids) {
-      if (isLocalAid(aid)) continue;
       final v = Volumes.of(aid).firstOrNull;
       if (v != null && Volumes.cover(aid, v.title) == null) {
         _officialTried.add((aid, v.title));
@@ -68,7 +66,6 @@ class VolumeCoverQueue {
 
   /// 图片控件加载某张书架封面失败时通知：临时改用 Bangumi 兜底，直到下次刷新或重启再试原站。
   void reportCoverFailed(String aid, String url, {String? volumeTitle}) {
-    if (isLocalAid(aid)) return;
     final clean = splitCrop(url).url;
     if (clean.isEmpty || clean.contains('bgm.tv') || !LibraryStore.contains(aid)) return;
     final title = volumeTitle ?? Volumes.of(aid).firstOrNull?.title ?? '';
@@ -79,7 +76,6 @@ class VolumeCoverQueue {
 
   /// 没加入书架的书退出详情页时：不再取它的封面，删掉挑封面时下载的图（插图章节的前几张）和封面记录，下次打开再取。
   Future<void> forget(String aid) async {
-    if (isLocalAid(aid)) return;
     _queue.removeWhere((e) => e.$1 == aid);
     _bg.removeWhere((e) => e.$1 == aid);
     _tempQueue.remove(aid);
@@ -102,10 +98,6 @@ class VolumeCoverQueue {
 
   /// 这卷的封面，还没取过就排队去取（返回 null，若文库失败则返回临时 Bangumi 兜底）；没有插图、不在书架上的书也返回 null（只用网站的封面）。
   String? get(String aid, Vol v) {
-    if (isLocalAid(aid)) {
-      final url = Volumes.cover(aid, v.title);
-      return url != null && url.isNotEmpty ? url : null;
-    }
     if (!LibraryStore.contains(aid)) return null;
     final url = Volumes.cover(aid, v.title);
     if (url != null) {
@@ -144,10 +136,6 @@ class VolumeCoverQueue {
 
   /// 书的封面：第一卷的卷封面（高清）；没有卷信息、还没取到、没插图时用 [fallback]（网站的小封面），文库被拦时临时用 Bangumi 兜底。
   String bookCover(String aid, String fallback) {
-    if (isLocalAid(aid)) {
-      final vols = Volumes.of(aid);
-      return (vols.isEmpty ? null : get(aid, vols.first)) ?? fallback;
-    }
     final vols = Volumes.of(aid);
     final url = vols.isEmpty ? null : get(aid, vols.first);
     if (url != null) return url;
@@ -243,7 +231,6 @@ class VolumeCoverQueue {
     final box = Hive.box('session');
     if (box.get('coverSkipDropped') == true) return;
     for (final aid in aids) {
-      if (isLocalAid(aid)) continue;
       for (final v in Volumes.of(aid)) {
         if (v.illus == null || Volumes.cover(aid, v.title) == null) continue;
         final content = await ChapterCache.get(aid, v.illus!);
@@ -371,7 +358,6 @@ class VolumeCoverQueue {
     final store = _ref.read(imageStoreProvider);
     final manualOn = AppPrefs.read(P.coverTrim, false);
     for (final aid in aids) {
-      if (isLocalAid(aid)) continue;
       for (final MapEntry(key: title, value: saved) in Volumes.covers(aid).entries) {
         final manual = saved.contains('#crop=');
         if (saved.isEmpty || (manual && !manualOn)) continue;

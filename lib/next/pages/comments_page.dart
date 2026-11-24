@@ -70,7 +70,7 @@ class _ThreadListState<T> extends ConsumerState<_ThreadList<T>> {
 
   Future<void> _send() async {
     if (ref.read(sessionProvider) is! SessionLoggedIn) {
-      context.push(Routes.login);
+      await context.push(Routes.login);
       return;
     }
     final text = _input.text.trim();

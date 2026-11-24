@@ -8,7 +8,6 @@ import '../../data/wenku8/wenku8_parser.dart';
 import '../app_prefs.dart';
 import '../cache.dart';
 import '../history.dart';
-import '../local_books.dart';
 import '../progress.dart';
 import '../read_state.dart';
 import '../routes.dart';
@@ -236,7 +235,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
           byBook[aid] = (byBook[aid] ?? 0) + de.value;
         }
         if (readSet.contains(ce.key)) {
-          final n = isLocalAid(aid) ? LocalBooks.chapterLength(aid, ce.key) : ChapterCache.length(aid, ce.key);
+          final n = ChapterCache.length(aid, ce.key);
           if (n != null) speedSamples.add((n, chTotal));
         }
       }

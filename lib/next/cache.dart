@@ -13,7 +13,6 @@ import '../models/content.dart';
 import 'data.dart';
 import 'image_cache.dart';
 import 'library.dart';
-import 'local_books.dart' show isLocalAid;
 import 'read_state.dart';
 import 'session.dart' show friendlyError;
 import 'unlock.dart';
@@ -74,6 +73,7 @@ class ChapterCache {
       }
     }
     PageStore._lastWrite = lastWrite;
+    PageStore.invalidateLooseCount();
   }
 
   /// 旧版本把 meta 和正文放在同一个 Box 里、没有索引：一次性搬过来。
@@ -110,7 +110,6 @@ class ChapterCache {
 
   /// 写入一章。给了 [ticket] 且这期间这章（或整本）被删过时不写，返回 false。
   static Future<bool> put(String aid, String cid, Content c, {(int, int)? ticket}) async {
-    if (isLocalAid(aid)) return false;
     if (ticket != null && ticket != ChapterCache.ticket(aid, cid)) return false;
     await _text.put('$aid:$cid', _pack(c.text, c.images));
     if (ticket != null && ticket != ChapterCache.ticket(aid, cid)) {
@@ -260,6 +259,14 @@ class PageStore {
   static late Box _stamp;
   static const _cap = 400;
   static int _lastWrite = 0;
+  static int? _looseCount;
+  static int _looseGen = 0;
+
+  /// 书架增删改变了 `_pinned` 集合时调用，令非固定页计数失效。
+  static void invalidateLooseCount() {
+    _looseGen++;
+    _looseCount = null;
+  }
 
   static int _time(String key) => (_stamp.get('pt|$key') as int?) ?? 0;
 
@@ -275,11 +282,21 @@ class PageStore {
   }
 
   static Future<void> put(String key, String html) async {
+    final existed = _box.containsKey(key);
+    final genBeforePut = _looseGen;
     await _box.put(key, html);
     final now = DateTime.now().millisecondsSinceEpoch;
     _lastWrite = now > _lastWrite ? now : _lastWrite + 1; // 同一毫秒内也有严格顺序，不让淘汰结果取决于 Hive 的键排序
     await _stamp.put('pt|$key', _lastWrite);
-    if (_box.length <= _cap) return;
+    if (_box.length <= _cap) {
+      invalidateLooseCount();
+      return;
+    }
+    if (!existed && genBeforePut == _looseGen && _looseCount != null && !_pinned(key)) {
+      _looseCount = _looseCount! + 1;
+    }
+    if (_looseCount != null && _looseCount! <= _cap) return;
+    final genBeforeEvict = _looseGen;
     final loose = _box.keys.whereType<String>().where((k) => !_pinned(k)).toList();
     while (loose.length > _cap) {
       final oldest = loose.reduce((a, b) => _time(a) <= _time(b) ? a : b);
@@ -287,12 +304,16 @@ class PageStore {
       await _box.delete(oldest);
       await _stamp.delete('pt|$oldest');
     }
+    if (genBeforeEvict == _looseGen) {
+      _looseCount = loose.length;
+    }
   }
 
   static Future<void> removeScope(String scope) async {
     final keys = _box.keys.where((k) => k is String && k.startsWith('$scope|')).toList();
     await _box.deleteAll(keys);
     await _stamp.deleteAll([for (final k in keys) 'pt|$k']);
+    invalidateLooseCount();
   }
 
   /// 清空全部网页离线备份并整理磁盘文件。
@@ -301,6 +322,8 @@ class PageStore {
     await _box.clear();
     await _stamp.deleteAll(stamps);
     await _box.compact();
+    _looseGen++;
+    _looseCount = 0;
   }
 }
 
@@ -359,7 +382,7 @@ class DownloadController extends Notifier<Map<String, DownloadState>> {
   /// 下载 [chapters] 里还没缓存的章节；[total] 是全书章数，用来显示整本书的进度。
   /// 多书同时触发时排入串行队列逐本下载。
   Future<void> start(String aid, String title, List<CatChapter> chapters, {int? total, String img = '', String firstCid = ''}) async {
-    if (isLocalAid(aid) || (state[aid]?.running ?? false)) return;
+    if (state[aid]?.running ?? false) return;
     final all = total ?? chapters.length;
     _cancelled.remove(aid);
     final run = _runs[aid] = (_runs[aid] ?? 0) + 1;
