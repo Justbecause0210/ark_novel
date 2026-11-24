@@ -210,6 +210,7 @@ class _Summary extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final textScale = MediaQuery.textScalerOf(context).scale(1).clamp(1.0, 1.5);
+    final progressLine = '第 ${index + 1} / $count 卷 · ${_progress(aid, vol)}';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Column(
@@ -219,6 +220,7 @@ class _Summary extends StatelessWidget {
             height: 50 * textScale,
             child: MaskedRollSwitcher(
               direction: direction,
+              semanticLabel: vol.title,
               child: Text(
                 vol.title,
                 key: ValueKey(index),
@@ -235,8 +237,9 @@ class _Summary extends StatelessWidget {
             child: MaskedRollSwitcher(
               direction: direction,
               delay: const Duration(milliseconds: 45),
+              semanticLabel: progressLine,
               child: Text(
-                '第 ${index + 1} / $count 卷 · ${_progress(aid, vol)}',
+                progressLine,
                 key: ValueKey(index),
                 textAlign: TextAlign.center,
                 maxLines: 1,

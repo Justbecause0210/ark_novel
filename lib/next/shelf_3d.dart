@@ -16,70 +16,110 @@ import 'widgets.dart';
 /// 展示页通用的平滑缓动曲线（起速干脆、落点柔和）。
 const Curve kShelfEase = Cubic(0.2, 0.8, 0.2, 1.0);
 
-/// 方向性遮罩滚筒切换：新内容按翻页方向从遮罩外滑入，旧内容从另一侧滑出，无透明度淡化。
+/// 平稳文字切换：原地极轻淡入淡出，无上下位移，避免切书时基线晃动。
 /// 系统开启「减弱动态效果」时直接替换内容。
 class MaskedRollSwitcher extends StatelessWidget {
   const MaskedRollSwitcher({
     super.key,
     required this.child,
     this.direction = 1,
-    this.duration = const Duration(milliseconds: 380),
+    this.duration = const Duration(milliseconds: 140),
     this.delay = Duration.zero,
     this.alignment = Alignment.center,
+    this.semanticLabel,
   });
 
   final Widget child;
 
-  /// 翻页方向：`>= 0` 向右/下一页（新字自下而上顶入），`< 0` 向左/上一页（新字自上而下落入）。
+  /// 保留参数以兼容既有调用方；当前采用原地淡入淡出，不做方向位移。
   final int direction;
   final Duration duration;
 
-  /// 与主标题错峰滚入的延迟（如副标题延迟 45ms）。
+  /// 保留参数以兼容既有调用方。
   final Duration delay;
   final AlignmentGeometry alignment;
+
+  /// 提供稳定无障碍标签：隔离内部切换节点的增删重挂，规避 macOS AccessibilityBridge 闪退。
+  final String? semanticLabel;
 
   @override
   Widget build(BuildContext context) {
     if (MediaQuery.disableAnimationsOf(context)) {
-      return ClipRect(child: Align(alignment: alignment, child: child));
+      final staticChild = Align(alignment: alignment, child: child);
+      return semanticLabel != null
+          ? Semantics(label: semanticLabel, child: ExcludeSemantics(child: staticChild))
+          : staticChild;
     }
-    final dir = direction < 0 ? -1.0 : 1.0;
-    final totalMs = duration.inMilliseconds + delay.inMilliseconds;
-    final start = totalMs > 0 && delay > Duration.zero ? (delay.inMilliseconds / totalMs).clamp(0.0, 0.6) : 0.0;
     final currentKey = child.key;
-    return ClipRect(
-      child: AnimatedSwitcher(
-        duration: Duration(milliseconds: totalMs),
-        switchInCurve: Curves.linear,
-        switchOutCurve: Curves.linear,
-        layoutBuilder: (current, previous) => Stack(alignment: alignment, children: [...previous, ?current]),
-        transitionBuilder: (w, animation) {
-          final incoming = w.key == currentKey;
-          return SlideTransition(
-            position: animation.drive(_RollOffsetTween(dir: dir, incoming: incoming, start: start)),
-            child: w,
-          );
-        },
-        child: child,
-      ),
+    final switcher = AnimatedSwitcher(
+      duration: duration,
+      reverseDuration: Duration(milliseconds: math.max(80, duration.inMilliseconds - 40)),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      layoutBuilder: (current, previous) => Stack(alignment: alignment, children: [...previous, ?current]),
+      transitionBuilder: (w, animation) {
+        final incoming = w.key == currentKey;
+        final faded = FadeTransition(opacity: animation, child: w);
+        return semanticLabel != null ? faded : ExcludeSemantics(excluding: !incoming, child: faded);
+      },
+      child: child,
     );
+    if (semanticLabel != null) {
+      return Semantics(
+        label: semanticLabel,
+        child: ExcludeSemantics(child: switcher),
+      );
+    }
+    return switcher;
   }
 }
 
-class _RollOffsetTween extends Animatable<Offset> {
-  const _RollOffsetTween({required this.dir, required this.incoming, required this.start});
+/// 书脊 / 立体书架通用的极简轻胶囊主按钮：纸面浅底 + 极细描边，悬停柔和提亮，避免高饱和糖果色抢戏。
+class ShelfActionButton extends StatelessWidget {
+  const ShelfActionButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+    this.active = false,
+  });
 
-  final double dir;
-  final bool incoming;
-  final double start;
+  final IconData icon;
+  final String label;
+  final VoidCallback onPressed;
+  final bool active;
 
   @override
-  Offset transform(double t) {
-    final p = incoming ? t : 1.0 - t;
-    final span = 1.0 - start;
-    final raw = span <= 0 ? 1.0 : ((p - start) / span).clamp(0.0, 1.0);
-    final eased = kShelfEase.transform(raw);
-    return Offset(0, incoming ? dir * 1.05 * (1.0 - eased) : -dir * 1.05 * eased);
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final dark = theme.brightness == Brightness.dark;
+    final bg = active
+        ? scheme.primary.withValues(alpha: dark ? 0.24 : 0.12)
+        : (dark ? scheme.onSurface.withValues(alpha: 0.06) : scheme.surfaceContainerLowest);
+    final fg = active ? scheme.primary : scheme.onSurface.withValues(alpha: 0.88);
+    final border = active ? scheme.primary.withValues(alpha: 0.45) : scheme.onSurface.withValues(alpha: dark ? 0.18 : 0.14);
+    final hoverBorder = active ? scheme.primary.withValues(alpha: 0.65) : scheme.onSurface.withValues(alpha: dark ? 0.34 : 0.28);
+    return OutlinedButton.icon(
+      onPressed: onPressed,
+      style: ButtonStyle(
+        minimumSize: const WidgetStatePropertyAll(Size(0, 36)),
+        padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 20)),
+        elevation: const WidgetStatePropertyAll(0),
+        shape: const WidgetStatePropertyAll(StadiumBorder()),
+        foregroundColor: WidgetStatePropertyAll(fg),
+        backgroundColor: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.pressed)) return scheme.onSurface.withValues(alpha: dark ? 0.14 : 0.08);
+          if (states.contains(WidgetState.hovered)) return scheme.onSurface.withValues(alpha: dark ? 0.10 : 0.045);
+          return bg;
+        }),
+        side: WidgetStateProperty.resolveWith((states) => BorderSide(color: states.contains(WidgetState.hovered) ? hoverBorder : border, width: 1)),
+        overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+        textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500, letterSpacing: 0.4)),
+      ),
+      icon: Icon(icon, size: 16),
+      label: Text(label),
+    );
   }
 }
 
@@ -514,7 +554,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
       onHover: (e) => _onStageHover(e, stageW, stageH, w, h),
       onExit: (_) => _resetPointerMotion(),
       child: ClipRect(
-        clipper: const _SidesClipper(),
+        clipper: const ShelfSidesClipper(),
         child: Stack(
           alignment: Alignment.center,
           children: [
@@ -536,7 +576,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
               itemCount: books.length,
               // 不用 PageView 自带的一次一页：快速一甩能划过好几本，停下时再对齐到某一本
               pageSnapping: false,
-              physics: const _FlingSnapPhysics(),
+              physics: const ShelfFlingSnapPhysics(),
               onPageChanged: (i) {
                 HapticFeedback.selectionClick(); // 每划过一本轻震一下
                 setState(() {
@@ -587,7 +627,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
     Widget cover = Consumer(
       builder: (context, ref, _) {
         ref.watch(volumeChangeForProvider(book.aid));
-        return _Cover(
+        return ShelfCoverCard(
           url: widget.coverOf(book),
           decodeSize: Size(w, h),
           shade: effShade,
@@ -640,22 +680,20 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
     final selecting = widget.selected.isNotEmpty;
     final selected = widget.selected.contains(book.aid);
     final action = widget.actionOf(book);
-    // 按钮一直在：多选时是选中 / 取消，平时是继续读 / 开始读 / 打开。占位不变，切书时什么都不动
+    // 按钮一直在：多选时是选中 / 取消，平时是继续读 / 开始读 / 打开。保持同一节点避免快滑反复重挂 Semantics 节点
     final Widget button = selecting
-        ? OutlinedButton.icon(
-            key: ValueKey('select-${book.aid}-$selected'),
-            style: OutlinedButton.styleFrom(minimumSize: const Size(0, 40), padding: const EdgeInsets.symmetric(horizontal: 20)),
+        ? ShelfActionButton(
+            active: selected,
             onPressed: () => widget.onToggleSelect(book),
-            icon: Icon(selected ? Icons.check_circle : Icons.radio_button_unchecked, size: 20),
-            label: Text(selected ? '已选中' : '选中'),
+            icon: selected ? Icons.check_circle_outline : Icons.radio_button_unchecked,
+            label: selected ? '已选中' : '选中',
           )
-        : FilledButton.tonalIcon(
-            key: ValueKey('action-${book.aid}'),
-            style: FilledButton.styleFrom(minimumSize: const Size(0, 40), padding: const EdgeInsets.symmetric(horizontal: 22)),
+        : ShelfActionButton(
             onPressed: () => action.cid == null ? widget.onOpen(book) : widget.onRead(book, action.cid!),
-            icon: Icon(action.cid == null ? Icons.auto_stories_outlined : Icons.play_arrow_rounded, size: 20),
-            label: Text(action.label),
+            icon: action.cid == null ? Icons.auto_stories_outlined : Icons.play_arrow_rounded,
+            label: action.label,
           );
+    final subtitle = widget.subtitleOf(book);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 32),
       child: Column(
@@ -663,22 +701,23 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
           SizedBox(
             height: 24,
             child: Center(
-              child: n > 1 ? _Indicator(index: cur, count: n, onPick: (i) => _pc?.jumpToPage(i), onTapDot: _go) : null,
+              child: n > 1 ? ShelfPageIndicator(index: cur, count: n, onPick: (i) => _pc?.jumpToPage(i), onTapDot: _go) : null,
             ),
           ),
-          const SizedBox(height: 14),
-          // 书名只占一行：长短不一的书名不会把下面的字顶上顶下，按滑动方向在遮罩内滚入
+          const SizedBox(height: 12),
+          // 书名只占一行：长短不一的书名不会把下面的字顶上顶下，原地轻淡入切换
           SizedBox(
             height: 26 * textScale,
             child: MaskedRollSwitcher(
               direction: _dir,
+              semanticLabel: book.shown,
               child: Text(
                 book.shown,
                 key: ValueKey(book.aid),
                 textAlign: TextAlign.center,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.titleLarge?.copyWith(fontSize: 19, fontWeight: FontWeight.w700, height: 1.3),
+                style: theme.textTheme.titleLarge?.copyWith(fontSize: 19, fontWeight: FontWeight.w600, letterSpacing: 0.2, height: 1.3),
               ),
             ),
           ),
@@ -687,23 +726,21 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
             height: 18 * textScale,
             child: MaskedRollSwitcher(
               direction: _dir,
-              delay: const Duration(milliseconds: 45),
+              semanticLabel: subtitle,
               child: Text(
-                widget.subtitleOf(book),
+                subtitle,
                 key: ValueKey(book.aid),
                 textAlign: TextAlign.center,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall?.copyWith(fontSize: 13, color: scheme.onSurfaceVariant),
+                style: theme.textTheme.bodySmall?.copyWith(fontSize: 12.5, color: scheme.onSurfaceVariant.withValues(alpha: 0.8)),
               ),
             ),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
           SizedBox(
-            height: 42 * textScale,
-            child: Center(
-              child: AnimatedSwitcher(duration: const Duration(milliseconds: 180), child: button),
-            ),
+            height: 40 * textScale,
+            child: Center(child: button),
           ),
         ],
       ),
@@ -713,18 +750,19 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
 
 /// 一本书的封面：圆角、柔和的大阴影，离中间越远越暗；多选选中时描一圈主色。
 /// 阴影、静态封面与动态暗化遮罩分层并用 RepaintBoundary 隔离，避免滑动每帧重绘模糊阴影和离屏光栅化封面。
-class _Cover extends StatelessWidget {
-  const _Cover({required this.url, required this.shade, required this.selected, required this.shadow, this.decodeSize});
+class ShelfCoverCard extends StatelessWidget {
+  const ShelfCoverCard({super.key, required this.url, required this.shade, required this.selected, required this.shadow, this.decodeSize, this.borderRadius = 10});
 
   final String url;
   final double shade;
   final bool selected;
   final double shadow;
   final Size? decodeSize;
+  final double borderRadius;
 
   @override
   Widget build(BuildContext context) {
-    final radius = BorderRadius.circular(10);
+    final radius = BorderRadius.circular(borderRadius);
     final baseShadow = Theme.of(context).brightness == Brightness.dark ? 0.5 : 0.26;
     final shadowOpacity = (shadow / baseShadow).clamp(0.0, 1.0);
     return Stack(
@@ -747,7 +785,12 @@ class _Cover extends StatelessWidget {
             ),
           ),
         ),
-        RepaintBoundary(child: CoverImage(url, decodeSize: decodeSize)),
+        RepaintBoundary(
+          child: ClipRRect(
+            borderRadius: radius,
+            child: CoverImage(url, decodeSize: decodeSize),
+          ),
+        ),
         if (shade > 0.005)
           DecoratedBox(
             decoration: BoxDecoration(
@@ -768,13 +811,14 @@ class _Cover extends StatelessWidget {
 }
 
 /// 第几本：书少（≤ 9 本）用一排可点击的小圆点，当前那颗拉长；书多用细滑块，可以拖着快速找书。
-class _Indicator extends StatelessWidget {
-  const _Indicator({required this.index, required this.count, required this.onPick, required this.onTapDot});
+class ShelfPageIndicator extends StatelessWidget {
+  const ShelfPageIndicator({super.key, required this.index, required this.count, required this.onPick, required this.onTapDot, this.keyPrefix = 'shelf-3d'});
 
   final int index;
   final int count;
   final ValueChanged<int> onPick;
   final ValueChanged<int> onTapDot;
+  final String keyPrefix;
 
   @override
   Widget build(BuildContext context) {
@@ -782,7 +826,7 @@ class _Indicator extends StatelessWidget {
     final scheme = theme.colorScheme;
     if (count <= 9) {
       return Row(
-        key: const ValueKey('shelf-3d-dots'),
+        key: ValueKey('$keyPrefix-dots'),
         mainAxisSize: MainAxisSize.min,
         children: [
           for (var i = 0; i < count; i++)
@@ -793,7 +837,7 @@ class _Indicator extends StatelessWidget {
               child: MouseRegion(
                 cursor: SystemMouseCursors.click,
                 child: GestureDetector(
-                  key: ValueKey('shelf-3d-dot-$i'),
+                  key: ValueKey('$keyPrefix-dot-$i'),
                   behavior: HitTestBehavior.opaque,
                   onTap: () => onTapDot(i),
                   child: Padding(
@@ -801,9 +845,12 @@ class _Indicator extends StatelessWidget {
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 220),
                       curve: Curves.easeOutCubic,
-                      width: i == index ? 18 : 6,
-                      height: 6,
-                      decoration: BoxDecoration(color: i == index ? scheme.primary : scheme.outlineVariant, borderRadius: BorderRadius.circular(3)),
+                      width: i == index ? 16 : 5,
+                      height: 4.5,
+                      decoration: BoxDecoration(
+                        color: i == index ? scheme.onSurface.withValues(alpha: 0.75) : scheme.onSurface.withValues(alpha: 0.16),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
                     ),
                   ),
                 ),
@@ -813,24 +860,23 @@ class _Indicator extends StatelessWidget {
       );
     }
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 420),
+      constraints: const BoxConstraints(maxWidth: 340),
       child: Row(
         children: [
           Expanded(
             child: ExcludeFocus(
               child: SliderTheme(
                 data: SliderTheme.of(context).copyWith(
-                  activeTrackColor: scheme.primary,
-                  inactiveTrackColor: scheme.outlineVariant,
-                  thumbColor: scheme.primary,
-                  // 细轨道、小圆点，和卷册页的一样
-                  trackHeight: 2,
+                  activeTrackColor: scheme.onSurface.withValues(alpha: 0.62),
+                  inactiveTrackColor: scheme.onSurface.withValues(alpha: 0.12),
+                  thumbColor: scheme.onSurface.withValues(alpha: 0.82),
+                  trackHeight: 1.5,
                   tickMarkShape: SliderTickMarkShape.noTickMark,
-                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6, elevation: 0, pressedElevation: 0),
-                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 4.5, elevation: 0, pressedElevation: 0),
+                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
                 ),
                 child: Slider(
-                  key: const ValueKey('shelf-3d-slider'),
+                  key: ValueKey('$keyPrefix-slider'),
                   value: index.toDouble(),
                   max: count - 1.0,
                   divisions: count - 1,
@@ -840,9 +886,15 @@ class _Indicator extends StatelessWidget {
               ),
             ),
           ),
+          const SizedBox(width: 6),
           Text(
             '${index + 1} / $count',
-            style: theme.textTheme.labelMedium?.copyWith(color: scheme.onSurfaceVariant, fontFeatures: const [FontFeature.tabularFigures()]),
+            style: theme.textTheme.labelSmall?.copyWith(
+              fontSize: 11.5,
+              color: scheme.onSurfaceVariant.withValues(alpha: 0.72),
+              letterSpacing: 0.3,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
         ],
       ),
@@ -851,27 +903,27 @@ class _Indicator extends StatelessWidget {
 }
 
 /// 只裁左右两边
-class _SidesClipper extends CustomClipper<Rect> {
-  const _SidesClipper();
+class ShelfSidesClipper extends CustomClipper<Rect> {
+  const ShelfSidesClipper();
 
   @override
   Rect getClip(Size size) => Rect.fromLTRB(0, -size.height, size.width, size.height * 2);
 
   @override
-  bool shouldReclip(_SidesClipper oldClipper) => false;
+  bool shouldReclip(ShelfSidesClipper oldClipper) => false;
 }
 
 /// 甩得越快划过的书越多，松手后停在离惯性终点最近的那本上。
 ///
 /// 轻轻一拨（够得上甩的速度）至少走一本；慢慢拖完松手，回到离得最近的那本。
-class _FlingSnapPhysics extends ScrollPhysics {
-  const _FlingSnapPhysics({super.parent});
+class ShelfFlingSnapPhysics extends ScrollPhysics {
+  const ShelfFlingSnapPhysics({super.parent});
 
   /// 甩出去的速度 × 这个秒数 ≈ 惯性能走的距离
   static const _glide = 0.32;
 
   @override
-  _FlingSnapPhysics applyTo(ScrollPhysics? ancestor) => _FlingSnapPhysics(parent: buildParent(ancestor));
+  ShelfFlingSnapPhysics applyTo(ScrollPhysics? ancestor) => ShelfFlingSnapPhysics(parent: buildParent(ancestor));
 
   @override
   Simulation? createBallisticSimulation(ScrollMetrics position, double velocity) {

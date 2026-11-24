@@ -208,7 +208,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('MaskedRollSwitcher：按翻页方向在遮罩内上下滚入，减弱动态时直接替换', (tester) async {
+  testWidgets('MaskedRollSwitcher：原地淡入淡出不上下位移，减弱动态时直接替换', (tester) async {
     Widget host(String label, int dir, {bool disableAnimations = false}) => MediaQuery(
       data: MediaQueryData(disableAnimations: disableAnimations),
       child: Directionality(
@@ -227,29 +227,23 @@ void main() {
     await tester.pumpWidget(host('A', 1));
     await tester.pumpAndSettle();
 
-    // 正向切换（dir = +1）：新字从下方滑入，旧字向上方滑出
+    // 正向切换：原地淡入淡出，基线完全不上下跳动
     await tester.pumpWidget(host('B', 1));
-    await tester.pump(const Duration(milliseconds: 60));
+    await tester.pump(const Duration(milliseconds: 50));
     final aOut = tester.getCenter(find.text('A')).dy;
     final bIn = tester.getCenter(find.text('B')).dy;
-    expect(bIn, greaterThan(aOut));
+    expect(bIn, closeTo(aOut, 0.01));
+    expect(find.byType(SlideTransition), findsNothing);
+    expect(find.byType(FadeTransition), findsAtLeastNWidgets(1));
     await tester.pumpAndSettle();
     expect(find.text('B'), findsOneWidget);
     expect(find.text('A'), findsNothing);
 
-    // 反向切换（dir = -1）：新字从上方滑入，旧字向下方滑出
-    await tester.pumpWidget(host('A', -1));
-    await tester.pump(const Duration(milliseconds: 60));
-    final bOut = tester.getCenter(find.text('B')).dy;
-    final aIn = tester.getCenter(find.text('A')).dy;
-    expect(aIn, lessThan(bOut));
-    await tester.pumpAndSettle();
-
-    // 开启减弱动态效果：立即替换且无 SlideTransition
+    // 开启减弱动态效果：立即替换且无 FadeTransition
     await tester.pumpWidget(host('C', 1, disableAnimations: true));
     expect(find.text('C'), findsOneWidget);
-    expect(find.text('A'), findsNothing);
-    expect(find.byType(SlideTransition), findsNothing);
+    expect(find.text('B'), findsNothing);
+    expect(find.byType(FadeTransition), findsNothing);
   });
 
   testWidgets('Shelf3DView：桌面鼠标悬停中央封面倾转、悬停邻书轻微抬升，离场后自动停帧', (tester) async {

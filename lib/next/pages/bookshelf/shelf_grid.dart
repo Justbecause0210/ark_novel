@@ -394,33 +394,47 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
         _syncLayoutMetrics(cols: 1, rowExtent: 72, topPadding: inset, coverSize: const Size(40, 54));
         return ListView.builder(padding: EdgeInsets.fromLTRB(0, inset, 0, 24), itemCount: books.length, itemBuilder: (context, i) => _listTile(books[i]));
       }
-      if (o.display == 4) {
-        // 正好一屏高；外面套一层能滚的，下拉同步照常可用
+      if (o.display == 4 || o.display == 5) {
+        // 正好一屏高；外面套一层能滚的，下拉同步照常可用；书脊/立体模式不显示继续阅读条，顶部不留冗余 inset
         return LayoutBuilder(
           builder: (context, c) => SingleChildScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
             child: SizedBox(
               height: c.maxHeight,
-              child: Padding(
-                padding: EdgeInsets.only(top: inset),
-                child: ValueListenableBuilder<String>(
+              child: ValueListenableBuilder<String>(
                   valueListenable: widget.activeTab,
-                  builder: (context, tab, _) => Shelf3DView(
-                    books: books,
-                    // 每个标签记住上次停在哪本，只存在本机（不进备份、不同步）
-                    initialAid: Hive.box('session').get('shelf3d:${widget.catId}') as String?,
-                    onFocusChanged: (aid) => Hive.box('session').put('shelf3d:${widget.catId}', aid),
-                    selected: _selected,
-                    heroEnabled: tab == widget.catId,
-                    coverOf: _cover,
-                    badgeOf: _badge,
-                    subtitleOf: _shelf3dLine,
-                    actionOf: _shelf3dAction,
-                    onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid)),
-                    onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid)),
-                    onToggleSelect: (b) => _toggle(b.aid),
-                  ),
-                ),
+                  builder: (context, tab, _) => o.display == 5
+                      ? ShelfSpineView(
+                          books: books,
+                          initialAid: Hive.box('session').get('shelf3d:${widget.catId}') as String?,
+                          onFocusChanged: (aid) => Hive.box('session').put('shelf3d:${widget.catId}', aid),
+                          selected: _selected,
+                          heroEnabled: tab == widget.catId,
+                          coverOf: _cover,
+                          badgeOf: _badge,
+                          subtitleOf: _shelf3dLine,
+                          actionOf: _shelf3dAction,
+                          unreadOf: (b) => _unread(b.aid),
+                          volumeCountOf: (b) => Volumes.of(b.aid).length,
+                          onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid)),
+                          onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid)),
+                          onToggleSelect: (b) => _toggle(b.aid),
+                        )
+                      : Shelf3DView(
+                          books: books,
+                          // 每个标签记住上次停在哪本，只存在本机（不进备份、不同步）
+                          initialAid: Hive.box('session').get('shelf3d:${widget.catId}') as String?,
+                          onFocusChanged: (aid) => Hive.box('session').put('shelf3d:${widget.catId}', aid),
+                          selected: _selected,
+                          heroEnabled: tab == widget.catId,
+                          coverOf: _cover,
+                          badgeOf: _badge,
+                          subtitleOf: _shelf3dLine,
+                          actionOf: _shelf3dAction,
+                          onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid)),
+                          onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid)),
+                          onToggleSelect: (b) => _toggle(b.aid),
+                        ),
               ),
             ),
           ),
