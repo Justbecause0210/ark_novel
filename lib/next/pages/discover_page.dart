@@ -305,6 +305,7 @@ class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliv
       return const LoginPrompt(title: '排行榜需要登录', detail: '登录轻小说文库账号后可查看点击榜、推荐榜、收藏榜等榜单；「推荐」分区可直接浏览。');
     }
     final api = ref.watch(apiProvider);
+    final node = ref.watch(nodeProvider);
     final param = rankParam(_kind, _period);
     final scheme = Theme.of(context).colorScheme;
     return Column(
@@ -325,7 +326,7 @@ class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliv
             ),
           ),
         Expanded(
-          child: PagedNovelGrid(key: ValueKey(param), hide: _hideShelved(ref), fetch: (page) => api.ranking(param, page)),
+          child: PagedNovelGrid(key: ValueKey((node, param)), hide: _hideShelved(ref), fetch: (page) => api.ranking(param, page)),
         ),
       ],
     );
@@ -401,6 +402,7 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
       return const LoginPrompt(title: '题材筛选需要登录', detail: '登录轻小说文库账号后可按奇幻、校园、恋爱等题材标签筛选小说。');
     }
     final api = ref.watch(apiProvider);
+    final node = ref.watch(nodeProvider);
     return Stack(
       children: [
         Column(
@@ -423,7 +425,7 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
               },
             ),
             Expanded(
-              child: PagedNovelGrid(key: ValueKey((_tag, _sort)), hide: _hideShelved(ref), fetch: (page) => api.category(_tag, _sort.$2, page)),
+              child: PagedNovelGrid(key: ValueKey((node, _tag, _sort)), hide: _hideShelved(ref), fetch: (page) => api.category(_tag, _sort.$2, page)),
             ),
           ],
         ),
@@ -476,7 +478,7 @@ class _CompletedTabState extends ConsumerState<_CompletedTab> with AutomaticKeep
             ],
           ),
         ),
-        Expanded(child: PagedNovelGrid(hide: _hideShelved(ref), fetch: ref.watch(apiProvider).completed)),
+        Expanded(child: PagedNovelGrid(key: ValueKey(ref.watch(nodeProvider)), hide: _hideShelved(ref), fetch: ref.watch(apiProvider).completed)),
       ],
     );
   }
