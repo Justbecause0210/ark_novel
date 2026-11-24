@@ -2,11 +2,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive_io.dart';
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'meta_cache.dart';
 import 'sync.dart';
 
 /// 完整备份：一个 zip，里面是本地数据库里除登录信息外的全部键（`data.json`），加上自选的头像和字体（`files/`）。
@@ -55,8 +56,14 @@ class Backup {
   /// 设备私有键：不进备份，恢复时也不覆盖/删除本机。
   static bool _isLocal(String k) => _localKeys.contains(k) || k.startsWith('cf:') || k.startsWith('unlock:txt:');
 
-  /// 可再生缓存键：新导出排除出备份（缩小体积），旧备份里若带有则仍兼容恢复。
-  static bool _isCache(String k) => k == 'ccolor' || k.startsWith('bgm:') || k.startsWith('bgm_');
+  /// 可再生缓存键：新导出排除出备份（缩小体积），旧备份里若带有则仍兼容恢复（下次启动自动迁入 `meta_cache`）。
+  static bool _isCache(String k) => MetaCache.isCacheKey(k);
+
+  @visibleForTesting
+  static bool isLocalKey(String k) => _isLocal(k);
+
+  @visibleForTesting
+  static bool isCacheKey(String k) => _isCache(k);
 
   static String make() => jsonEncode({
     'backup': 3,

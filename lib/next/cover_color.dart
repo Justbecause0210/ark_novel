@@ -5,9 +5,9 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import 'image_cache.dart';
+import 'meta_cache.dart';
 
 /// 从封面像素（RGBA）算阅读报告的背景色，像豆瓣那样：取整体色调，压低饱和度、调暗，白字看得清。
 /// 饱和的像素权重大一些，免得大片白底把颜色冲淡成灰。
@@ -48,10 +48,10 @@ const _coverColorFlushBatch = 20;
 Future<void> flushCoverColors() async {
   _coverColorFlushTimer?.cancel();
   _coverColorFlushTimer = null;
-  if (_pendingCoverColors.isEmpty || !Hive.isBoxOpen('session')) return;
+  if (_pendingCoverColors.isEmpty || !MetaCache.isOpen) return;
   final batch = Map<String, int>.from(_pendingCoverColors);
   _pendingCoverColors.clear();
-  final box = Hive.box('session');
+  final box = MetaCache.box;
   final prev = Map<String, Object?>.from((box.get('ccolor') as Map?) ?? const {});
   for (final e in batch.entries) {
     prev.remove(e.key);
@@ -78,7 +78,8 @@ void _queueCoverColor(String url, int argb) {
 Color? savedCoverColor(String url) {
   final pending = _pendingCoverColors[url];
   if (pending != null) return Color(pending);
-  final v = (Hive.box('session').get('ccolor') as Map?)?[url] as int?;
+  if (!MetaCache.isOpen) return null;
+  final v = (MetaCache.box.get('ccolor') as Map?)?[url] as int?;
   return v == null ? null : Color(v);
 }
 

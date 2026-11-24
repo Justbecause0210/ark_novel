@@ -458,11 +458,13 @@ void main() {
       final gate = gates[name];
       if (gate != null) {
         var wasCancelled = false;
-        cancelFuture?.then((_) {
-          wasCancelled = true;
-          cancelledUrls.add(name);
-          if (!gate.isCompleted) gate.complete();
-        });
+        unawaited(
+          cancelFuture?.then((_) {
+            wasCancelled = true;
+            cancelledUrls.add(name);
+            if (!gate.isCompleted) gate.complete();
+          }),
+        );
         await gate.future;
         if (wasCancelled) throw DioException.requestCancelled(requestOptions: o, reason: 'cancelled');
       }

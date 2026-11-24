@@ -23,6 +23,7 @@ import '../models/user_info.dart';
 import 'backup.dart';
 import 'cache.dart';
 import 'env.dart';
+import 'meta_cache.dart';
 import 'net_stub.dart' if (dart.library.io) 'net_io.dart';
 import 'web_fetch.dart';
 
@@ -41,7 +42,9 @@ class SessionStore {
       await Hive.initFlutter('next');
     }
     if (!kIsWeb) await Backup.applyPending();
-    return SessionStore._(await Hive.openBox('session'));
+    final boxes = await Future.wait<Box>([Hive.openBox('session'), Hive.openBox(MetaCache.boxName)]);
+    await MetaCache.migrateFromSession();
+    return SessionStore._(boxes[0]);
   }
 
   /// 登录 cookie（`jieqiUserInfo=…;jieqiVisitInfo=…`）；网页预览：cookie 保存在转发程序里，这里只存一个标记。
