@@ -6,7 +6,6 @@ import '../models/cat_volume.dart';
 import '../models/content.dart';
 import 'cache.dart';
 import 'hant.dart';
-import 'local_books.dart';
 import 'rules.dart';
 
 /// 书内全文搜索范围。
@@ -48,12 +47,14 @@ class BookSearchProgress {
     required this.totalChapters,
     required this.totalHits,
     required this.hits,
+    this.truncated = false,
   });
 
   final int scannedChapters;
   final int totalChapters;
   final int totalHits;
   final List<BookSearchHit> hits;
+  final bool truncated;
 }
 
 /// 书内全文搜索最终结果。
@@ -64,6 +65,7 @@ class BookSearchResult {
     required this.totalChapters,
     required this.totalHits,
     this.cancelled = false,
+    this.truncated = false,
     this.error,
   });
 
@@ -72,6 +74,7 @@ class BookSearchResult {
   final int totalChapters;
   final int totalHits;
   final bool cancelled;
+  final bool truncated;
   final String? error;
 }
 
@@ -84,12 +87,18 @@ class BookSearchCancelToken {
   void cancel() => _cancelled = true;
 }
 
-/// 与阅读器 `formatChapter` 完全一致的正文标准化函数，确保检索偏移可直接定位阅读器页面。
-String formatChapterText(String raw) => _halfWidth(raw).split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).map((l) => '　　$l').join('\n');
+final _fullWidthAlnumRe = RegExp('[０-９Ａ-Ｚａ-ｚ]');
+final _fullWidthJoinRe = RegExp(r'(?<=[0-9A-Za-z])[　－](?=[0-9A-Za-z])');
 
-String _halfWidth(String s) => s
-    .replaceAllMapped(RegExp('[０-９Ａ-Ｚａ-ｚ]'), (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xFEE0))
-    .replaceAllMapped(RegExp(r'(?<=[0-9A-Za-z])[　－](?=[0-9A-Za-z])'), (m) => m[0] == '　' ? ' ' : '-');
+/// 「Ｄｉｖｅ　Ｍａｓｓｉｖｅｌｙ」这种全角英文每个字母占一个汉字宽，排出来字距很怪：字母、数字转半角，
+/// 英文之间的全角空格、连字符也换成半角。一个字换一个字，阅读进度、书签的位置不变。
+String halfWidth(String s) => s
+    .replaceAllMapped(_fullWidthAlnumRe, (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xFEE0))
+    .replaceAllMapped(_fullWidthJoinRe, (m) => m[0] == '　' ? ' ' : '-');
+
+/// 每个非空行当一段：去掉网页里零散的空白，统一首行缩进两个全角空格；全角英文、数字转半角。
+/// 与阅读器共享同一份实现，确保检索偏移可直接定位阅读器页面。
+String formatChapterText(String raw) => halfWidth(raw).split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).map((l) => '　　$l').join('\n');
 
 /// 从 [text] 中提取以 `[matchStart, matchStart + matchLength)` 为中心的上下文摘要，
 /// 折叠换行与连续空白的同时精确映射命中高亮区间 `[highlightStart, highlightEnd)`。
@@ -208,6 +217,7 @@ class BookSearchEngine {
     int yieldEvery = 10,
     int maxHits = 500,
     int maxHitsPerChapter = 50,
+    bool stopAtMaxHits = true,
     ChapterContentLoader? chapterLoader,
     ChapterCachedChecker? isCached,
   }) async {
@@ -223,24 +233,13 @@ class BookSearchEngine {
       return BookSearchResult(hits: const [], scannedChapters: 0, totalChapters: 0, totalHits: 0, error: '正则表达式无效：${e.message}');
     }
 
-    final loadChapter =
-        chapterLoader ??
-        (String aid, String cid) async {
-          if (isLocalAid(aid)) {
-            try {
-              return await LocalBooks.loadChapter(aid, cid);
-            } catch (_) {
-              return null;
-            }
-          }
-          return ChapterCache.get(aid, cid);
-        };
-    final hasChapter = isCached ?? (String aid, String cid) => isLocalAid(aid) || (Hive.isBoxOpen('chapter_index') && ChapterCache.has(aid, cid));
+    final loadChapter = chapterLoader ?? ChapterCache.get;
+    final hasChapter = isCached ?? (String aid, String cid) => Hive.isBoxOpen('chapter_index') && ChapterCache.has(aid, cid);
 
     // 预取替换规则（与 reader_page.dart 的 chapterProvider 管线一致）
     List<ReplaceRule>? rules;
     if (applyReplaceRules && Hive.isBoxOpen('session')) {
-      final rawRules = ReplaceRules.all();
+      final rawRules = ReplaceRules.allView();
       rules = hant == null ? rawRules : [for (final r in rawRules) r.copyWith(pattern: hant.convert(r.pattern), replacement: hant.convert(r.replacement))];
     }
 
@@ -279,36 +278,47 @@ class BookSearchEngine {
     final hits = <BookSearchHit>[];
     var scanned = 0;
     var totalHits = 0;
+    var truncated = false;
     var processedSinceYield = 0;
+    final cpuClock = Stopwatch();
 
     for (final (volTitle, cid, chTitle) in targets) {
       if (cancelToken?.isCancelled == true) {
-        return BookSearchResult(hits: hits, scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, cancelled: true);
+        return BookSearchResult(hits: hits, scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, cancelled: true, truncated: truncated);
       }
 
       String? text;
-      if (scope == BookSearchScope.currentChapter && currentCid == cid && currentChapterText != null) {
+      if (currentCid == cid && currentChapterText != null) {
         text = currentChapterText;
         scanned++;
       } else {
         if (!hasChapter(aid, cid)) continue;
         final content = await loadChapter(aid, cid);
         if (cancelToken?.isCancelled == true) {
-          return BookSearchResult(hits: hits, scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, cancelled: true);
+          return BookSearchResult(hits: hits, scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, cancelled: true, truncated: truncated);
         }
         scanned++;
         if (content != null && content.text.isNotEmpty) {
+          cpuClock.start();
           text = prepareText(content.text);
+          cpuClock.stop();
         }
       }
 
       if (text != null && text.isNotEmpty) {
+        cpuClock.start();
         var chapterHits = 0;
         for (final m in matcher.allMatches(text)) {
           final len = m.end - m.start;
           if (len <= 0) continue;
+          if (hits.length >= maxHits) {
+            truncated = true;
+            if (stopAtMaxHits) break;
+            totalHits++;
+            continue;
+          }
           totalHits++;
-          if (hits.length < maxHits && chapterHits < maxHitsPerChapter) {
+          if (chapterHits < maxHitsPerChapter) {
             final snip = extractSnippet(text, m.start, len);
             hits.add(
               BookSearchHit(
@@ -325,21 +335,42 @@ class BookSearchEngine {
             chapterHits++;
           }
         }
+        cpuClock.stop();
       }
 
+      if (truncated && stopAtMaxHits) break;
+
       processedSinceYield++;
-      if (yieldEvery > 0 && processedSinceYield >= yieldEvery) {
+      final shouldYield = (yieldEvery > 0 && processedSinceYield >= yieldEvery) || cpuClock.elapsedMilliseconds >= 8;
+      if (shouldYield) {
         processedSinceYield = 0;
-        onProgress?.call(BookSearchProgress(scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, hits: List<BookSearchHit>.unmodifiable(hits)));
+        onProgress?.call(
+          BookSearchProgress(
+            scannedChapters: scanned,
+            totalChapters: totalChapters,
+            totalHits: totalHits,
+            hits: List<BookSearchHit>.unmodifiable(hits),
+            truncated: truncated,
+          ),
+        );
         await Future<void>.delayed(Duration.zero);
+        cpuClock.reset();
       }
     }
 
     if (cancelToken?.isCancelled == true) {
-      return BookSearchResult(hits: hits, scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, cancelled: true);
+      return BookSearchResult(hits: hits, scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, cancelled: true, truncated: truncated);
     }
 
-    onProgress?.call(BookSearchProgress(scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, hits: List<BookSearchHit>.unmodifiable(hits)));
-    return BookSearchResult(hits: hits, scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits);
+    onProgress?.call(
+      BookSearchProgress(
+        scannedChapters: scanned,
+        totalChapters: totalChapters,
+        totalHits: totalHits,
+        hits: List<BookSearchHit>.unmodifiable(hits),
+        truncated: truncated,
+      ),
+    );
+    return BookSearchResult(hits: hits, scannedChapters: scanned, totalChapters: totalChapters, totalHits: totalHits, truncated: truncated);
   }
 }

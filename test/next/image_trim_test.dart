@@ -271,9 +271,12 @@ void main() {
 
     final gates = <String, Completer<void>>{};
     final started = <String>[];
+    const slots = ImageStore.maxNet;
+    final allSlotsStarted = Completer<void>();
     final net = _FakeAdapter((o) async {
       final name = o.uri.pathSegments.last;
       started.add(name);
+      if (started.length == slots && !allSlotsStarted.isCompleted) allSlotsStarted.complete();
       final gate = gates[name];
       if (gate != null) await gate.future;
       return ResponseBody.fromBytes(_jpeg(started.length), 200);
@@ -283,17 +286,16 @@ void main() {
     final store = c.read(imageStoreProvider);
 
     // 先占满全部网络槽位（ImageStore.maxNet == 6），再排 2 个低优预取与 1 个高优可见加载
-    const slots = ImageStore.maxNet;
     for (var i = 1; i <= slots; i++) {
       gates['slot$i.jpg'] = Completer<void>();
     }
     final slotFutures = [for (var i = 1; i <= slots; i++) store.load('https://img.example/slot$i.jpg')];
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await allSlotsStarted.future.timeout(const Duration(seconds: 5));
     expect(started, hasLength(slots));
 
     store.prefetch(['https://img.example/pre1.jpg', 'https://img.example/pre2.jpg']);
     final visibleFuture = store.load('https://img.example/visible.jpg');
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
 
     // 取消未开始的预取，仅保留 visible.jpg
     store.cancelPrefetch(['https://img.example/pre1.jpg', 'https://img.example/pre2.jpg']);
@@ -406,9 +408,13 @@ void main() {
 
     final gates = <String, Completer<void>>{};
     final started = <String>[];
+    final allSlotsStarted = Completer<void>();
+    Completer<void>? nextStart;
     final net = _FakeAdapter((o) async {
       final name = o.uri.pathSegments.last;
       started.add(name);
+      if (started.length == ImageStore.maxNet && !allSlotsStarted.isCompleted) allSlotsStarted.complete();
+      if (nextStart case final ns? when !ns.isCompleted) ns.complete();
       final gate = gates[name];
       if (gate != null) await gate.future;
       return ResponseBody.fromBytes(_jpeg(started.length), 200);
@@ -421,21 +427,26 @@ void main() {
       gates['s$i.jpg'] = Completer<void>();
     }
     final slotFutures = [for (var i = 1; i <= ImageStore.maxNet; i++) store.load('https://img.example/s$i.jpg')];
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await allSlotsStarted.future.timeout(const Duration(seconds: 5));
     started.clear();
 
-    // 高优按 h1 → h2 → h3 入队，低优按 l1 → l2 入队
+    // 高优按 h1 → h2 → h3 依次入队，低优按 l1 → l2 依次入队（间隔避开异步 File.exists 线程池乱序）
     final h1 = store.load('https://img.example/h1.jpg');
+    await Future<void>.delayed(const Duration(milliseconds: 25));
     final h2 = store.load('https://img.example/h2.jpg');
+    await Future<void>.delayed(const Duration(milliseconds: 25));
     final h3 = store.load('https://img.example/h3.jpg');
+    await Future<void>.delayed(const Duration(milliseconds: 25));
     final l1 = store.loadWithPriority('https://img.example/l1.jpg', lowPriority: true);
+    await Future<void>.delayed(const Duration(milliseconds: 25));
     final l2 = store.loadWithPriority('https://img.example/l2.jpg', lowPriority: true);
-    await Future<void>.delayed(const Duration(milliseconds: 20));
+    await Future<void>.delayed(const Duration(milliseconds: 25));
 
-    // 逐个释放槽位，验证高优按 LIFO（h3, h2, h1）唤醒，随后低优按 FIFO（l1, l2）唤醒
+    // 逐个释放槽位并等待下一条确定唤醒，验证高优按 LIFO（h3, h2, h1）唤醒，随后低优按 FIFO（l1, l2）唤醒
     for (var i = 1; i <= 5; i++) {
+      nextStart = Completer<void>();
       gates['s$i.jpg']!.complete();
-      await Future<void>.delayed(const Duration(milliseconds: 15));
+      await nextStart.future.timeout(const Duration(seconds: 5));
     }
     gates['s6.jpg']!.complete();
     await Future.wait([...slotFutures, h1, h2, h3, l1, l2]);
@@ -458,11 +469,13 @@ void main() {
       final gate = gates[name];
       if (gate != null) {
         var wasCancelled = false;
-        cancelFuture?.then((_) {
-          wasCancelled = true;
-          cancelledUrls.add(name);
-          if (!gate.isCompleted) gate.complete();
-        });
+        unawaited(
+          cancelFuture?.then((_) {
+            wasCancelled = true;
+            cancelledUrls.add(name);
+            if (!gate.isCompleted) gate.complete();
+          }),
+        );
         await gate.future;
         if (wasCancelled) throw DioException.requestCancelled(requestOptions: o, reason: 'cancelled');
       }

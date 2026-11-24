@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../app_prefs.dart';
+import '../diag_log.dart';
 import '../sync.dart';
 import '../widgets.dart';
 import '../x_list.dart';
@@ -93,6 +94,58 @@ class _SyncPageState extends ConsumerState<SyncPage> {
     } catch (e) {
       if (mounted) setState(() => _note = '导入失败：$e');
     }
+  }
+
+  Future<void> _pullOnly() async {
+    setState(() {
+      _busy = true;
+      _note = null;
+    });
+    try {
+      await _save();
+      final n = await Sync.pullOnly();
+      _note = n == 0 ? '拉取完成，暂无其他设备快照' : '已拉取并合并 $n 台设备的数据';
+    } catch (e) {
+      _note = '拉取失败：$e';
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _pushOnly() async {
+    setState(() {
+      _busy = true;
+      _note = null;
+    });
+    try {
+      await _save();
+      await Sync.pushOnly();
+      _note = '已上传本机快照';
+    } catch (e) {
+      _note = '上传失败：$e';
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _copyDiagnostics() async {
+    final local = Sync.localDiagnostics();
+    final last = Sync.lastDiag;
+    final report = DiagLog.dump(
+      meta: {
+        'SyncConfigured': Sync.configured,
+        'DeviceId': local.deviceId,
+        'LastSyncMs': local.lastSync,
+        'PendingShelfOps': local.pendingOps,
+        'Tombstones': local.tombCount,
+        if (last != null) ...{
+          'LastRunMerged': last.merged,
+          'LastRunSkipped': last.skipped.join(', '),
+          'LastRunFailed': last.failed.join(', '),
+          if (last.error != null) 'LastRunError': last.error,
+        },
+      },
+    );
+    await Clipboard.setData(ClipboardData(text: report));
+    if (mounted) setState(() => _note = '已复制脱敏同步诊断信息');
   }
 
   @override
@@ -232,6 +285,48 @@ class _SyncPageState extends ConsumerState<SyncPage> {
           const XGroupTitle('手动同步快照'),
           XTile(leading: const XLeading(icon: Icons.upload_outlined), title: '导出同步快照（JSON）', subtitle: '不含离线正文与扩展包；完整备份请到「设置 → 数据与存储」', onTap: _export),
           XTile(leading: const XLeading(icon: Icons.download_outlined), title: '导入同步快照', subtitle: '合并到本机，不覆盖现有进度和统计', onTap: _import),
+          const XDivider(),
+          const XGroupTitle('同步诊断与修复'),
+          () {
+            final d = Sync.localDiagnostics();
+            final ld = Sync.lastDiag;
+            final summary = [
+              '设备编号：${d.deviceId.isEmpty ? '首次同步时生成' : (d.deviceId.length > 10 ? '${d.deviceId.substring(0, 10)}…' : d.deviceId)}',
+              '待回放书架操作：${d.pendingOps}',
+              '删除墓碑：${d.tombCount}',
+              if (ld != null) '最近结果：合并 ${ld.merged} 台${ld.skipped.isNotEmpty ? ' · 跳过 ${ld.skipped.length}' : ''}${ld.failed.isNotEmpty ? ' · 失败 ${ld.failed.length}' : ''}',
+            ].join('  ·  ');
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                XNote(summary),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 4),
+                  child: Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: busy || !Sync.configured ? null : _pullOnly,
+                        icon: const Icon(Icons.cloud_download_outlined, size: 17),
+                        label: const Text('仅拉取合并'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: busy || !Sync.configured ? null : _pushOnly,
+                        icon: const Icon(Icons.cloud_upload_outlined, size: 17),
+                        label: const Text('仅上传本机'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _copyDiagnostics,
+                        icon: const Icon(Icons.bug_report_outlined, size: 17),
+                        label: const Text('复制诊断信息'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          }(),
         ],
       )),
     );

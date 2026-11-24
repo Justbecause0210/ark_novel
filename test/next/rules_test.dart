@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ark_novel/next/rules.dart';
+import 'package:hive_ce/hive.dart';
 
 void main() {
   test('按顺序套用规则，支持分组引用', () {
@@ -47,5 +50,42 @@ void main() {
     expect([for (final m in ReplaceRules.marks('林云云海', rules, '1')) (m.rule.id, m.rule.kind)], [('a', RuleKind.color), ('b', RuleKind.highlight)]);
     expect([for (final m in ReplaceRules.marks('林云云海', rules, '2')) m.rule.id], ['a']);
     expect(ReplaceRules.apply('林云', rules), '林云');
+  });
+
+  test('ReplaceRules.allView 缓存同一引用并在 save / notifyChanged 时刷新与通知', () async {
+    final dir = Directory.systemTemp.createTempSync('ark_rules_cache_test');
+    Hive.init(dir.path);
+    await Hive.openBox('session');
+    addTearDown(() async {
+      await Hive.close();
+      if (dir.existsSync()) dir.deleteSync(recursive: true);
+    });
+
+    final beforeVer = ReplaceRules.changes.value;
+    await ReplaceRules.save(const [ReplaceRule(pattern: '旧词', replacement: '新词', id: 'r1')]);
+    expect(ReplaceRules.changes.value, beforeVer + 1);
+
+    final v1 = ReplaceRules.allView();
+    final v2 = ReplaceRules.allView();
+    expect(identical(v1, v2), isTrue);
+    expect(v1.single.pattern, '旧词');
+
+    // all() 返回独立可变副本，修改不影响缓存
+    final copy = ReplaceRules.all()..clear();
+    expect(copy, isEmpty);
+    expect(ReplaceRules.allView().length, 1);
+
+    // 外部直接写入新列表也能自动失效缓存
+    await Hive.box('session').put('rules', [
+      {'p': '同步词', 'r': '替换', 'e': true, 'k': 0, 'c': 0xFFE53935, 'n': '', 'a': '', 'id': 'r2', 'ts': 1},
+    ]);
+    ReplaceRules.notifyChanged();
+    expect(ReplaceRules.changes.value, beforeVer + 2);
+    expect(ReplaceRules.allView().single.pattern, '同步词');
+
+    // 删除 rules 键（变为 null）后 notifyChanged 必须返回空列表，不能命中旧缓存
+    await Hive.box('session').delete('rules');
+    ReplaceRules.notifyChanged();
+    expect(ReplaceRules.allView(), isEmpty);
   });
 }

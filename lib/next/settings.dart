@@ -63,10 +63,16 @@ void applyOrientation(int v) => SystemChrome.setPreferredOrientations(switch (v)
 
 /// 阅读器的外观和翻页方式。
 class ReaderPrefs {
-  const ReaderPrefs({this.fontSize = 18, this.lineHeight = 1.8, this.theme = 5, this.mode = 3, this.ttsRate = 0.5, this.margin = 22, this.font = 1, this.ttsPitch = 1.0, this.ttsVoice = '', this.ttsHighlight = true, this.ttsAutoNext = true, this.dual = true, this.dim = 0, this.volumeKeys = true, this.tapZone = 0, this.tapInvert = 0, this.keepScreenOn = true, this.fullscreen = true, this.showStatus = true, this.skipRead = false, this.chapterToast = false, this.warm = 0, this.grayscale = false, this.invert = false, this.customBrightness = false, this.brightness = 0.5, this.volumeInvert = false, this.pageAnim = true, this.prefetch = 2, this.prefetchWifi = false, this.prefetchBook = false, this.hant = false, this.autoScrollSpeed = 60, this.autoTurnSeconds = 8, this.bgTexture = 0, this.bgImageOpacity = 0.35, this.headerLeft = 1, this.headerRight = 0, this.footerLeft = 3, this.footerRight = 4});
+  const ReaderPrefs({this.fontSize = 18, this.lineHeight = 1.8, this.letterSpacing = 0, this.paragraphSpacing = 0, this.theme = 5, this.mode = 3, this.ttsRate = 0.5, this.margin = 22, this.font = 1, this.ttsPitch = 1.0, this.ttsVoice = '', this.ttsHighlight = true, this.ttsAutoNext = true, this.dual = true, this.dim = 0, this.volumeKeys = true, this.tapZone = 0, this.tapInvert = 0, this.keepScreenOn = true, this.fullscreen = true, this.showStatus = true, this.skipRead = false, this.chapterToast = false, this.warm = 0, this.grayscale = false, this.invert = false, this.customBrightness = false, this.brightness = 0.5, this.volumeInvert = false, this.pageAnim = true, this.prefetch = 2, this.prefetchWifi = false, this.prefetchBook = false, this.hant = false, this.autoScrollSpeed = 60, this.autoTurnSeconds = 8, this.bgTexture = 0, this.bgImageOpacity = 0.35, this.headerLeft = 1, this.headerRight = 0, this.footerLeft = 3, this.footerRight = 4});
 
   final double fontSize;
   final double lineHeight;
+
+  /// 字间距（-0.5 ~ 4.0 px，0 为默认）
+  final double letterSpacing;
+
+  /// 段间距（0 ~ 24 px，0 为紧邻换行）
+  final double paragraphSpacing;
 
   /// 阅读背景：0 纸张 1 护眼 2 夜间 3 跟随应用
   final int theme;
@@ -164,9 +170,11 @@ class ReaderPrefs {
   final int footerLeft;
   final int footerRight;
 
-  ReaderPrefs copyWith({double? fontSize, double? lineHeight, int? theme, int? mode, double? ttsRate, double? margin, int? font, double? ttsPitch, String? ttsVoice, bool? ttsHighlight, bool? ttsAutoNext, bool? dual, double? dim, bool? volumeKeys, int? tapZone, int? tapInvert, bool? keepScreenOn, bool? fullscreen, bool? showStatus, bool? skipRead, bool? chapterToast, double? warm, bool? grayscale, bool? invert, bool? customBrightness, double? brightness, bool? volumeInvert, bool? pageAnim, int? prefetch, bool? prefetchWifi, bool? prefetchBook, bool? hant, double? autoScrollSpeed, int? autoTurnSeconds, int? bgTexture, double? bgImageOpacity, int? headerLeft, int? headerRight, int? footerLeft, int? footerRight}) => ReaderPrefs(
+  ReaderPrefs copyWith({double? fontSize, double? lineHeight, double? letterSpacing, double? paragraphSpacing, int? theme, int? mode, double? ttsRate, double? margin, int? font, double? ttsPitch, String? ttsVoice, bool? ttsHighlight, bool? ttsAutoNext, bool? dual, double? dim, bool? volumeKeys, int? tapZone, int? tapInvert, bool? keepScreenOn, bool? fullscreen, bool? showStatus, bool? skipRead, bool? chapterToast, double? warm, bool? grayscale, bool? invert, bool? customBrightness, double? brightness, bool? volumeInvert, bool? pageAnim, int? prefetch, bool? prefetchWifi, bool? prefetchBook, bool? hant, double? autoScrollSpeed, int? autoTurnSeconds, int? bgTexture, double? bgImageOpacity, int? headerLeft, int? headerRight, int? footerLeft, int? footerRight}) => ReaderPrefs(
     fontSize: fontSize ?? this.fontSize,
     lineHeight: lineHeight ?? this.lineHeight,
+    letterSpacing: letterSpacing ?? this.letterSpacing,
+    paragraphSpacing: paragraphSpacing ?? this.paragraphSpacing,
     theme: theme ?? this.theme,
     mode: mode ?? this.mode,
     ttsRate: ttsRate ?? this.ttsRate,
@@ -213,6 +221,8 @@ class ReaderPrefs {
       other is ReaderPrefs &&
           fontSize == other.fontSize &&
           lineHeight == other.lineHeight &&
+          letterSpacing == other.letterSpacing &&
+          paragraphSpacing == other.paragraphSpacing &&
           theme == other.theme &&
           mode == other.mode &&
           ttsRate == other.ttsRate &&
@@ -254,7 +264,7 @@ class ReaderPrefs {
 
   @override
   int get hashCode => Object.hashAll([
-    fontSize, lineHeight, theme, mode, ttsRate, margin, font, ttsPitch, ttsVoice, ttsHighlight, ttsAutoNext,
+    fontSize, lineHeight, letterSpacing, paragraphSpacing, theme, mode, ttsRate, margin, font, ttsPitch, ttsVoice, ttsHighlight, ttsAutoNext,
     dual, dim, volumeKeys, tapZone, tapInvert, keepScreenOn, fullscreen, showStatus, skipRead, chapterToast,
     warm, grayscale, invert, customBrightness, brightness, volumeInvert, pageAnim, prefetch, prefetchWifi, prefetchBook, hant,
     autoScrollSpeed, autoTurnSeconds, bgTexture, bgImageOpacity, headerLeft, headerRight, footerLeft, footerRight,
@@ -266,6 +276,8 @@ class ReaderPrefsController extends Notifier<ReaderPrefs> {
   ReaderPrefs build() => ReaderPrefs(
     fontSize: (_box.get('r.fontSize') as num?)?.toDouble() ?? 18,
     lineHeight: (_box.get('r.lineHeight') as num?)?.toDouble() ?? 1.8,
+    letterSpacing: ((_box.get('r.letterSpacing') as num?)?.toDouble() ?? 0).clamp(-0.5, 4.0),
+    paragraphSpacing: ((_box.get('r.paragraphSpacing') as num?)?.toDouble() ?? 0).clamp(0.0, 24.0),
     theme: (_box.get('r.theme') as int?) ?? 5,
     mode: (_box.get('r.mode') as int?) ?? 3,
     ttsRate: (_box.get('r.ttsRate') as num?)?.toDouble() ?? 0.5,
@@ -307,7 +319,7 @@ class ReaderPrefsController extends Notifier<ReaderPrefs> {
   );
 
   void update(ReaderPrefs next) {
-    _box.putAll({'r.fontSize': next.fontSize, 'r.lineHeight': next.lineHeight, 'r.theme': next.theme, 'r.mode': next.mode, 'r.ttsRate': next.ttsRate, 'r.margin': next.margin, 'r.font': next.font, 'r.ttsPitch': next.ttsPitch, 'r.ttsVoice': next.ttsVoice, 'r.ttsHighlight': next.ttsHighlight, 'r.ttsAutoNext': next.ttsAutoNext, 'r.dual': next.dual, 'r.dim': next.dim, 'r.volumeKeys': next.volumeKeys, 'r.tapZone': next.tapZone, 'r.tapInvert': next.tapInvert, 'r.keepScreenOn': next.keepScreenOn, 'r.fullscreen': next.fullscreen, 'r.showStatus': next.showStatus, 'r.skipRead': next.skipRead, 'r.chapterToast': next.chapterToast, 'r.warm': next.warm, 'r.grayscale': next.grayscale, 'r.invert': next.invert, 'r.customBrightness': next.customBrightness, 'r.brightness': next.brightness, 'r.volumeInvert': next.volumeInvert, 'r.pageAnim': next.pageAnim, 'r.prefetch': next.prefetch, 'r.prefetchWifi': next.prefetchWifi, 'r.prefetchBook': next.prefetchBook, 'r.hant': next.hant, 'r.autoScrollSpeed': next.autoScrollSpeed, 'r.autoTurnSeconds': next.autoTurnSeconds, 'r.bgTexture': next.bgTexture, 'r.bgImageOpacity': next.bgImageOpacity, 'r.headerLeft': next.headerLeft, 'r.headerRight': next.headerRight, 'r.footerLeft': next.footerLeft, 'r.footerRight': next.footerRight, 'sync:readerTs': DateTime.now().millisecondsSinceEpoch});
+    _box.putAll({'r.fontSize': next.fontSize, 'r.lineHeight': next.lineHeight, 'r.letterSpacing': next.letterSpacing, 'r.paragraphSpacing': next.paragraphSpacing, 'r.theme': next.theme, 'r.mode': next.mode, 'r.ttsRate': next.ttsRate, 'r.margin': next.margin, 'r.font': next.font, 'r.ttsPitch': next.ttsPitch, 'r.ttsVoice': next.ttsVoice, 'r.ttsHighlight': next.ttsHighlight, 'r.ttsAutoNext': next.ttsAutoNext, 'r.dual': next.dual, 'r.dim': next.dim, 'r.volumeKeys': next.volumeKeys, 'r.tapZone': next.tapZone, 'r.tapInvert': next.tapInvert, 'r.keepScreenOn': next.keepScreenOn, 'r.fullscreen': next.fullscreen, 'r.showStatus': next.showStatus, 'r.skipRead': next.skipRead, 'r.chapterToast': next.chapterToast, 'r.warm': next.warm, 'r.grayscale': next.grayscale, 'r.invert': next.invert, 'r.customBrightness': next.customBrightness, 'r.brightness': next.brightness, 'r.volumeInvert': next.volumeInvert, 'r.pageAnim': next.pageAnim, 'r.prefetch': next.prefetch, 'r.prefetchWifi': next.prefetchWifi, 'r.prefetchBook': next.prefetchBook, 'r.hant': next.hant, 'r.autoScrollSpeed': next.autoScrollSpeed, 'r.autoTurnSeconds': next.autoTurnSeconds, 'r.bgTexture': next.bgTexture, 'r.bgImageOpacity': next.bgImageOpacity, 'r.headerLeft': next.headerLeft, 'r.headerRight': next.headerRight, 'r.footerLeft': next.footerLeft, 'r.footerRight': next.footerRight, 'sync:readerTs': DateTime.now().millisecondsSinceEpoch});
     state = next;
   }
 }

@@ -250,7 +250,7 @@ class CachePage extends ConsumerWidget {
                               : PopupMenuButton<String>(
                                   onSelected: (v) async {
                                     if (v == 'manage') {
-                                      context.push(Routes.cacheBook(b.key));
+                                      await context.push(Routes.cacheBook(b.key));
                                     } else {
                                       final title = LibraryStore.shown(b.key, b.value.$1);
                                       final ok = await showDialog<bool>(

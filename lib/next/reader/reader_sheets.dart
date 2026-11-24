@@ -1,7 +1,8 @@
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart' hide Text;
-import 'package:flutter/services.dart' show MethodChannel;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData, MethodChannel;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
 
 import '../../models/cat_chapter.dart';
 import '../../models/cat_volume.dart';
@@ -9,6 +10,7 @@ import '../bookmarks.dart';
 import '../cache.dart';
 import '../env.dart';
 import '../fonts.dart';
+import '../highlights.dart';
 import '../read_state.dart';
 import '../rules.dart';
 import '../settings.dart';
@@ -200,10 +202,11 @@ class ReaderTtsBar extends StatelessWidget {
   }
 }
 
-/// 打开目录 / 书签 / 备注弹窗（统一套用阅读器当前明暗主题，三个分页均支持下拉关闭，目录按展开态懒构建）。
+/// 打开目录 / 书签 / 摘录 / 备注弹窗（统一套用阅读器当前明暗主题，支持下拉关闭，目录按展开态懒构建）。
 Future<void> showReaderCatalogueSheet(
   BuildContext context, {
   required String aid,
+  String bookTitle = '',
   required List<CatVolume> volumes,
   required String currentCid,
   required ReaderPalette palette,
@@ -211,9 +214,12 @@ Future<void> showReaderCatalogueSheet(
   required Future<(int, int)?> Function(BuildContext ctx, Bookmark b) resolveBookmarkPage,
   required void Function(String cid) onSelectChapter,
   required void Function(Bookmark b) onSelectBookmark,
+  void Function(HighlightEntry h)? onSelectHighlight,
+  void Function(HighlightEntry h)? onEditHighlight,
   required void Function(ReplaceRule rule) onEditNote,
   VoidCallback? onOpenCharacters,
   VoidCallback? onBookmarksChanged,
+  VoidCallback? onHighlightsChanged,
 }) {
   final sheetTheme = readerThemeData(Theme.of(context), palette, accent);
   return showModalBottomSheet<void>(
@@ -228,15 +234,19 @@ Future<void> showReaderCatalogueSheet(
         initialChildSize: 0.75,
         builder: (sheetCtx, scroll) => _ReaderCatalogueSheet(
           aid: aid,
+          bookTitle: bookTitle,
           volumes: volumes,
           currentCid: currentCid,
           scrollController: scroll,
           resolveBookmarkPage: resolveBookmarkPage,
           onSelectChapter: onSelectChapter,
           onSelectBookmark: onSelectBookmark,
+          onSelectHighlight: onSelectHighlight,
+          onEditHighlight: onEditHighlight,
           onEditNote: onEditNote,
           onOpenCharacters: onOpenCharacters,
           onBookmarksChanged: onBookmarksChanged,
+          onHighlightsChanged: onHighlightsChanged,
         ),
       ),
     ),
@@ -263,34 +273,42 @@ class _ChapterRow extends _CatRow {
 class _ReaderCatalogueSheet extends StatefulWidget {
   const _ReaderCatalogueSheet({
     required this.aid,
+    required this.bookTitle,
     required this.volumes,
     required this.currentCid,
     required this.scrollController,
     required this.resolveBookmarkPage,
     required this.onSelectChapter,
     required this.onSelectBookmark,
+    this.onSelectHighlight,
+    this.onEditHighlight,
     required this.onEditNote,
     this.onOpenCharacters,
     this.onBookmarksChanged,
+    this.onHighlightsChanged,
   });
 
   final String aid;
+  final String bookTitle;
   final List<CatVolume> volumes;
   final String currentCid;
   final ScrollController scrollController;
   final Future<(int, int)?> Function(BuildContext ctx, Bookmark b) resolveBookmarkPage;
   final void Function(String cid) onSelectChapter;
   final void Function(Bookmark b) onSelectBookmark;
+  final void Function(HighlightEntry h)? onSelectHighlight;
+  final void Function(HighlightEntry h)? onEditHighlight;
   final void Function(ReplaceRule rule) onEditNote;
   final VoidCallback? onOpenCharacters;
   final VoidCallback? onBookmarksChanged;
+  final VoidCallback? onHighlightsChanged;
 
   @override
   State<_ReaderCatalogueSheet> createState() => _ReaderCatalogueSheetState();
 }
 
 class _ReaderCatalogueSheetState extends State<_ReaderCatalogueSheet> with SingleTickerProviderStateMixin {
-  late final TabController _tabs = TabController(length: 3, vsync: this)..addListener(_onTabChanged);
+  late final TabController _tabs = TabController(length: 4, vsync: this)..addListener(_onTabChanged);
   final _currentKey = GlobalKey();
   late final Set<int> _expanded;
   int _tab = 0;
@@ -463,6 +481,107 @@ class _ReaderCatalogueSheetState extends State<_ReaderCatalogueSheet> with Singl
                   );
                 },
               );
+      case 2:
+        final excerpts = HighlightStore.all(widget.aid);
+        body = excerpts.isEmpty
+            ? ListView(
+                key: const ValueKey('highlights-empty'),
+                controller: widget.scrollController,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 100, 24, 24),
+                    child: Text('还没有摘录。\n选中正文点击「划线摘录」即可收藏句子并写下想法，支持导出 Markdown。', textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
+                  ),
+                ],
+              )
+            : ListView.builder(
+                key: const ValueKey('highlights'),
+                controller: widget.scrollController,
+                itemCount: excerpts.length + 1,
+                itemBuilder: (context, i) {
+                  if (i == 0) {
+                    return Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                      child: Row(
+                        children: [
+                          Text('共 ${excerpts.length} 条摘录', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+                          const Spacer(),
+                          TextButton.icon(
+                            style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+                            icon: const Icon(Icons.copy_outlined, size: 16),
+                            label: const Text('复制 Markdown'),
+                            onPressed: () async {
+                              final md = HighlightStore.exportMarkdown(widget.aid, widget.bookTitle);
+                              await Clipboard.setData(ClipboardData(text: md));
+                              if (context.mounted) {
+                                ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(content: Text('已复制 Markdown 摘录'), duration: Duration(seconds: 1)));
+                              }
+                            },
+                          ),
+                          TextButton.icon(
+                            style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+                            icon: const Icon(Icons.ios_share_outlined, size: 16),
+                            label: const Text('分享'),
+                            onPressed: () {
+                              final md = HighlightStore.exportMarkdown(widget.aid, widget.bookTitle);
+                              SharePlus.instance.share(ShareParams(text: md)).ignore();
+                            },
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                  final h = excerpts[i - 1];
+                  final barColor = Color(h.colorValue);
+                  return ListTile(
+                    leading: Container(
+                      width: 4,
+                      height: 36,
+                      decoration: BoxDecoration(color: barColor, borderRadius: BorderRadius.circular(2)),
+                    ),
+                    title: Text(h.quote, maxLines: 2, overflow: TextOverflow.ellipsis),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (h.note.trim().isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text(h.note.trim(), maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(color: scheme.onSurface.withValues(alpha: 0.85))),
+                          ),
+                        Text(h.chapter, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+                      ],
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (widget.onEditHighlight != null)
+                          IconButton(
+                            tooltip: hz(context, '编辑摘录'),
+                            icon: Icon(Icons.edit_outlined, size: 18, color: scheme.onSurfaceVariant),
+                            onPressed: () {
+                              Navigator.pop(context);
+                              widget.onEditHighlight!(h);
+                            },
+                          ),
+                        IconButton(
+                          tooltip: hz(context, '删除摘录'),
+                          icon: Icon(Icons.delete_outline, size: 18, color: scheme.onSurfaceVariant),
+                          onPressed: () async {
+                            await HighlightStore.remove(h.id);
+                            if (mounted) setState(() {});
+                            widget.onHighlightsChanged?.call();
+                          },
+                        ),
+                      ],
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      widget.onSelectHighlight?.call(h);
+                    },
+                  );
+                },
+              );
       default:
         final notes = RuleNotes.of(widget.aid);
         final rules = ReplaceRules.all().where((r) => r.kind == RuleKind.highlight && notes.containsKey(r.id) && (r.aid.isEmpty || r.aid == widget.aid)).toList();
@@ -524,7 +643,7 @@ class _ReaderCatalogueSheetState extends State<_ReaderCatalogueSheet> with Singl
       children: [
         TabBar(
           controller: _tabs,
-          tabs: const [Tab(child: Text('目录')), Tab(child: Text('书签')), Tab(child: Text('备注'))],
+          tabs: const [Tab(child: Text('目录')), Tab(child: Text('书签')), Tab(child: Text('摘录')), Tab(child: Text('备注'))],
         ),
         Expanded(child: body),
       ],
@@ -798,6 +917,8 @@ Future<void> showReaderSettingsSheet(
                                 if (currentTab == 1) ...[
                                   _LayoutSlider(title: '字号', label: (v) => '${v.round()}', min: 14, max: 32, divisions: 18, value: prefs.fontSize, onCommit: (v) => set(prefs.copyWith(fontSize: v))),
                                   _LayoutSlider(title: '行距', label: (v) => v.toStringAsFixed(1), min: 1.3, max: 2.4, divisions: 11, value: prefs.lineHeight, onCommit: (v) => set(prefs.copyWith(lineHeight: v))),
+                                  _LayoutSlider(title: '字间距', label: (v) => v == 0 ? '默认' : v.toStringAsFixed(1), min: -0.5, max: 4.0, divisions: 18, value: prefs.letterSpacing, onCommit: (v) => set(prefs.copyWith(letterSpacing: v))),
+                                  _LayoutSlider(title: '段间距', label: (v) => v <= 0 ? '紧排' : '${v.round()}', min: 0, max: 24, divisions: 12, value: prefs.paragraphSpacing, onCommit: (v) => set(prefs.copyWith(paragraphSpacing: v))),
                                   _LayoutSlider(title: '页边距', label: (v) => '${v.round()}', min: 8, max: 48, divisions: 20, value: prefs.margin, onCommit: (v) => set(prefs.copyWith(margin: v))),
                                   XChips<int>(
                                     title: '字体',

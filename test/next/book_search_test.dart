@@ -5,9 +5,7 @@ import 'package:ark_novel/models/cat_volume.dart';
 import 'package:ark_novel/models/content.dart';
 import 'package:ark_novel/next/book_search.dart';
 import 'package:ark_novel/next/cache.dart';
-import 'package:ark_novel/next/epub_codec.dart';
 import 'package:ark_novel/next/hant.dart';
-import 'package:ark_novel/next/local_books.dart';
 import 'package:ark_novel/next/pages/book_search_sheet.dart';
 import 'package:ark_novel/next/reader/reader_page.dart' show formatChapter;
 import 'package:flutter/material.dart';
@@ -188,6 +186,37 @@ void main() {
       expect(res.cancelled, isTrue);
       expect(res.scannedChapters, lessThan(3));
     });
+
+    test('全书模式复用 currentChapterText，且达到 maxHits 后早停避免扫描剩余章节', () async {
+      var loadedCids = <String>[];
+      final manyVols = [
+        CatVolume(
+          title: '第一卷',
+          chapters: [for (var i = 1; i <= 10; i++) CatChapter(title: '第 $i 章', cid: 'm$i')],
+        ),
+      ];
+      final res = await BookSearchEngine.search(
+        aid: '1',
+        catalogue: manyVols,
+        query: '测试',
+        scope: BookSearchScope.allCached,
+        currentCid: 'm1',
+        currentChapterText: formatChapterText('测试 测试 测试'),
+        maxHits: 5,
+        maxHitsPerChapter: 50,
+        applyReplaceRules: false,
+        isCached: (_, _) => true,
+        chapterLoader: (_, cid) async {
+          loadedCids.add(cid);
+          return Content(text: '测试 测试 测试', images: const []);
+        },
+      );
+
+      expect(loadedCids, isNot(contains('m1'))); // 当前章直接复用 currentChapterText
+      expect(res.truncated, isTrue);
+      expect(res.hits.length, 5);
+      expect(res.scannedChapters, lessThan(10)); // 命中满额后提前早停
+    });
   });
 
   group('showBookSearchSheet 交互', () {
@@ -253,48 +282,6 @@ void main() {
       expect(picked!.cid, 'c4');
       final formatted = formatChapterText(store['c4']!.text);
       expect(formatted.substring(picked!.offset, picked!.offset + picked!.matchLength), '八奈见杏菜');
-    });
-
-    test('本地书籍（local:）默认走 LocalBooks 读取正文并检索', () async {
-      final localDir = Directory('${tmp.path}/local_books');
-      LocalBooks.rootProvider = () async => localDir;
-      addTearDown(() {
-        LocalBooks.rootProvider = null;
-        LocalBooks.clearMemoryCache();
-      });
-
-      final meta = await LocalBooks.saveParsed(
-        const ParsedBook(
-          title: '本地轻小说测试',
-          author: '测试作者',
-          description: '',
-          volumes: [
-            EpubVolumeData(
-              title: '第一卷',
-              chapters: [
-                EpubChapterData(title: '第一章', text: '放学后，八奈见杏菜在社办吃点心。'),
-                EpubChapterData(title: '第二章', text: '没有关键词的章节。'),
-              ],
-            ),
-          ],
-        ),
-        format: 'txt',
-        aid: 'local:search_test_1',
-      );
-
-      final res = await BookSearchEngine.search(
-        aid: meta.aid,
-        catalogue: meta.catalogue,
-        query: '八奈见杏菜',
-        scope: BookSearchScope.allCached,
-        applyReplaceRules: false,
-      );
-
-      expect(res.error, isNull);
-      expect(res.scannedChapters, 2);
-      expect(res.totalChapters, 2);
-      expect(res.totalHits, 1);
-      expect(res.hits.single.cid, meta.catalogue.first.chapters.first.cid);
     });
   });
 }

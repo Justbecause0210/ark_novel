@@ -3,7 +3,7 @@ import 'dart:math' as math;
 
 import 'package:battery_plus/battery_plus.dart';
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
+import 'package:flutter/foundation.dart' show ValueListenable, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/gestures.dart' show PointerDeviceKind, PointerPanZoomUpdateEvent, PointerScrollEvent, PointerScrollInertiaCancelEvent, PointerSignalEvent;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart';
@@ -19,6 +19,7 @@ import '../../models/cat_volume.dart';
 import '../../models/content.dart';
 import '../app_prefs.dart';
 import '../book_search.dart';
+export '../book_search.dart' show halfWidth;
 import '../bookmarks.dart';
 import '../cache.dart';
 import '../characters.dart';
@@ -27,11 +28,11 @@ import '../data.dart';
 import '../env.dart';
 import '../fonts.dart';
 import '../hant.dart';
+import '../highlights.dart';
 import '../history.dart';
 import '../image_cache.dart' show ImageStore, imageStoreProvider;
 import '../incognito.dart';
 import '../library.dart' show LibraryStore;
-import '../local_books.dart' show LocalBooks, isLocalAid;
 import '../net_state.dart';
 import '../pages/book_search_sheet.dart';
 import '../pages/characters_page.dart';
@@ -59,244 +60,8 @@ import 'reader_sheets.dart';
 import 'reader_tts.dart';
 import 'volume_done.dart';
 
-/// 每个非空行当一段：去掉网页里零散的空白，统一首行缩进两个全角空格；全角英文、数字转半角。
-String formatChapter(String raw) => halfWidth(raw).split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).map((l) => '　　$l').join('\n');
-
-/// 「Ｄｉｖｅ　Ｍａｓｓｉｖｅｌｙ」这种全角英文每个字母占一个汉字宽，排出来字距很怪：字母、数字转半角，
-/// 英文之间的全角空格、连字符也换成半角。一个字换一个字，阅读进度、书签的位置不变。
-String halfWidth(String s) => s
-    .replaceAllMapped(RegExp('[０-９Ａ-Ｚａ-ｚ]'), (m) => String.fromCharCode(m[0]!.codeUnitAt(0) - 0xFEE0))
-    .replaceAllMapped(RegExp(r'(?<=[0-9A-Za-z])[　－](?=[0-9A-Za-z])'), (m) => m[0] == '　' ? ' ' : '-');
-
-/// 将暖色 / 灰度 / 反色滤镜合成为单个 4×5 颜色矩阵（全关闭时返回 null），避免叠加多层全屏 `ColorFiltered` saveLayer。
-List<double>? combineReaderColorMatrix({required double warm, required bool grayscale, required bool invert}) {
-  if (warm <= 0 && !grayscale && !invert) return null;
-  var m = <double>[1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0];
-  List<double> mul(List<double> b, List<double> a) {
-    final out = List<double>.filled(20, 0);
-    for (var r = 0; r < 4; r++) {
-      for (var c = 0; c < 4; c++) {
-        out[r * 5 + c] = b[r * 5] * a[c] + b[r * 5 + 1] * a[5 + c] + b[r * 5 + 2] * a[10 + c] + b[r * 5 + 3] * a[15 + c];
-      }
-      out[r * 5 + 4] = b[r * 5 + 4] + b[r * 5] * a[4] + b[r * 5 + 1] * a[9] + b[r * 5 + 2] * a[14] + b[r * 5 + 3] * a[19];
-    }
-    return out;
-  }
-
-  if (warm > 0) {
-    m = mul([1, 0, 0, 0, 0, 0, 1 - 0.6 * warm, 0, 0, 0, 0, 0, 1 - 1.4 * warm, 0, 0, 0, 0, 0, 1, 0], m);
-  }
-  if (grayscale) {
-    m = mul(const [0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0.2126, 0.7152, 0.0722, 0, 0, 0, 0, 0, 1, 0], m);
-  }
-  if (invert) {
-    m = mul(const [-1, 0, 0, 0, 255, 0, -1, 0, 0, 255, 0, 0, -1, 0, 255, 0, 0, 0, 1, 0], m);
-  }
-  return m;
-}
-
-/// 滚轮 / macOS 触控板惯性防连翻过滤器：
-/// 1. 同一手势内累计位移达到阈值才触发一次翻页，避免微小抖动误触；
-/// 2. 触发后进入单次手势锁：只要事件间隔小于 [gestureGap]、方向不变且未出现明显的新一轮加速峰值，
-///    持续 1~2 秒的惯性衰减流全部去重吞掉，保证单次双指轻滑最多翻 1 页；
-/// 3. 离散鼠标滚轮（事件间隔超过 [gestureGap]）或方向反转时立即解锁，保留干脆的滚轮翻页手感。
-class ScrollWheelTurnFilter {
-  ScrollWheelTurnFilter({
-    this.threshold = 28.0,
-    this.gestureGap = const Duration(milliseconds: 140),
-    this.cooldown = const Duration(milliseconds: 220),
-  });
-
-  final double threshold;
-  final Duration gestureGap;
-  final Duration cooldown;
-
-  DateTime _lastEventAt = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime _lastTurnAt = DateTime.fromMillisecondsSinceEpoch(0);
-  double _accum = 0;
-  int _dir = 0;
-  bool _locked = false;
-  double _minAfterTurn = double.infinity;
-
-  /// 输入一次滚动增量（[delta] > 0 下一页，< 0 上一页）与时间戳 [now]；
-  /// 返回 1（下一页）、-1（上一页）或 0（忽略/继续累计）。
-  int feed(double delta, DateTime now, {PointerDeviceKind kind = PointerDeviceKind.mouse}) {
-    if (delta == 0) return 0;
-    final dir = delta > 0 ? 1 : -1;
-    final abs = delta.abs();
-    final gap = now.difference(_lastEventAt);
-    _lastEventAt = now;
-
-    if (gap >= gestureGap || dir != _dir) {
-      _locked = false;
-      _accum = 0;
-      _dir = dir;
-      _minAfterTurn = double.infinity;
-    }
-
-    if (_locked) {
-      if (abs < _minAfterTurn) {
-        _minAfterTurn = abs;
-      } else if (now.difference(_lastTurnAt) >= cooldown && _minAfterTurn <= 6 && abs >= _minAfterTurn * 3 + 18) {
-        _locked = false;
-        _accum = 0;
-        _minAfterTurn = double.infinity;
-      } else {
-        return 0;
-      }
-    }
-
-    if (now.difference(_lastTurnAt) < cooldown) return 0;
-
-    _accum += abs;
-    final effectiveThreshold = kind == PointerDeviceKind.trackpad ? threshold : (gap >= gestureGap ? math.min(threshold, 16.0) : threshold);
-    if (_accum < effectiveThreshold) return 0;
-
-    _locked = true;
-    _accum = 0;
-    _lastTurnAt = now;
-    _minAfterTurn = abs;
-    return dir;
-  }
-
-  void reset() {
-    _locked = false;
-    _accum = 0;
-    _dir = 0;
-    _minAfterTurn = double.infinity;
-  }
-}
-
-/// 联网取单章原文（支持 [CancelToken] 在切章/退出阅读器时立即取消在途或排队请求）。
-Future<Content> _fetchChapterRaw(
-  Wenku8Client client,
-  Wenku8Urls urls,
-  UnlockService unlock,
-  Future<List<CatVolume>> Function(CancelToken? cancel) catalogue,
-  String aid,
-  String cid, {
-  CancelToken? cancelToken,
-  VoidCallback? onCloudflare,
-}) async {
-  try {
-    final html = await client.getPage(urls.chapterContent(aid, cid), charsetParam: false, referer: urls.catalogue(aid), cancelToken: cancelToken);
-    final content = Wenku8Parser.chapterContent(html);
-    if (!isLockedContent(content) || !unlock.enabled) return content;
-    return await unlock.chapter(aid, cid, () => catalogue(cancelToken));
-  } catch (e) {
-    if (isCloudflare(e)) onCloudflare?.call();
-    rethrow;
-  }
-}
-
-/// 章节：先查离线缓存，再联网（支持切章/退出自动取消在途请求）；套用替换规则、统一缩进后算出高亮位置。
-/// 读过的章节在内存里留 3 分钟（预加载的下一章、来回翻章都不用重新取），之后释放。
-final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, String)>((ref, key) async {
-  final cancel = CancelToken();
-  Timer? timer;
-  ref.onDispose(() {
-    timer?.cancel();
-    if (!cancel.isCancelled) cancel.cancel('chapter disposed');
-  });
-  final hantOn = ref.watch(readerPrefsProvider.select((p) => p.hant));
-  Content? raw;
-  if (isLocalAid(key.$1)) {
-    raw = await LocalBooks.loadChapter(key.$1, key.$2);
-  } else {
-    raw = await ChapterCache.get(key.$1, key.$2);
-    if (raw != null && isLockedContent(raw)) raw = null; // 以前存下的「因版权问题…」，重新取
-    if (raw == null) {
-      final ticket = ChapterCache.ticket(key.$1, key.$2);
-      try {
-        raw = await _fetchChapterRaw(
-          ref.read(wenku8ClientProvider),
-          ref.read(wenku8UrlsProvider),
-          ref.read(unlockServiceProvider),
-          (c) => ref.read(apiProvider).catalogue(key.$1, cancelToken: c),
-          key.$1,
-          key.$2,
-          cancelToken: cancel,
-          onCloudflare: () => ref.read(sessionProvider.notifier).markNeedsVerify(),
-        );
-      } on ChapterLockedException catch (e) {
-        // 受限书里取不到的章（多半是插图）：给一句说明照常往后翻；不存缓存，下次还会再试
-        final text = formatChapter(e.message);
-        return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
-      }
-      if (Wenku8Parser.isCopyrightLockedText(raw.text) && raw.images.isEmpty) {
-        final text = formatChapter(raw.text);
-        return Chapter(text: text, images: const [], marks: ReplaceRules.marks(text, null, key.$1), locked: true);
-      }
-      // 读过的章节顺手存下来，断网也能再看；写失败不影响阅读。取的这会儿刚好清了缓存、或者开启了无痕阅读时不写回去
-      if (!Incognito.on) {
-        try {
-          await ChapterCache.put(key.$1, key.$2, raw, ticket: ticket);
-        } catch (_) {}
-      }
-    }
-  }
-  // 请求完成后再保活 3 分钟：加载中若用户切章或退出，autoDispose 会立刻触发上面的 CancelToken 取消网络请求
-  final link = ref.keepAlive();
-  timer = Timer(const Duration(minutes: 3), link.close);
-  // 繁体：先转正文，规则也转成繁体再套，简体、繁体下做的替换和高亮都能匹配上
-  final hant = hantOn ? await Hant.load() : null;
-  final rules = hant == null ? null : [for (final r in ReplaceRules.all()) r.copyWith(pattern: hant.convert(r.pattern), replacement: hant.convert(r.replacement))];
-  final text = formatChapter(ReplaceRules.apply(hant?.convert(raw.text) ?? raw.text, rules));
-  return Chapter(text: text, images: raw.images, marks: ReplaceRules.marks(text, rules, key.$1));
-});
-
-/// 书签在本章第几屏：按现在的阅读设置（字号、行距、边距、字体、双页）重新排版算出来，所以改了设置页码也跟着对。
-/// 返回 (第几屏从 1 起, 共几屏)；滚动模式、没缓存过的章节返回 null（不为了算页码去联网）。
-///
-/// 同样的书签和版面返回同一个 Future：书签列表在可拖动的弹窗里，拖动时每帧都重建，不能每帧都重新整章排版。
-Future<(int, int)?> bookmarkPage(WidgetRef ref, BuildContext context, String aid, String cid, String title, int offset) {
-  final prefs = ref.read(readerPrefsProvider);
-  final local = isLocalAid(aid);
-  final len = local ? LocalBooks.chapterLength(aid, cid) : ChapterCache.length(aid, cid);
-  if (prefs.mode == 0 || (!local && len == null)) return Future.value();
-  final size = MediaQuery.sizeOf(context);
-  final view = MediaQuery.viewPaddingOf(context);
-  final key = (aid, cid, title, offset, prefs, size, view, PagedBody.lastLayout, len);
-  final hit = _bookmarkPages.remove(key);
-  final future = hit ?? _bookmarkPage(ref, aid, cid, title, offset, prefs, size, view);
-  _bookmarkPages[key] = future;
-  if (_bookmarkPages.length > 100) _bookmarkPages.remove(_bookmarkPages.keys.first);
-  return future;
-}
-
-final _bookmarkPages = <Object, Future<(int, int)?>>{};
-
-/// 同一章、同样版面的分页结果（一章有好几个书签时只排一次版）
-final _bookmarkStarts = <Object, List<int>>{};
-
-Future<(int, int)?> _bookmarkPage(WidgetRef ref, String aid, String cid, String title, int offset, ReaderPrefs prefs, Size size, EdgeInsets view) async {
-  final c = await ref.read(chapterProvider((aid, cid)).future);
-  final f = FontStore.resolve(prefs.font);
-  final style = readerStyle(prefs, const Color(0xFF000000), family: f.family, fallback: f.fallback);
-  // 这次运行里排过版就直接用正文实际的版面（弹窗里的边距和阅读页不一样，不能自己算）；
-  // 否则照 PagedBody 的算法：上下各留出标题 / 页脚的位置，宽屏开双页时一屏两页
-  final fallbackCols = prefs.dual && size.width >= 900 ? 2 : 1;
-  final (box, cols) = PagedBody.lastLayout ?? (Size(size.width / fallbackCols - prefs.margin * 2, size.height - view.top - view.bottom - 72), fallbackCols);
-  final startsKey = (aid, cid, title, c.text.length, c.text.hashCode, style, box);
-  final starts = c.text.trim().isEmpty
-      ? const <int>[]
-      : (_bookmarkStarts[startsKey] ??= paginate(c.text, style, box, strut: readerStrut(style), firstTop: headingHeight(title, style, box.width)));
-  if (_bookmarkStarts.length > 8) _bookmarkStarts.remove(_bookmarkStarts.keys.first);
-  final total = starts.length + c.images.length;
-  if (total == 0) return null;
-  final page = offset > c.text.length ? math.min(starts.length + offset - c.text.length - 1, total - 1) : (starts.isEmpty ? 0 : pageOfOffset(starts, offset));
-  // 双页时卷首多一页封面（和正文一样，取不到封面图就没有这一页）
-  final cover = cols == 2 && volumeCoverOf(ref, aid, cid, ref.read(novelProvider(aid)).value?.detail.imgUrl ?? '') != null ? 1 : 0;
-  return ((page + cover) ~/ cols + 1, (total + cover + cols - 1) ~/ cols);
-}
-
-/// [cid] 是一卷的第一章时那一卷的封面，不是卷首或取不到图时为 null。正文和书签页码都用它，保证封面页算法一致。
-String? volumeCoverOf(WidgetRef ref, String aid, String cid, String fallback) {
-  final v = Volumes.of(aid).where((v) => v.cids.firstOrNull == cid).firstOrNull;
-  if (v == null) return null;
-  final url = ref.read(volumeCoverQueueProvider).volCover(aid, v, fallback);
-  return url.isEmpty ? null : url;
-}
+part 'page/reader_data.dart';
+part 'page/reader_overlays.dart';
 
 /// 阅读器：负责章节调度、进度、书签、键鼠与生命周期；
 /// 排版在 `paginator.dart`，正文显示在 `reader_body.dart`，仿真翻页在 `page_curl.dart`，
@@ -365,6 +130,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   // 返回之前的位置（Kindle 那样）：拖进度条、切章、从目录跳走前记下离开的位置，菜单里出一个「返回」按钮，点了能来回切
   ({String cid, int offset, String title, String label})? _back;
   int _backTurns = 0; // 跳走后又自己翻了几页：翻够 3 页就当已经接着读下去了，不再提示返回
+  bool _showBackBanner = false;
+  Timer? _backBannerTimer;
   String? _bookTitle;
   String _chapterTitle = '';
   CatChapter? _nextChapter;
@@ -383,6 +150,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   final _imagesQueued = <String>{}; // 已经把插图排进下载队列的章节
   final _queuedImageUrls = <String>{}; // 退出阅读器时取消仍未开始的插图预取
   ImageStore? _imageStore;
+  bool _srPaused = false;
   bool _bookQueued = false;
 
   // ---- 页眉页脚的时间、电量：每分钟刷新一次，只重建页脚 ----
@@ -514,6 +282,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     _initial = widget.offset;
     _doneAtOpen = Volumes.done(widget.aid).keys.toSet();
     FontStore.ready.addListener(_onFontReady);
+    HighlightStore.changes.addListener(_onHighlightsChanged);
+    if (!isWebPreview) {
+      try {
+        final store = ref.read(imageStoreProvider);
+        _imageStore = store;
+        store.pauseSr();
+        _srPaused = true;
+      } catch (_) {}
+    }
     WidgetsBinding.instance.addObserver(this);
     _applyChrome(ref.read(readerPrefsProvider));
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -594,18 +371,28 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     if (mounted) setState(() {});
   }
 
+  void _onHighlightsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
     if (!_preloadCancel.isCancelled) _preloadCancel.cancel('reader disposed');
     if (!isWebPreview && _queuedImageUrls.isNotEmpty) {
       _imageStore?.cancelPrefetch(_queuedImageUrls);
     }
+    if (_srPaused) {
+      _srPaused = false;
+      _imageStore?.resumeSr();
+    }
     FontStore.ready.removeListener(_onFontReady);
+    HighlightStore.changes.removeListener(_onHighlightsChanged);
     _screen.invokeMethod('setBrightness', {'value': -1.0}).ignore();
     _syncVolumeKeys(false);
     _vol.setMethodCallHandler(null);
     _clock?.cancel();
     _searchFlashTimer?.cancel();
+    _backBannerTimer?.cancel();
     _status.dispose();
     _pos.dispose();
     _slide.dispose();
@@ -820,12 +607,19 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     final label = ref.read(readerPrefsProvider).mode == 0 ? '${len == 0 ? 0 : (_offset * 100 ~/ len).clamp(0, 100)}%' : '第 ${_nav.page.value.$1 + 1} 页';
     _back = (cid: _cid, offset: _offset, title: _chapterTitle, label: label);
     _backTurns = 0;
+    _backBannerTimer?.cancel();
+    _showBackBanner = true;
+    _backBannerTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted && _showBackBanner) setState(() => _showBackBanner = false);
+    });
   }
 
   /// 回到记下的位置，同时把现在的位置记成新的「返回」点
   void _returnBack() {
     final b = _back;
     if (b == null) return;
+    _backBannerTimer?.cancel();
+    _showBackBanner = false;
     _markBack();
     if (b.cid != _cid) {
       _go(b.cid, offset: b.offset);
@@ -893,6 +687,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
         },
       ),
       ContextMenuButtonItem(label: hz(context, '替换/屏蔽'), onPressed: () => _replaceFromSelection(state)),
+      ContextMenuButtonItem(label: hz(context, '划线摘录'), onPressed: () => _excerptSelection(state)),
       ContextMenuButtonItem(label: hz(context, '高亮'), onPressed: () => _highlightSelection(state)),
       ContextMenuButtonItem(label: hz(context, '变色'), onPressed: () => _colorSelection(state)),
       ContextMenuButtonItem(
@@ -916,6 +711,65 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     if (rule == null) return;
     await ReplaceRules.save([...ReplaceRules.all(), rule]);
     if (mounted) ref.invalidate(chapterProvider);
+  }
+
+  /// 将选中文字保存为本章自由划线摘录，并弹出颜色/笔记编辑框。
+  Future<void> _excerptSelection(SelectableRegionState state) async {
+    final selected = (_selected ?? '').trim();
+    state.clearSelection();
+    state.hideToolbar();
+    if (selected.isEmpty) return;
+    final text = ref.read(chapterProvider((widget.aid, _cid))).value?.text ?? '';
+    if (text.isEmpty) return;
+    final matchRange = _locateSelectionRange(text, selected, _offset);
+    if (matchRange == null) return;
+    final entry = await HighlightStore.add(
+      aid: widget.aid,
+      cid: _cid,
+      chapter: _chapterTitle,
+      start: matchRange.$1,
+      end: matchRange.$2,
+      quote: text.substring(matchRange.$1, matchRange.$2).trim(),
+    );
+    if (mounted) await _editHighlight(entry);
+  }
+
+  /// 在章节正文里定位选中文本对应的 `[start, end)`，优先就近匹配当前偏移附近，支持跨段空白归一化。
+  static (int, int)? _locateSelectionRange(String text, String selected, int nearOffset) {
+    final anchor = nearOffset.clamp(0, text.length);
+    final searchStart = (anchor - 300).clamp(0, text.length);
+    var idx = text.indexOf(selected, searchStart);
+    if (idx >= 0) return (idx, idx + selected.length);
+    idx = text.indexOf(selected);
+    if (idx >= 0) return (idx, idx + selected.length);
+    final re = RegExp(_patternOf(selected));
+    final nearMatch = re.firstMatch(text.substring(searchStart));
+    if (nearMatch != null) return (searchStart + nearMatch.start, searchStart + nearMatch.end);
+    final anyMatch = re.firstMatch(text);
+    if (anyMatch != null) return (anyMatch.start, anyMatch.end);
+    return null;
+  }
+
+  /// 编辑单条自由划线摘录（切换颜色、写笔记、复制原文或删除）。
+  Future<void> _editHighlight(HighlightEntry entry) async {
+    final result = await _showHighlightEditDialog(context, entry);
+    if (result == null) return;
+    if (result.action == 'copied') {
+      if (mounted) ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(content: Text('已复制摘录'), duration: Duration(seconds: 1)));
+      return;
+    }
+    if (result.action == 'delete') {
+      await HighlightStore.remove(entry.id);
+    } else if (result.action == 'save') {
+      await HighlightStore.upsert(
+        entry.copyWith(
+          note: result.note,
+          color: result.color,
+          at: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+    }
+    if (mounted) setState(() {});
   }
 
   /// 高亮选中的文字：同一本书里相同的文字只有一条高亮规则，所有出现的地方共用一份备注。随后直接打开备注框。
@@ -1029,47 +883,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     });
   }
 
-  Widget _floatingBackButton(ReaderPalette palette) => Positioned(
-    top: 8,
-    left: 8,
-    child: SafeArea(
-      bottom: false,
-      child: IconButton(
-        tooltip: hz(context, '返回'),
-        style: IconButton.styleFrom(backgroundColor: palette.fg.withValues(alpha: 0.08), foregroundColor: palette.fg),
-        icon: const Icon(Icons.arrow_back),
-        onPressed: _leaveReader,
-      ),
-    ),
-  );
+  Widget _floatingBackButton(ReaderPalette palette) => _ReaderFloatingBackButton(palette: palette, onPressed: _leaveReader);
 
-  /// 加载态：允许轻触唤出顶栏，同时左上角常驻半透明返回键 + 中央章节名提示，避免慢网或无侧滑平台被困在转圈屏。
-  Widget _loadingState(ReaderPalette palette, String title) => Stack(
-    fit: StackFit.expand,
-    children: [
-      GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: _toggleBar,
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(color: palette.fg),
-                if (title.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  Text(title, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 15, color: palette.fg.withValues(alpha: 0.8))),
-                ],
-                const SizedBox(height: 6),
-                Text('正在加载章节…', style: TextStyle(fontSize: 12.5, color: palette.fg.withValues(alpha: 0.55))),
-              ],
-            ),
-          ),
-        ),
-      ),
-      if (!_bar) _floatingBackButton(palette),
-    ],
+  Widget _loadingState(ReaderPalette palette, String title) => _ReaderLoadingView(
+    palette: palette,
+    title: title,
+    showBack: !_bar,
+    onTap: _toggleBar,
+    onBack: _leaveReader,
   );
 
   @override
@@ -1210,11 +1031,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                               _initial = null;
                             }
                             _recordChapter(_cid, title);
+                            final chapterHighlights = HighlightStore.forChapter(widget.aid, _cid);
                             InlineSpan spanOfHighlight(int from, int to, (int, int)? hl) {
                               final activeHl = _tts.text == c.text
                                   ? hl
                                   : (_searchFlash != null && _searchFlash!.cid == _cid ? (_searchFlash!.start, _searchFlash!.end) : null);
-                              return buildSpan(c, from, to, style, noted, activeHl, accent);
+                              return buildSpan(c, from, to, style, noted, activeHl, accent, chapterHighlights);
                             }
                             InlineSpan spanOf(int from, int to) => spanOfHighlight(from, to, _tts.highlight.value);
                             final key = ValueKey((_cid, _epoch, prefs.mode));
@@ -1224,13 +1046,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                             ChapterPeek? peek(CatChapter? ch) {
                               if (ch == null) return null;
                               final p = chapterProvider((widget.aid, ch.cid));
-                              if (!isLocalAid(widget.aid) && !ChapterCache.has(widget.aid, ch.cid) && !ref.exists(p)) return null;
+                              if (!ChapterCache.has(widget.aid, ch.cid) && !ref.exists(p)) return null;
                               final v = ref.watch(p).value;
                               if (v == null) return null;
+                              final peekHighlights = HighlightStore.forChapter(widget.aid, ch.cid);
                               return ChapterPeek(
                                 chapter: v,
                                 title: _bodyTitle(ch.title),
-                                spanOf: (from, to) => buildSpan(v, from, to, style, noted),
+                                spanOf: (from, to) => buildSpan(v, from, to, style, noted, null, null, peekHighlights),
                                 cover: _coverOf(ch.cid, prefs, fallbackCover),
                                 volumeProgress: (f) => _volumeProgress(f, ch.cid),
                               );
@@ -1245,6 +1068,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     highlight: _tts.highlight,
                                     style: style,
                                     margin: prefs.margin,
+                                    paragraphSpacing: prefs.paragraphSpacing,
                                     title: _bodyTitle(title),
                                     headingAccent: heading,
                                     startOffset: _offset,
@@ -1259,6 +1083,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     tapZone: prefs.tapZone,
                                     tapInvert: prefs.tapInvert,
                                     onMark: onMark,
+                                    userHighlights: chapterHighlights,
+                                    onHighlightTap: _editHighlight,
                                     nav: _nav,
                                     hasSelection: () => _hasSelection,
                                     onPullDown: _addBookmark,
@@ -1274,6 +1100,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     highlight: _tts.highlight,
                                     style: style,
                                     margin: prefs.margin,
+                                    paragraphSpacing: prefs.paragraphSpacing,
                                     title: _bodyTitle(title),
                                     headingAccent: heading,
                                     prevChapter: peek(prev),
@@ -1309,6 +1136,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     tapZone: prefs.tapZone,
                                     tapInvert: prefs.tapInvert,
                                     onMark: onMark,
+                                    userHighlights: chapterHighlights,
+                                    onHighlightTap: _editHighlight,
                                     nav: _nav,
                                     hasSelection: () => _hasSelection,
                                   );
@@ -1317,126 +1146,52 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                       ),
                     ),
                     if (content.value?.locked == true && !_bar)
-                      Positioned(
-                        left: 16,
-                        right: 16,
-                        bottom: bottomPad + 44,
-                        child: Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 460),
-                            child: Material(
-                              color: Color.alphaBlend(palette.fg.withValues(alpha: 0.08), palette.bg),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(14),
-                                side: BorderSide(color: palette.fg.withValues(alpha: 0.16)),
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-                                child: Row(
-                                  children: [
-                                    Icon(Icons.lock_outline, size: 20, color: palette.fg.withValues(alpha: 0.7)),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Text(
-                                        addon == null
-                                            ? '本章受网站版权限制无法直接读取，可在设置中了解「妙妙小工具」'
-                                            : (!AppPrefs.read(P.unlock, true) ? '「妙妙小工具」已关闭，开启后可尝试读取受限章节' : '扩展通道暂未取到本章（可能为纯插图章或接口不可用）'),
-                                        style: TextStyle(fontSize: 13, height: 1.4, color: palette.fg.withValues(alpha: 0.85)),
-                                      ),
-                                    ),
-                                    if (addon != null && AppPrefs.read(P.unlock, true))
-                                      TextButton(
-                                        style: TextButton.styleFrom(foregroundColor: accent, visualDensity: VisualDensity.compact),
-                                        onPressed: () => ref.invalidate(chapterProvider((widget.aid, _cid))),
-                                        child: const Text('重试'),
-                                      ),
-                                    TextButton(
-                                      style: TextButton.styleFrom(foregroundColor: accent, visualDensity: VisualDensity.compact),
-                                      onPressed: () => context.push(Routes.settingsSection('unlock')).then((_) {
-                                        if (mounted) ref.invalidate(chapterProvider((widget.aid, _cid)));
-                                      }),
-                                      child: Text(addon == null ? '去了解' : '去设置'),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
+                      _ReaderLockedBanner(
+                        palette: palette,
+                        accent: accent,
+                        bottomPad: bottomPad,
+                        hasAddon: addon != null,
+                        unlockEnabled: AppPrefs.read(P.unlock, true),
+                        onRetry: () => ref.invalidate(chapterProvider((widget.aid, _cid))),
+                        onOpenUnlockSettings: () => context.push(Routes.settingsSection('unlock')).then((_) {
+                          if (mounted) ref.invalidate(chapterProvider((widget.aid, _cid)));
+                        }),
                       ),
                     if (prefs.mode == 0 && prefs.showStatus && chromeConfig.hasHeader && content.hasValue)
-                      Positioned(
+                      _ReaderScrollChromeBar(
                         key: const ValueKey('reader_scroll_header'),
-                        left: 0,
-                        right: 0,
-                        top: 0,
-                        child: IgnorePointer(
-                          child: ColoredBox(
-                            color: palette.bg.withValues(alpha: hasCustomBg ? 0.82 : 1.0),
-                            child: Padding(
-                              padding: EdgeInsets.fromLTRB(prefs.margin, topPad + 8, prefs.margin, 6),
-                              child: ValueListenableBuilder<int>(
-                                valueListenable: _pos,
-                                builder: (_, pos, _) {
-                                  final c = content.value!;
-                                  final len = c.text.length;
-                                  final imgs = c.images.length;
-                                  final frac = len > 0 ? (pos / len).clamp(0.0, 1.0) : (imgs > 1 && pos > 0 ? ((pos - 1) / (imgs - 1)).clamp(0.0, 1.0) : 0.0);
-                                  final volPct = (_volumeProgress(frac) * 100).floor();
-                                  final needEta = chromeConfig.headerLeft == ReaderChromeField.volumeEta || chromeConfig.headerRight == ReaderChromeField.volumeEta;
-                                  return ReaderChromeRow(
-                                    leftField: chromeConfig.headerLeft,
-                                    rightField: chromeConfig.headerRight,
-                                    style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.5)),
-                                    chapterTitle: _bodyTitle(title),
-                                    bookTitle: chromeConfig.bookTitle,
-                                    status: _status,
-                                    pageProgress: '本章 ${(frac * 100).floor()}% · 本卷 $volPct%',
-                                    volumeEta: needEta ? (chromeConfig.volumeEta?.call(frac) ?? '本卷 $volPct%') : '',
-                                    volumeProgressText: '本卷 $volPct%',
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                        ),
+                        isHeader: true,
+                        palette: palette,
+                        hasCustomBg: hasCustomBg,
+                        margin: prefs.margin,
+                        edgePad: topPad,
+                        leftField: chromeConfig.headerLeft,
+                        rightField: chromeConfig.headerRight,
+                        chapterTitle: _bodyTitle(title),
+                        bookTitle: chromeConfig.bookTitle,
+                        status: _status,
+                        pos: _pos,
+                        chapter: content.value!,
+                        volumeProgress: _volumeProgress,
+                        volumeEta: chromeConfig.volumeEta,
                       ),
                     if (prefs.mode == 0 && prefs.showStatus && chromeConfig.hasFooter && content.hasValue)
-                      Positioned(
+                      _ReaderScrollChromeBar(
                         key: const ValueKey('reader_scroll_footer'),
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: IgnorePointer(
-                          child: ColoredBox(
-                            color: palette.bg.withValues(alpha: hasCustomBg ? 0.82 : 1.0),
-                            child: Padding(
-                              padding: EdgeInsets.fromLTRB(prefs.margin, 6, prefs.margin, bottomPad + 8),
-                              child: ValueListenableBuilder<int>(
-                                valueListenable: _pos,
-                                builder: (_, pos, _) {
-                                  final c = content.value!;
-                                  final len = c.text.length;
-                                  final imgs = c.images.length;
-                                  final frac = len > 0 ? (pos / len).clamp(0.0, 1.0) : (imgs > 1 && pos > 0 ? ((pos - 1) / (imgs - 1)).clamp(0.0, 1.0) : 0.0);
-                                  final volPct = (_volumeProgress(frac) * 100).floor();
-                                  final needEta = chromeConfig.footerLeft == ReaderChromeField.volumeEta || chromeConfig.footerRight == ReaderChromeField.volumeEta;
-                                  return ReaderChromeRow(
-                                    leftField: chromeConfig.footerLeft,
-                                    rightField: chromeConfig.footerRight,
-                                    style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.5)),
-                                    chapterTitle: _bodyTitle(title),
-                                    bookTitle: chromeConfig.bookTitle,
-                                    status: _status,
-                                    pageProgress: '本章 ${(frac * 100).floor()}% · 本卷 $volPct%',
-                                    volumeEta: needEta ? (chromeConfig.volumeEta?.call(frac) ?? '本卷 $volPct%') : '',
-                                    volumeProgressText: '本卷 $volPct%',
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                        ),
+                        isHeader: false,
+                        palette: palette,
+                        hasCustomBg: hasCustomBg,
+                        margin: prefs.margin,
+                        edgePad: bottomPad,
+                        leftField: chromeConfig.footerLeft,
+                        rightField: chromeConfig.footerRight,
+                        chapterTitle: _bodyTitle(title),
+                        bookTitle: chromeConfig.bookTitle,
+                        status: _status,
+                        pos: _pos,
+                        chapter: content.value!,
+                        volumeProgress: _volumeProgress,
+                        volumeEta: chromeConfig.volumeEta,
                       ),
                     // 亮度遮罩：盖住正文和页脚，不盖菜单栏和朗读/自动阅读条，不挡点击
                     if (prefs.dim > 0) Positioned.fill(key: const ValueKey('reader_dim'), child: IgnorePointer(child: ColoredBox(color: Colors.black.withValues(alpha: prefs.dim)))),
@@ -1448,6 +1203,20 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                       bottom: 0,
                       child: ReaderAutoTurnProgressBar(controller: _autoScroll, palette: palette, accent: accent),
                     ),
+                    // 跳转后的 5 秒悬浮撤销条（菜单收起时直接显示，一键返回跳转前位置）
+                    if (!_bar && _showBackBanner && _back != null)
+                      _ReaderUndoJumpBanner(
+                        key: const ValueKey('reader_undo_jump_bar'),
+                        palette: palette,
+                        accent: accent,
+                        bottomPad: bottomPad,
+                        label: _back!.cid == _cid ? '返回 ${_back!.label}' : '返回「${_back!.title}」',
+                        onReturn: _returnBack,
+                        onDismiss: () {
+                          _backBannerTimer?.cancel();
+                          setState(() => _showBackBanner = false);
+                        },
+                      ),
                     // 朗读中或自动阅读中且菜单收起时：底部浮现紧凑胶囊控制条
                     if (!_bar)
                       Positioned(
@@ -1800,7 +1569,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     if (!mounted || _preloadCancel.isCancelled) return;
     if (!_inFlightPrefetch.add(cid)) return;
     try {
-      if (!isLocalAid(widget.aid) && !ChapterCache.has(widget.aid, cid) && !Incognito.on) {
+      if (!ChapterCache.has(widget.aid, cid) && !Incognito.on) {
         final ticket = ChapterCache.ticket(widget.aid, cid);
         final raw = await runInBackground(
           () => _fetchChapterRaw(
@@ -1835,7 +1604,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   /// 后台把整本的正文存到离线缓存（不含插图），一章一章慢慢取；先往后，再补前面。退出阅读器就停，下次打开接着来。
   /// 每章之前都重新看一遍设置和网络：中途关掉开关、离开 Wi-Fi（开了仅 Wi-Fi 时）就停。
   Future<void> _cacheBook(List<CatChapter> chapters, int index) async {
-    if (isLocalAid(widget.aid)) return;
     for (final c in [...chapters.skip(index + 1), ...chapters.take(index)]) {
       if (!mounted || _preloadCancel.isCancelled || Incognito.on) return;
       if (ChapterCache.has(widget.aid, c.cid) || _inFlightPrefetch.contains(c.cid)) continue;
@@ -1881,6 +1649,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     showReaderCatalogueSheet(
       context,
       aid: widget.aid,
+      bookTitle: _bookTitle ?? '',
       volumes: volumes,
       currentCid: _cid,
       palette: palette,
@@ -1891,10 +1660,21 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
         _markBack();
         _go(cid);
       },
-      onSelectBookmark: (b) => _go(b.cid, offset: b.offset),
+      onSelectBookmark: (b) {
+        _markBack();
+        _go(b.cid, offset: b.offset);
+      },
+      onSelectHighlight: (h) {
+        _markBack();
+        _go(h.cid, offset: h.start);
+      },
+      onEditHighlight: _editHighlight,
       onEditNote: _editNote,
       onOpenCharacters: _openCharactersPage,
       onBookmarksChanged: () {
+        if (mounted) setState(() {});
+      },
+      onHighlightsChanged: () {
         if (mounted) setState(() {});
       },
     );

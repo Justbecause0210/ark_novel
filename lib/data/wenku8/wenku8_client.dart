@@ -588,7 +588,7 @@ class _ThrottleInterceptor extends Interceptor {
         final err = gate == null ? cooldownError?.call(host, options) : null;
         if (gate != null || err != null) {
           _busy = false;
-          Future.microtask(_dispatch);
+          unawaited(Future.microtask(_dispatch));
           if (err != null) {
             handler.reject(err);
             return;
@@ -600,7 +600,7 @@ class _ThrottleInterceptor extends Interceptor {
     }
 
     options.extra['throttled'] = true;
-    options.cancelToken?.whenCancel.whenComplete(() => _release(options));
+    unawaited(options.cancelToken?.whenCancel.whenComplete(() => _release(options)));
     handler.next(options);
   }
 

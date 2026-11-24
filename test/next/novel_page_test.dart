@@ -117,7 +117,7 @@ void main() {
     addTearDown(tester.view.reset);
 
     await tester.runAsync(() async {
-      ChapterListOptions.save(aid, const ChapterListOptions(showIndex: true));
+      await ChapterListOptions.save(aid, const ChapterListOptions(showIndex: true));
       await Future<void>.delayed(const Duration(milliseconds: 20));
     });
 

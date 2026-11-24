@@ -38,6 +38,8 @@ void validateSyncSnapshot(Map<String, dynamic> remote) {
 const _preferences = <String, Object>{
   'r.fontSize': 18.0,
   'r.lineHeight': 1.8,
+  'r.letterSpacing': 0.0,
+  'r.paragraphSpacing': 0.0,
   'r.theme': 5,
   'r.mode': 3,
   'r.ttsRate': 1.0,
@@ -105,6 +107,8 @@ const _preferences = <String, Object>{
 const _ranges = <String, (num, num)>{
   'r.fontSize': (14, 32),
   'r.lineHeight': (1.3, 2.4),
+  'r.letterSpacing': (-0.5, 4.0),
+  'r.paragraphSpacing': (0.0, 24.0),
   'r.margin': (8, 48),
   'r.theme': (0, 5),
   'r.mode': (0, 3),

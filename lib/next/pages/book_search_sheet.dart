@@ -7,7 +7,6 @@ import '../../models/cat_volume.dart';
 import '../book_search.dart';
 import '../cache.dart';
 import '../hant.dart';
-import '../local_books.dart';
 import '../reader/reader_sheets.dart';
 import '../settings.dart';
 import '../text.dart';
@@ -110,18 +109,17 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
   int _scanned = 0;
   int _total = 0;
   int _totalHits = 0;
+  bool _truncated = false;
   String? _error;
   List<BookSearchHit> _hits = const [];
   List<_SearchRow> _rows = const [];
 
   bool get _hasCurrent => widget.currentCid != null && widget.currentCid!.isNotEmpty;
-  bool get _isLocal => isLocalAid(widget.aid);
 
   @override
   void initState() {
     super.initState();
-    final totalCat = widget.catalogue.fold<int>(0, (a, v) => a + v.chapters.length);
-    final available = _isLocal ? totalCat : ChapterCache.count(widget.aid);
+    final available = ChapterCache.count(widget.aid);
     _scope = _hasCurrent
         ? (widget.initialScope ?? (available > 1 ? BookSearchScope.allCached : BookSearchScope.currentChapter))
         : BookSearchScope.allCached;
@@ -175,6 +173,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
         _scanned = 0;
         _total = 0;
         _totalHits = 0;
+        _truncated = false;
         _error = null;
         _hits = const [];
         _rows = const [];
@@ -190,6 +189,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
       _scanned = 0;
       _total = 0;
       _totalHits = 0;
+      _truncated = false;
       _hits = const [];
       _rows = const [];
     });
@@ -218,6 +218,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
           _scanned = p.scannedChapters;
           _total = p.totalChapters;
           _totalHits = p.totalHits;
+          _truncated = p.truncated;
           _hits = p.hits;
           _rows = _buildRows(p.hits);
         });
@@ -230,6 +231,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
       _scanned = result.scannedChapters;
       _total = result.totalChapters;
       _totalHits = result.totalHits;
+      _truncated = result.truncated;
       _error = result.error;
       _hits = result.hits;
       _rows = _buildRows(result.hits);
@@ -265,25 +267,29 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final totalCat = widget.catalogue.fold<int>(0, (a, v) => a + v.chapters.length);
-    final cachedCount = _isLocal ? totalCat : ChapterCache.count(widget.aid);
+    final cachedCount = ChapterCache.count(widget.aid);
     final q = _controller.text.trim();
 
     String statusText;
     if (_searching) {
       statusText = _scope == BookSearchScope.currentChapter
           ? '正在搜索当前章，已找到 $_totalHits 处…'
-          : (_isLocal ? '正在搜索 $_scanned/$_total 章，已找到 $_totalHits 处…' : '正在搜索 $_scanned/$_total 章已缓存章节，已找到 $_totalHits 处…');
+          : '正在搜索 $_scanned/$_total 章已缓存章节，已找到 $_totalHits 处…';
     } else if (_error != null) {
       statusText = _error!;
     } else if (q.isEmpty) {
       statusText = _scope == BookSearchScope.currentChapter
           ? '输入关键词搜索当前章节'
-          : (_isLocal ? '全书共 $totalCat 章，输入关键词检索正文' : '全书已缓存 $cachedCount/$totalCat 章，输入关键词检索正文');
+          : '全书已缓存 $cachedCount/$totalCat 章，输入关键词检索正文';
     } else if (_scope == BookSearchScope.currentChapter) {
-      statusText = '当前章共找到 $_totalHits 处';
+      statusText = _truncated
+          ? '当前章已找到 $_totalHits+ 处（仅展示前 ${_hits.length} 处）'
+          : (_hits.length < _totalHits ? '当前章共找到 $_totalHits 处（仅展示前 ${_hits.length} 处）' : '当前章共找到 $_totalHits 处');
     } else {
-      final capHint = _hits.length < _totalHits ? '（显示前 ${_hits.length} 处）' : '';
-      statusText = _isLocal ? '已搜索 $_scanned/$_total 章，共找到 $_totalHits 处$capHint' : '已搜索 $_scanned/$_total 章已缓存章节，共找到 $_totalHits 处$capHint';
+      final countLabel = _truncated
+          ? '$_totalHits+ 处（仅展示前 ${_hits.length} 处）'
+          : '$_totalHits 处${_hits.length < _totalHits ? '（显示前 ${_hits.length} 处）' : ''}';
+      statusText = '已搜索 $_scanned/$_total 章已缓存章节，共找到 $countLabel';
     }
 
     return SafeArea(
@@ -336,7 +342,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
                   ),
                   const SizedBox(width: 8),
                   ChoiceChip(
-                    label: Text(_isLocal ? '全书' : '全书已缓存'),
+                    label: const Text('全书已缓存'),
                     selected: _scope == BookSearchScope.allCached,
                     showCheckmark: false,
                     onSelected: (_) {
@@ -396,7 +402,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
                                     ? '正在检索中…'
                                     : (_error != null
                                           ? '请检查正则表达式语法。'
-                                          : (_scope == BookSearchScope.allCached && cachedCount == 0
+                                          : (_scope == BookSearchScope.allCached && cachedCount == 0 && _scanned == 0
                                                 ? '未找到结果（当前暂无已缓存章节）。'
                                                 : '未找到匹配内容。'))),
                           textAlign: TextAlign.center,

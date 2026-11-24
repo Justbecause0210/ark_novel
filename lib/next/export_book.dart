@@ -17,7 +17,6 @@ import 'epub_codec.dart';
 import 'files.dart';
 import 'image_cache.dart';
 import 'library.dart' show LibraryStore;
-import 'local_books.dart';
 import 'text.dart';
 import 'volume_covers.dart';
 
@@ -53,18 +52,17 @@ Uint8List _encodeInIsolate(
   );
 }
 
-/// 导出已缓存书籍（在线书与本地导入书通用）为 EPUB 或 TXT。
+/// 导出已缓存书籍为 EPUB 或 TXT。
 class ExportBook {
   ExportBook._();
 
-  /// 返回该书当前可供导出的本地/已缓存章节数。
+  /// 返回该书当前可供导出的已缓存章节数。
   static int availableCount(String aid, List<CatVolume> catalogue, {Set<String>? onlyCids}) {
-    final local = isLocalAid(aid);
     var count = 0;
     for (final v in catalogue) {
       for (final c in v.chapters) {
         if (onlyCids != null && !onlyCids.contains(c.cid)) continue;
-        if (local || ChapterCache.has(aid, c.cid)) count++;
+        if (ChapterCache.has(aid, c.cid)) count++;
       }
     }
     return count;
@@ -87,7 +85,6 @@ class ExportBook {
     Set<String>? onlyCids,
     void Function(String stage, double? progress)? onProgress,
   }) async {
-    final local = isLocalAid(aid);
     final shownTitle = LibraryStore.shown(aid, novel.detail.title);
     final total = availableCount(aid, novel.catalogue, onlyCids: onlyCids);
     if (total == 0) {
@@ -99,7 +96,7 @@ class ExportBook {
     if (format == ExportFormat.epub) {
       for (final candidate in [?coverUrl, novel.detail.imgUrl]) {
         if (candidate.isEmpty) continue;
-        final b = local ? await LocalBooks.readImageBytes(candidate) : await imageStore.cached(candidate);
+        final b = await imageStore.cached(candidate);
         if (b != null && b.isNotEmpty) {
           coverBytes = b;
           break;
@@ -115,15 +112,15 @@ class ExportBook {
       final chList = <EpubChapterData>[];
       for (final c in v.chapters) {
         if (onlyCids != null && !onlyCids.contains(c.cid)) continue;
-        if (!local && !ChapterCache.has(aid, c.cid)) continue;
-        final Content? content = local ? await LocalBooks.loadChapter(aid, c.cid) : await ChapterCache.get(aid, c.cid);
+        if (!ChapterCache.has(aid, c.cid)) continue;
+        final Content? content = await ChapterCache.get(aid, c.cid);
         if (content == null) continue;
 
         final images = <({String name, Uint8List bytes})>[];
         if (format == ExportFormat.epub && content.images.isNotEmpty) {
           for (var i = 0; i < content.images.length; i++) {
             final url = content.images[i];
-            final b = isLocalImageUrl(url) ? await LocalBooks.readImageBytes(url) : await imageStore.cached(url);
+            final b = await imageStore.cached(url);
             if (b != null && b.isNotEmpty) {
               images.add((name: 'img_$i', bytes: b));
               imageCount++;
@@ -253,7 +250,7 @@ Future<void> showExportBookDialog(
                           dense: true,
                           contentPadding: EdgeInsets.zero,
                           value: 0,
-                          title: Text(isLocalAid(aid) ? '全书章节（$totalCached 章）' : '全部已缓存章节（$totalCached 章）'),
+                          title: Text('全部已缓存章节（$totalCached 章）'),
                         ),
                         if (exportableVols.length > 1)
                           RadioListTile<int>(
@@ -309,12 +306,15 @@ Future<void> showExportBookDialog(
   }
 
   final progress = ValueNotifier<({String stage, double? value})>((stage: '正在准备导出…', value: null));
+  final rootNav = Navigator.of(context, rootNavigator: true);
+  Route<void>? dialogRoute;
   var dialogOpen = true;
-  unawaited(
-    showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => PopScope(
+  final dialogFuture = showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) {
+      dialogRoute = ModalRoute.of(ctx);
+      return PopScope(
         canPop: false,
         child: ValueListenableBuilder<({String stage, double? value})>(
           valueListenable: progress,
@@ -331,8 +331,14 @@ Future<void> showExportBookDialog(
             ),
           ),
         ),
-      ),
-    ).whenComplete(() => dialogOpen = false),
+      );
+    },
+  );
+  unawaited(
+    dialogFuture.whenComplete(() {
+      dialogOpen = false;
+      progress.dispose();
+    }),
   );
 
   ExportResult? built;
@@ -346,14 +352,26 @@ Future<void> showExportBookDialog(
       imageStore: ref.read(imageStoreProvider),
       coverUrl: cover,
       onlyCids: targetCids,
-      onProgress: (stage, value) => progress.value = (stage: stage, value: value),
+      onProgress: (stage, value) {
+        if (dialogOpen) progress.value = (stage: stage, value: value);
+      },
     );
   } catch (e) {
     error = e;
   } finally {
-    progress.dispose();
-    if (dialogOpen && context.mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
+    if (dialogOpen) {
+      final route = dialogRoute;
+      if (route != null) {
+        if (route.isActive) {
+          if (route.isCurrent) {
+            rootNav.pop();
+          } else {
+            rootNav.removeRoute(route);
+          }
+        }
+      } else if (rootNav.mounted) {
+        rootNav.pop();
+      }
     }
   }
 

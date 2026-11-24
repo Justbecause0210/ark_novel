@@ -221,6 +221,41 @@ void main() {
       expect(delCount, 2);
       expect(BookCharacters.of(aid).map((c) => c.name).toList(), ['小佐内由纪']);
     });
+
+    test('batchUpdateCnSummaries：批量写入多条中文简介无写丢失，且不重复改写高亮规则', () async {
+      const aid = '2099';
+      final imported = await BookCharacters.importMany(
+        aid,
+        const [
+          BookCharacter(id: 'b1', aid: aid, name: '角色甲', role: CharacterRole.main),
+          BookCharacter(id: 'b2', aid: aid, name: '角色乙', role: CharacterRole.main),
+          BookCharacter(id: 'b3', aid: aid, name: '角色丙', role: CharacterRole.support),
+        ],
+        enableHighlight: true,
+      );
+      expect(imported.length, 3);
+      final rulesVerBefore = ReplaceRules.changes.value;
+      final updated = await BookCharacters.batchUpdateCnSummaries(aid, const {
+        'b1': '甲的萌娘百科中文简介',
+        'b2': '乙的萌娘百科中文简介',
+        'b3': '丙的萌娘百科中文简介',
+      });
+      expect(updated, 3);
+      // 不重写高亮规则
+      expect(ReplaceRules.changes.value, rulesVerBefore);
+      final after = {for (final c in BookCharacters.of(aid)) c.id: c};
+      expect(after['b1']!.cnSummary, '甲的萌娘百科中文简介');
+      expect(after['b2']!.cnSummary, '乙的萌娘百科中文简介');
+      expect(after['b3']!.cnSummary, '丙的萌娘百科中文简介');
+      // activeHighlightRuleIds 批量查询准确
+      final activeIds = BookCharacters.activeHighlightRuleIds();
+      expect(after.values.every((c) => activeIds.contains(c.ruleId)), isTrue);
+
+      // onlyIfEmpty=true 时不覆盖已有中文简介
+      final skipped = await BookCharacters.batchUpdateCnSummaries(aid, const {'b1': '新简介不应覆盖'}, onlyIfEmpty: true);
+      expect(skipped, 0);
+      expect(BookCharacters.byId(aid, 'b1')!.cnSummary, '甲的萌娘百科中文简介');
+    });
   });
 
   group('SyncMerge 增量合并 chars 与墓碑删除', () {

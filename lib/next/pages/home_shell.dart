@@ -156,7 +156,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     if (!mounted) return;
     if (r == Routes.bookshelf) return _go(0);
     if (r == Routes.updates) return _go(2);
-    context.push(r);
+    unawaited(context.push(r));
   }
 
   @override
@@ -268,7 +268,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               onTap: needsVerify
                   ? () async {
                       final ok = await context.push<bool>(Routes.verify);
-                      if (ok == true && mounted) _syncAndCheck();
+                      if (ok == true && mounted) unawaited(_syncAndCheck());
                     }
                   : (_reconnecting
                         ? null
