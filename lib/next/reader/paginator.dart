@@ -10,8 +10,20 @@ const _chunkTarget = 6000;
 /// [strut] 要和实际显示正文时用的一样：变色、高亮的文字所在的行会比普通行高一点，不统一行高的话，
 /// 切页时量出来每页装得下的行数，和显示出来的对不上，最后一行就被页脚盖住。
 /// [firstTop] 是第一页顶上让给章节标题的高度（[headingHeight]）。
-List<int> paginate(String text, TextStyle style, Size size, {TextDirection textDirection = TextDirection.ltr, StrutStyle? strut, double firstTop = 0}) {
+/// [paragraphSpacing] 为自然段之间额外留白（像素），大于 0 时按自然段逐段排版累加高度，字符偏移与原文完全一致。
+List<int> paginate(
+  String text,
+  TextStyle style,
+  Size size, {
+  TextDirection textDirection = TextDirection.ltr,
+  StrutStyle? strut,
+  double firstTop = 0,
+  double paragraphSpacing = 0,
+}) {
   if (text.isEmpty) return [0];
+  if (paragraphSpacing > 0) {
+    return _paginateParagraphs(text, style, size, textDirection: textDirection, strut: strut, firstTop: firstTop, paragraphSpacing: paragraphSpacing);
+  }
   if (text.length <= _chunkThreshold) {
     return _paginateRange(text, style, size, textDirection: textDirection, strut: strut, firstTop: firstTop);
   }
@@ -82,6 +94,58 @@ List<int> _paginateChunked(String text, TextStyle style, Size size, {required Te
 
     if (!hasNext) break;
     chunkStart = chunkEnd + 1; // 跳过作为块分隔符的单个 '\n'
+  }
+  return starts;
+}
+
+/// 段间距大于 0 时按自然段逐段排版：每段后累加 [paragraphSpacing] 像素留白，与 `_ParagraphRichText` 逐像素对齐。
+List<int> _paginateParagraphs(
+  String text,
+  TextStyle style,
+  Size size, {
+  required TextDirection textDirection,
+  StrutStyle? strut,
+  required double firstTop,
+  required double paragraphSpacing,
+}) {
+  final starts = <int>[0];
+  var pageTop = -firstTop;
+  var yOffset = 0.0;
+  var pStart = 0;
+  final len = text.length;
+
+  while (pStart < len) {
+    final nl = text.indexOf('\n', pStart);
+    final pEnd = nl < 0 ? len : nl;
+    final para = text.substring(pStart, pEnd);
+    final painter = TextPainter(
+      text: TextSpan(text: para.isEmpty ? ' ' : para, style: style),
+      textDirection: textDirection,
+      strutStyle: strut,
+    )..layout(maxWidth: size.width);
+    final lines = painter.computeLineMetrics();
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      final top = yOffset + line.baseline - line.ascent;
+      final bottom = yOffset + line.baseline + line.descent;
+      if (bottom - pageTop > size.height && top > pageTop) {
+        pageTop = top;
+        final localOffset = para.isEmpty ? 0 : painter.getPositionForOffset(Offset(0, (line.baseline - line.ascent) + line.height / 2)).offset;
+        final offset = pStart + localOffset;
+        if (offset > starts.last) starts.add(offset);
+      }
+    }
+    if (lines.isNotEmpty) {
+      final last = lines.last;
+      yOffset += last.baseline + last.descent;
+    } else if (painter.height > 0) {
+      yOffset += painter.height;
+    }
+    painter.dispose();
+
+    if (nl < 0) break;
+    yOffset += paragraphSpacing;
+    pStart = nl + 1;
   }
   return starts;
 }

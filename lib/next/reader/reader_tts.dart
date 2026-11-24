@@ -278,7 +278,7 @@ class ReaderTtsController {
     active.value = true;
     paused.value = false;
     if (!wasListening) onListeningChanged?.call();
-    refreshNotice();
+    unawaited(refreshNotice());
     await applyPrefs();
     if (gen != _speakGen || _disposed || !isSpeaking || isPaused) return true;
     await _speakNext();
