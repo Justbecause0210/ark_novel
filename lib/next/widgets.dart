@@ -459,6 +459,7 @@ class CoverImage extends ConsumerWidget {
     this.thumbnail = false,
     this.lowPriority = false,
     this.decodeSize,
+    this.borderRadius = 10,
   });
 
   final String url;
@@ -468,6 +469,7 @@ class CoverImage extends ConsumerWidget {
   final bool thumbnail;
   final bool lowPriority;
   final Size? decodeSize;
+  final double borderRadius;
 
   /// 封面加载失败的短 TTL 记录（30s）：首次偶发失败先轻量重试，避免瞬态抖动直接整轮拉黑。
   static const failedUrlTtl = Duration(seconds: 30);
@@ -500,36 +502,35 @@ class CoverImage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
     final icon = Icon(Icons.menu_book_outlined, color: scheme.onSurfaceVariant);
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(10),
-      child: DecoratedBox(
-        decoration: BoxDecoration(color: scheme.surfaceContainer),
-        child: SizedBox.expand(
-          child: NetImage(
-            url,
-            maxDecodeWidth: maxDecodeWidth,
-            thumbnail: thumbnail,
-            lowPriority: lowPriority,
-            decodeSize: decodeSize,
-            error: icon,
-            errorBuilder: (retry) {
-              final clean = splitCrop(url).url;
-              if (clean.isEmpty) return icon;
-              final now = clock();
-              _pruneFailed(now);
-              if (!_failedUrls.containsKey(clean)) {
-                _failedUrls[clean] = now;
-                Future.microtask(retry);
-              } else if (aid != null) {
-                final queue = ref.read(volumeCoverQueueProvider);
-                Future.microtask(() => queue.reportCoverFailed(aid!, url, volumeTitle: volumeTitle));
-              }
-              return icon;
-            },
-          ),
+    final content = DecoratedBox(
+      decoration: BoxDecoration(color: scheme.surfaceContainer),
+      child: SizedBox.expand(
+        child: NetImage(
+          url,
+          maxDecodeWidth: maxDecodeWidth,
+          thumbnail: thumbnail,
+          lowPriority: lowPriority,
+          decodeSize: decodeSize,
+          error: icon,
+          errorBuilder: (retry) {
+            final clean = splitCrop(url).url;
+            if (clean.isEmpty) return icon;
+            final now = clock();
+            _pruneFailed(now);
+            if (!_failedUrls.containsKey(clean)) {
+              _failedUrls[clean] = now;
+              Future.microtask(retry);
+            } else if (aid != null) {
+              final queue = ref.read(volumeCoverQueueProvider);
+              Future.microtask(() => queue.reportCoverFailed(aid!, url, volumeTitle: volumeTitle));
+            }
+            return icon;
+          },
         ),
       ),
     );
+    if (borderRadius <= 0) return content;
+    return ClipRRect(borderRadius: BorderRadius.circular(borderRadius), child: content);
   }
 }
 

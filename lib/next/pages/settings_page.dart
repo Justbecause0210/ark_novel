@@ -123,6 +123,9 @@ class SettingsPage extends ConsumerStatefulWidget {
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   final _search = TextEditingController();
   String _q = '';
+  SettingsSection _selected = SettingsSection.appearance;
+  String? _highlight;
+  int _highlightSeq = 0;
 
   @override
   void dispose() {
@@ -132,7 +135,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final dark = theme.brightness == Brightness.dark;
+    final wide = MediaQuery.sizeOf(context).width >= 720;
     final addon = ref.watch(unlockAddonProvider);
     final q = _q.trim().toLowerCase();
     final hits = q.isEmpty
@@ -145,42 +151,156 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         '同步' => Routes.sync,
         _ => null,
       };
-      context.push(direct ?? Routes.settingsSection(s.name, highlight: item));
+      if (direct != null) {
+        context.push(direct);
+        return;
+      }
+      if (wide) {
+        setState(() {
+          _selected = s;
+          _highlight = item;
+          _highlightSeq++;
+        });
+        return;
+      }
+      context.push(Routes.settingsSection(s.name, highlight: item));
     }
+
+    final searchBox = Padding(
+      padding: EdgeInsets.fromLTRB(16, wide ? 8 : 4, 16, 8),
+      child: TextField(
+        controller: _search,
+        decoration: InputDecoration(
+          hint: Text('搜索设置', maxLines: 1, overflow: TextOverflow.ellipsis),
+          prefixIcon: const Icon(Icons.search, size: 20),
+          suffixIcon: _q.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: hz(context, '清空搜索'),
+                  icon: const Icon(Icons.clear, size: 18),
+                  onPressed: () {
+                    _search.clear();
+                    setState(() => _q = '');
+                  },
+                ),
+          filled: true,
+          fillColor: scheme.onSurface.withValues(alpha: 0.055),
+          isDense: true,
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+          enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: scheme.primary)),
+        ),
+        onChanged: (v) => setState(() => _q = v),
+      ),
+    );
+
+    if (wide) {
+      return Scaffold(
+        body: Row(
+          children: [
+            Container(
+              width: 268,
+              decoration: BoxDecoration(
+                border: Border(right: BorderSide(color: scheme.outline.withValues(alpha: dark ? 0.5 : 0.42))),
+              ),
+              child: SafeArea(
+                bottom: false,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 14, 16, 4),
+                      child: Text('设置', style: theme.textTheme.titleLarge?.copyWith(fontSize: 18, fontWeight: FontWeight.w600)),
+                    ),
+                    searchBox,
+                    Expanded(
+                      child: ListView(
+                        padding: const EdgeInsets.fromLTRB(10, 4, 10, 24),
+                        children: [
+                          if (q.isNotEmpty) ...[
+                            if (hits.isEmpty) const XNote('没有匹配的设置'),
+                            for (final (title, section, _) in hits)
+                              _SettingsNavTile(
+                                icon: section.icon,
+                                title: title,
+                                subtitle: '在「${section.title}」里',
+                                selected: false,
+                                onTap: () => open(section, title),
+                              ),
+                          ] else
+                            for (final (i, group) in _homeGroups.indexed) ...[
+                              if (i > 0)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                  child: Divider(color: scheme.outline.withValues(alpha: 0.4)),
+                                ),
+                              for (final s in group)
+                                _SettingsNavTile(
+                                  icon: s.icon,
+                                  title: s.title,
+                                  selected: _selected == s,
+                                  onTap: () => open(s),
+                                ),
+                            ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(
+              child: SafeArea(
+                bottom: false,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(28, 14, 24, 8),
+                      child: Text(_selected.title, style: theme.textTheme.titleLarge?.copyWith(fontSize: 18, fontWeight: FontWeight.w600)),
+                    ),
+                    Expanded(
+                      child: SettingsSectionPage(
+                        key: ValueKey('settings-pane-${_selected.name}-${_highlight ?? ''}-$_highlightSeq'),
+                        section: _selected,
+                        highlight: _highlight,
+                        embedded: true,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Scaffold(
-      appBar: AppBar(title: const Text('设置')),
+      appBar: AppBar(
+        leading: IconButton(
+          tooltip: hz(context, '返回'),
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () {
+            final router = GoRouter.maybeOf(context);
+            if (router != null) {
+              if (router.canPop()) {
+                router.pop();
+              } else {
+                router.go(Routes.profile);
+              }
+            } else {
+              Navigator.of(context).maybePop();
+            }
+          },
+        ),
+        title: const Text('设置'),
+      ),
       body: contentWidth(
         ListView(
           padding: const EdgeInsets.only(bottom: 32),
           children: [
-            // 圆角搜索条，和页面底色只差一点
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-              child: TextField(
-                controller: _search,
-                decoration: InputDecoration(
-                  hint: Text('搜索设置', maxLines: 1, overflow: TextOverflow.ellipsis),
-                  prefixIcon: const Icon(Icons.search),
-                  suffixIcon: _q.isEmpty
-                      ? null
-                      : IconButton(
-                          tooltip: hz(context, '清空搜索'),
-                          icon: const Icon(Icons.clear, size: 18),
-                          onPressed: () {
-                            _search.clear();
-                            setState(() => _q = '');
-                          },
-                        ),
-                  filled: true,
-                  fillColor: scheme.onSurface.withValues(alpha: 0.06),
-                  isDense: true,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide.none),
-                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: scheme.primary)),
-                ),
-                onChanged: (v) => setState(() => _q = v),
-              ),
-            ),
+            searchBox,
             if (q.isNotEmpty) ...[
               if (hits.isEmpty) const XNote('没有匹配的设置'),
               for (final (title, section, _) in hits) XEntry(icon: section.icon, title: title, subtitle: '在「${section.title}」里', onTap: () => open(section, title)),
@@ -196,11 +316,64 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   }
 }
 
+class _SettingsNavTile extends StatelessWidget {
+  const _SettingsNavTile({required this.icon, required this.title, this.subtitle, required this.selected, required this.onTap});
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final dark = theme.brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1.5),
+      child: Material(
+        color: selected ? scheme.primary.withValues(alpha: dark ? 0.18 : 0.10) : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                Icon(icon, size: 19, color: selected ? scheme.primary : scheme.onSurfaceVariant),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 14, fontWeight: selected ? FontWeight.w600 : FontWeight.w500, color: selected ? scheme.primary : scheme.onSurface),
+                      ),
+                      if (subtitle != null)
+                        Text(subtitle!, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class SettingsSectionPage extends ConsumerStatefulWidget {
-  const SettingsSectionPage({super.key, required this.section, this.highlight});
+  const SettingsSectionPage({super.key, required this.section, this.highlight, this.embedded = false});
 
   final SettingsSection section;
   final String? highlight;
+  final bool embedded;
 
   @override
   ConsumerState<SettingsSectionPage> createState() => _SectionState();
@@ -271,14 +444,12 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
       SettingsSection.about => _about(),
     };
     final hl = widget.highlight;
-    return Scaffold(
-      appBar: AppBar(title: Text(widget.section.title)),
-      body: Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 760),
-          child: SingleChildScrollView(
-          padding: const EdgeInsets.only(bottom: 32),
+    final content = Align(
+      alignment: widget.embedded ? Alignment.topLeft : Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 760),
+        child: SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(widget.embedded ? 8 : 0, 0, widget.embedded ? 12 : 0, 32),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -299,8 +470,12 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
             ],
           ),
         ),
-        ),
       ),
+    );
+    if (widget.embedded) return content;
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.section.title)),
+      body: content,
     );
   }
 
@@ -362,7 +537,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
     return [
       const XGroupTitle('主题'),
       _hl('主题', XSegments<ThemeMode>(value: mode, options: const {ThemeMode.system: '跟随系统', ThemeMode.light: '浅色', ThemeMode.dark: '深色'}, onChanged: (v) => ref.read(themeModeProvider.notifier).set(v))),
-      _hl('纯黑深色', _switch('纯黑深色', P.pureBlack, true, subtitle: '适合 OLED 屏幕')),
+      _hl('纯黑深色', _switch('纯黑深色', P.pureBlack, pureBlackDefault, subtitle: '适合 OLED 屏幕')),
       const XDivider(),
       const XGroupTitle('配色'),
       // 一排色点：点一下换，选中的外面一圈
@@ -522,10 +697,10 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
         ),
       const XDivider(),
       const XGroupTitle('书架顶部'),
-      _hl('继续阅读条', _switch('继续阅读条', P.resumeBar, true, subtitle: '最近读的一本，往下滑书架时自动收起')),
+      _hl('继续阅读条', _switch('继续阅读条', P.resumeBar, false, subtitle: '最近读的一本，网格或列表模式显示，往下滑自动收起')),
       const XDivider(),
       const XGroupTitle('分类标签'),
-      _hl('显示分类书籍数量', _switch('显示分类书籍数量', P.tabCounts, false)),
+      _hl('显示分类书籍数量', _switch('显示分类书籍数量', P.tabCounts, true)),
       _hl('按分类分别设置', _switch('按分类分别设置', P.perCat, false, help: '筛选、排序和显示方式按分类分别保存；关闭后所有分类共用一套。')),
       const XDivider(),
       const XGroupTitle('列数'),
