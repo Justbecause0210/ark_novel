@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.8.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.7.0...ark_novel-v1.8.0) (2026-11-24)
+
+
+### Features
+
+* Mac 宽屏改为带文字的侧栏，资料库和账号直接放在侧栏里 ([f9ed3b3](https://github.com/chenshi221/ark_novel/commit/f9ed3b304a98408d8d064d900146a08df98128f4))
+* 新增书脊书架模式并优化立体书架交互、分类计数与单行顶栏 ([7b5d5c4](https://github.com/chenshi221/ark_novel/commit/7b5d5c42fae9733b5c5265aa646323027c3ef377))
+* 立体书架与分卷页新增方向性滚筒字幕、桌面 3D 视差倾转与悬停抬升 ([f35223e](https://github.com/chenshi221/ark_novel/commit/f35223e9be88873adb7d4870d7039d6794d70732))
+* 重新调整全部配色，卡片与分隔线层次更清晰 ([6797c6c](https://github.com/chenshi221/ark_novel/commit/6797c6c09bb95c6998a4c91606ee5bd252648071))
+* 重构宽屏侧边栏并支持打开设置保留侧栏与双栏布局 ([de06ab0](https://github.com/chenshi221/ark_novel/commit/de06ab0e7e24aca8ed4ed381dd1b6416c69e4f80))
+
+
+### Bug Fixes
+
+* 修复网络拦截点击验证时默认进入登录页的问题 ([cdba087](https://github.com/chenshi221/ark_novel/commit/cdba0875294d5165694fcf11647a50aa9a8854a3))
+* 修复苹果端网络栈 -1000 异常回落、重定向 HTTPS 升级与切节点自动刷新 ([5b77aea](https://github.com/chenshi221/ark_novel/commit/5b77aeae5a43809174b65e6a597c5e228795c933))
+
 ## [1.7.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.6.0...ark_novel-v1.7.0) (2026-11-24)
 
 
