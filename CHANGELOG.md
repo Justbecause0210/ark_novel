@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.7.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.6.0...ark_novel-v1.7.0) (2026-11-24)
+
+
+### Features
+
+* 优化冷启动缓存隔离、图片与超分调度并开启 Android R8 瘦身 ([3f8d64e](https://github.com/chenshi221/ark_novel/commit/3f8d64ec84e4307ad533594bc01dd068841ad49b))
+* 新增启动自愈与脱敏诊断日志、同步诊断面板及桌面端原生菜单 ([923d2bf](https://github.com/chenshi221/ark_novel/commit/923d2bf3ac7d344026386709eb52ade5384bf3c4))
+* 阅读器新增字间距与段间距、自由划线摘录（支持导出 Markdown）与跳转撤销条 ([107cb46](https://github.com/chenshi221/ark_novel/commit/107cb46e77c3801085cea7769d2bb86c44237eb1))
+
+
+### Bug Fixes
+
+* 移除本地书籍导入功能（保留在线书导出）并修复规则、人物与搜索稳定性问题 ([21d1d63](https://github.com/chenshi221/ark_novel/commit/21d1d63d5d038b3f1bc2e82674eecd7f27aae9f9))
+
 ## [1.6.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.5.0...ark_novel-v1.6.0) (2026-11-23)
 
 
