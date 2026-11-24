@@ -1,10 +1,24 @@
 import 'package:flutter/material.dart' hide Text;
 
+import 'env.dart';
 import 'theme_doodle.dart';
 import 'text.dart';
 
 /// 「我的」、设置、设置子页面共用的列表零件，照 X（推特）侧边栏的样子：没有卡片和边框，铺在页面底色上，
 /// 线条图标、黑白灰文字，靠字号、粗细、留白和细分隔线分层；强调色只用在开关、选中这些控件上。
+
+/// 一行的点按区域。桌面端悬停高亮内缩成圆角块，不再整行通栏；左右总留白不变，和组名、分隔线对齐。
+Widget _rowInk({required VoidCallback? onTap, required EdgeInsets padding, required Widget child}) {
+  if (!isDesktop) return InkWell(onTap: onTap, child: Padding(padding: padding, child: child));
+  return Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 8),
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(padding: padding.copyWith(left: padding.left - 8, right: padding.right - 8), child: child),
+    ),
+  );
+}
 
 /// 大号导航行：线条图标 + 粗体大字（「我的」的主列表）。[big] 为 false 时是次一级的小号普通字。
 class XNavRow extends StatelessWidget {
@@ -20,20 +34,20 @@ class XNavRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final fg = color ?? Theme.of(context).colorScheme.onSurface;
-    return InkWell(
+    // 桌面端用鼠标看，X 那种 18 号粗体太重，降一档
+    final d = isDesktop;
+    return _rowInk(
       onTap: onTap,
-      child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: 20, vertical: big ? 12 : 10),
-        child: Row(
-          children: [
-            Icon(icon, size: big ? 24 : 22, color: fg),
-            SizedBox(width: big ? 18 : 16),
-            Expanded(
-              child: Text(title, style: TextStyle(fontSize: big ? 18 : 15.5, fontWeight: big ? FontWeight.w700 : FontWeight.w400, color: fg)),
-            ),
-            ?trailing,
-          ],
-        ),
+      padding: EdgeInsets.symmetric(horizontal: 20, vertical: big ? (d ? 10 : 12) : (d ? 8 : 10)),
+      child: Row(
+        children: [
+          Icon(icon, size: big ? (d ? 21 : 24) : (d ? 20 : 22), color: fg),
+          SizedBox(width: big ? (d ? 14 : 18) : (d ? 14 : 16)),
+          Expanded(
+            child: Text(title, style: TextStyle(fontSize: big ? (d ? 15.5 : 18) : (d ? 14.5 : 15.5), fontWeight: big ? (d ? FontWeight.w600 : FontWeight.w700) : FontWeight.w400, color: fg)),
+          ),
+          ?trailing,
+        ],
       ),
     );
   }
@@ -51,25 +65,24 @@ class XEntry extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return InkWell(
+    final d = isDesktop;
+    return _rowInk(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
-        child: Row(
-          children: [
-            Icon(icon, size: 23, color: scheme.onSurface),
-            const SizedBox(width: 18),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: scheme.onSurface)),
-                  if (subtitle != null) ...[const SizedBox(height: 1), Text(subtitle!, style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant))],
-                ],
-              ),
+      padding: EdgeInsets.symmetric(horizontal: 20, vertical: d ? 9 : 11),
+      child: Row(
+        children: [
+          Icon(icon, size: d ? 21 : 23, color: scheme.onSurface),
+          SizedBox(width: d ? 14 : 18),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: TextStyle(fontSize: d ? 15 : 16, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+                if (subtitle != null) ...[const SizedBox(height: 1), Text(subtitle!, style: TextStyle(fontSize: d ? 12.5 : 13, color: scheme.onSurfaceVariant))],
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -129,12 +142,12 @@ class XTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return InkWell(
+    final d = isDesktop;
+    return _rowInk(
       onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-        // 带开关、带箭头、只有文字的行一样高
-        child: ConstrainedBox(
+      padding: EdgeInsets.symmetric(horizontal: 20, vertical: d ? 8 : 10),
+      // 带开关、带箭头、只有文字的行一样高
+      child: ConstrainedBox(
           constraints: const BoxConstraints(minHeight: 32),
           child: Row(
           children: [
@@ -145,7 +158,7 @@ class XTile extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Flexible(child: Text(title, style: TextStyle(fontSize: 15.5, color: danger ? scheme.error : scheme.onSurface))),
+                      Flexible(child: Text(title, style: TextStyle(fontSize: d ? 14.5 : 15.5, color: danger ? scheme.error : scheme.onSurface))),
                       if (help != null)
                         InkResponse(
                           radius: 16,
@@ -157,13 +170,12 @@ class XTile extends StatelessWidget {
                         ),
                     ],
                   ),
-                  if (subtitle != null) ...[const SizedBox(height: 3), Text(subtitle!, style: TextStyle(fontSize: 13, height: 1.4, color: scheme.onSurfaceVariant))],
+                  if (subtitle != null) ...[const SizedBox(height: 3), Text(subtitle!, style: TextStyle(fontSize: d ? 12.5 : 13, height: 1.4, color: scheme.onSurfaceVariant))],
                 ],
               ),
             ),
             if (trailing != null) ...[const SizedBox(width: 12), trailing!],
           ],
-        ),
         ),
       ),
     );

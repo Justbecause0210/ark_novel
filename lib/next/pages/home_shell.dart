@@ -12,6 +12,7 @@ import '../../models/common/wenku8_node.dart';
 import '../app_prefs.dart';
 import '../cache.dart';
 import '../env.dart';
+import '../history.dart';
 import '../image_cache.dart';
 import '../incognito.dart';
 import '../library.dart';
@@ -25,8 +26,27 @@ import '../theme.dart';
 import '../theme_art.dart';
 import '../updates.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Volumes;
+import '../volumes.dart' show Volumes, volumeChangeForProvider;
+import '../widgets.dart' show CoverImage;
 import '../text.dart';
+import 'bookmarks_page.dart' show BookmarksPage;
+import 'library_pages.dart' show CachePage, HistoryPage;
+import 'profile_page.dart' show AccountAvatar, avatarMenu, confirmLogout;
+import 'stats_page.dart' show StatsPage;
+import 'wall_page.dart' show WallPage;
+
+/// 宽侧栏里打开的「资料库」页面（路由地址）：在主界面右侧打开，侧栏留着；null 时右侧显示当前标签页。
+final shellLibraryPage = ValueNotifier<String?>(null);
+bool _libraryInShell = false;
+
+/// 打开资料库页面：宽侧栏在时留在主界面右侧打开（保留侧栏），否则照常整页推入。
+void openLibraryPage(BuildContext context, String route) {
+  if (_libraryInShell) {
+    shellLibraryPage.value = route;
+  } else {
+    context.push(route);
+  }
+}
 
 /// 主界面框架：窄屏底部导航，宽屏（平板、电脑、网页）左侧导航。
 class HomeShell extends ConsumerStatefulWidget {
@@ -90,6 +110,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     Sync.changes.addListener(_onSyncChanged);
     LibraryStore.removedElsewhere.addListener(_onRemovedElsewhere);
+    shellLibraryPage.addListener(_onUnreadChanged);
     if (Hive.isBoxOpen('session')) {
       _unreadWatch = Hive.box('session').listenable(keys: ['updates', 'updates:seen'])..addListener(_onUnreadChanged);
     }
@@ -164,6 +185,8 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     WidgetsBinding.instance.removeObserver(this);
     Sync.changes.removeListener(_onSyncChanged);
     LibraryStore.removedElsewhere.removeListener(_onRemovedElsewhere);
+    shellLibraryPage.removeListener(_onUnreadChanged);
+    _libraryInShell = false;
     _timer?.cancel();
     _maintenance?.cancel();
     _widgetTimer?.cancel();
@@ -231,9 +254,28 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
 
   // 最后一项是主题导航图标的序号（图标按含义编号：0 发现 1 书架 2 更新 3 我的）
   static const _items = [(Icons.auto_stories_outlined, Icons.auto_stories, '书架', 1), (Icons.explore_outlined, Icons.explore, '发现', 0), (Icons.update_outlined, Icons.update, '更新', 2), (Icons.person_outline, Icons.person, '我的', 3)];
+
+  /// 宽侧栏「资料库」一组：原来要先进「我的」才点得到的常用页面
+  static const _library = [
+    (Icons.insights_outlined, '阅读统计', Routes.stats),
+    (Icons.collections_bookmark_outlined, '书籍墙', Routes.wall),
+    (Icons.history, '阅读历史', Routes.history),
+    (Icons.bookmark_border, '书签', Routes.bookmarks),
+    (Icons.download_outlined, '离线缓存', Routes.cache),
+  ];
+
+  static Widget? _libraryWidget(String? route) => switch (route) {
+    Routes.stats => const StatsPage(),
+    Routes.wall => const WallPage(),
+    Routes.history => const HistoryPage(),
+    Routes.bookmarks => const BookmarksPage(),
+    Routes.cache => const CachePage(),
+    _ => null,
+  };
   int _lastMainTab = 0;
 
   void _go(int index) {
+    shellLibraryPage.value = null;
     if (index < _items.length) _lastMainTab = index;
     shell.goBranch(index, initialLocation: index == shell.currentIndex);
   }
@@ -257,10 +299,16 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     final incognito = ref.watch(incognitoProvider);
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final libRoute = shellLibraryPage.value;
+    final libPage = _libraryWidget(libRoute);
+    Widget rawIcon(int i, bool selected) {
+      final (outlined, filled, _, artIndex) = _items[i];
+      return ThemeArt.navIcon(palette, artIndex, selected: selected) ?? Icon(selected ? filled : outlined);
+    }
+
     Widget icon(int i, bool selected) {
-      final (outlined, filled, label, artIndex) = _items[i];
-      final art = ThemeArt.navIcon(palette, artIndex, selected: selected) ?? Icon(selected ? filled : outlined);
-      return label == '更新' && unread > 0 ? Badge(label: Text('$unread'), child: art) : art;
+      final art = rawIcon(i, selected);
+      return _items[i].$3 == '更新' && unread > 0 ? Badge(label: Text('$unread'), child: art) : art;
     }
 
     final body = Column(
@@ -367,8 +415,24 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               ),
             ),
           ),
-        // 提示条已经让开了状态栏，下面的页面就别再留一次
-        Expanded(child: MediaQuery.removePadding(context: context, removeTop: offline || incognito, child: shell)),
+        // 提示条已经让开了状态栏，下面的页面就别再留一次。用 Builder 取这里的 MediaQuery：
+        // Mac 宽屏右侧已经去掉了给红绿灯留的顶部空白，直接用外层 context 会把空白又加回来
+        Expanded(
+          child: Builder(
+            builder: (context) => MediaQuery.removePadding(
+              context: context,
+              removeTop: offline || incognito,
+              // 资料库页面盖在标签页上面，标签页留在原地不重建（书架滚动位置、发现页内容都还在）
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Offstage(offstage: libPage != null, child: TickerMode(enabled: libPage == null, child: shell)),
+                  if (libPage != null) KeyedSubtree(key: ValueKey(libRoute), child: libPage),
+                ],
+              ),
+            ),
+          ),
+        ),
       ],
     );
     final wide = MediaQuery.sizeOf(context).width >= 720;
@@ -387,6 +451,10 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
         canPop: false,
         onPopInvokedWithResult: (didPop, _) {
           if (didPop) return;
+          if (shellLibraryPage.value != null) {
+            shellLibraryPage.value = null;
+            return;
+          }
           if (shell.currentIndex == 4) return _go(_lastMainTab);
           if (shell.currentIndex != 0) return _go(0);
           if (shelfSelecting.value || shelfSearching.value) return; // 书架自己先退出多选 / 搜索
@@ -405,14 +473,67 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     if (wide) {
       if (shell.currentIndex < _items.length) _lastMainTab = shell.currentIndex;
       final dark = theme.brightness == Brightness.dark;
-      final railBg = Color.alphaBlend(scheme.onSurface.withValues(alpha: dark ? 0.03 : 0.022), scheme.surface);
-      final rightPane = mac ? MediaQuery.removePadding(context: context, removeTop: true, child: body) : body;
+      final size = MediaQuery.sizeOf(context);
+      // 窗口够宽时用 Finder 那样带文字的源列表，窄了退回只有图标的窄栏
+      final roomy = size.width >= 960;
+      _libraryInShell = roomy;
+      final railBg = roomy
+          ? (dark ? Color.lerp(scheme.surface, Colors.black, 0.18)! : Color.lerp(scheme.surface, scheme.onSurface, 0.035)!)
+          : Color.alphaBlend(scheme.onSurface.withValues(alpha: dark ? 0.03 : 0.022), scheme.surface);
+      // Mac：红绿灯在侧栏里，右侧不用让出整条标题栏，只留一点顶部空白（由顶栏自己的底色铺满），不顶到窗口边
+      final rightPane = mac
+          ? MediaQuery(
+              data: MediaQuery.of(context).copyWith(
+                padding: MediaQuery.paddingOf(context).copyWith(top: 12),
+                viewPadding: MediaQuery.viewPaddingOf(context).copyWith(top: 12),
+              ),
+              child: body,
+            )
+          : body;
+      final cur = libRoute == null ? shell.currentIndex : -1; // 打开资料库页面时主导航不选中
+      final sourceList = Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(height: mac ? 40 : 14),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 14, 12),
+            child: Text(
+              'Ark Novel',
+              maxLines: 1,
+              style: TextStyle(
+                fontFamily: palette.scene ? 'LXGWWenKai' : kSerifFallback.first,
+                fontFamilyFallback: kSerifFallback,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.3,
+                color: scheme.onSurface,
+              ),
+            ),
+          ),
+          // 「我的」的内容在宽侧栏里拆开了：资料库一组 + 底部账号行，这里不再单列
+          for (final (i, item) in _items.indexed)
+            if (item.$3 != '我的')
+            _SourceItem(
+              label: item.$3,
+              selected: cur == i,
+              icon: rawIcon(i, cur == i),
+              badge: item.$3 == '更新' && unread > 0 ? '$unread' : null,
+              onTap: () => _go(i),
+            ),
+          const _SourceSection('资料库'),
+          for (final (ic, label, route) in _library) _SourceItem(label: label, selected: libRoute == route, icon: Icon(ic), onTap: () => shellLibraryPage.value = route),
+          const Spacer(),
+          if (size.height >= 680) const _SidebarResume(),
+          _SidebarAccount(settingsSelected: cur == 4, onSettings: () => _go(4)),
+          const SizedBox(height: 10),
+        ],
+      );
       return back(Scaffold(
         body: Row(
           children: [
             Container(
               key: const ValueKey('desktop-sidebar'),
-              width: 78,
+              width: roomy ? 200 : 78,
               decoration: BoxDecoration(
                 color: railBg,
                 border: Border(right: BorderSide(color: scheme.outline.withValues(alpha: dark ? 0.5 : 0.42))),
@@ -420,15 +541,17 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               child: SafeArea(
                 top: !mac,
                 right: false,
-                child: Column(
+                child: roomy
+                    ? Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: sourceList)
+                    : Column(
                   children: [
                     SizedBox(height: mac ? 46 : 16),
                     for (final (i, item) in _items.indexed) ...[
                       if (i > 0) const SizedBox(height: 6),
                       _SidebarTile(
                         label: item.$3,
-                        selected: shell.currentIndex == i,
-                        icon: icon(i, shell.currentIndex == i),
+                        selected: cur == i,
+                        icon: icon(i, cur == i),
                         onTap: () => _go(i),
                       ),
                     ],
@@ -436,8 +559,8 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
                     _SidebarTile(
                       key: const ValueKey('sidebar-settings'),
                       label: '设置',
-                      selected: shell.currentIndex == 4,
-                      icon: Icon(shell.currentIndex == 4 ? Icons.settings : Icons.settings_outlined, size: 22),
+                      selected: cur == 4,
+                      icon: Icon(cur == 4 ? Icons.settings : Icons.settings_outlined, size: 22),
                       onTap: () => _go(4),
                     ),
                     const SizedBox(height: 14),
@@ -451,6 +574,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       ));
     }
     if (shell.currentIndex < _items.length) _lastMainTab = shell.currentIndex;
+    _libraryInShell = false;
     return back(Scaffold(
       body: body,
       // 书架多选或窄屏进入设置时收起底部导航
@@ -538,6 +662,246 @@ class _SidebarTileState extends State<_SidebarTile> {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 宽侧栏的分组名：灰色小字
+class _SourceSection extends StatelessWidget {
+  const _SourceSection(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(12, 16, 12, 4),
+    child: Text(text, style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600, color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.72))),
+  );
+}
+
+/// 宽侧栏的一行：图标 + 文字横排，选中是淡强调色的圆角底块，悬停有浅灰底；[badge] 是右侧的数字胶囊。
+class _SourceItem extends StatefulWidget {
+  const _SourceItem({required this.label, required this.selected, required this.icon, required this.onTap, this.badge});
+
+  final String label;
+  final bool selected;
+  final Widget icon;
+  final VoidCallback onTap;
+  final String? badge;
+
+  @override
+  State<_SourceItem> createState() => _SourceItemState();
+}
+
+class _SourceItemState extends State<_SourceItem> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final dark = theme.brightness == Brightness.dark;
+    final bg = widget.selected
+        ? scheme.primary.withValues(alpha: dark ? 0.2 : 0.11)
+        : (_hovered ? scheme.onSurface.withValues(alpha: dark ? 0.06 : 0.045) : Colors.transparent);
+    final fg = widget.selected ? scheme.primary : scheme.onSurface;
+    return Semantics(
+      button: true,
+      selected: widget.selected,
+      label: hz(context, widget.label),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 140),
+            curve: Curves.easeOutCubic,
+            height: 36,
+            margin: const EdgeInsets.only(bottom: 2),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
+            child: Row(
+              children: [
+                SizedBox.square(
+                  dimension: 28,
+                  child: Center(
+                    child: IconTheme(data: IconThemeData(size: 19, color: widget.selected ? scheme.primary : scheme.onSurfaceVariant), child: widget.icon),
+                  ),
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    widget.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 13.5, fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500, color: fg),
+                  ),
+                ),
+                if (widget.badge != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+                    decoration: BoxDecoration(color: scheme.primary, borderRadius: BorderRadius.circular(9)),
+                    child: Text(widget.badge!, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: scheme.onPrimary, fontFeatures: const [FontFeature.tabularFigures()])),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 宽侧栏底部的「继续阅读」小卡：最近读的一本，点了直接进阅读器，长按进详情。
+class _SidebarResume extends ConsumerWidget {
+  const _SidebarResume();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => ValueListenableBuilder(
+    valueListenable: Hive.box('session').listenable(keys: ['history2']),
+    builder: (context, _, _) {
+      final h = ReadingHistory.all().firstOrNull;
+      if (h == null) return const SizedBox.shrink();
+      return Consumer(
+        builder: (context, ref, _) {
+          ref.watch(volumeChangeForProvider(h.aid)); // 换了高清封面跟着换
+          final cover = ref.read(volumeCoverQueueProvider).bookCover(h.aid, h.img);
+          final scheme = Theme.of(context).colorScheme;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Material(
+              color: scheme.surfaceContainerLowest,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: scheme.outline)),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onTap: () => context.push(Routes.reader(h.aid, h.cid)),
+                onLongPress: () => context.push(Routes.novel(h.aid)),
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 32,
+                        height: 45,
+                        decoration: BoxDecoration(borderRadius: BorderRadius.circular(4), boxShadow: const [BoxShadow(color: Color(0x33000000), blurRadius: 4, offset: Offset(0, 1))]),
+                        clipBehavior: Clip.antiAlias,
+                        child: CoverImage(cover, aid: h.aid, thumbnail: true, decodeSize: const Size(32, 45)),
+                      ),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('继续阅读', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: scheme.primary)),
+                            const SizedBox(height: 1),
+                            Text(LibraryStore.shown(h.aid, h.title), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+                            Text(h.chapter, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
+}
+
+/// 宽侧栏底部的账号行：头像、名字、UID，点开是账号菜单（无痕模式、换头像、退出登录）；右边一个设置齿轮。
+/// 没登录时点名字直接去登录页。
+class _SidebarAccount extends ConsumerWidget {
+  const _SidebarAccount({required this.settingsSelected, required this.onSettings});
+
+  final bool settingsSelected;
+  final VoidCallback onSettings;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final session = ref.watch(sessionProvider);
+    final incognito = ref.watch(incognitoProvider);
+    final scheme = Theme.of(context).colorScheme;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final user = session is SessionLoggedIn ? session.user : null;
+    // 名字下面只在有状态时才显示一行：没登录、离线、无痕模式
+    final sub = user == null ? '点击登录' : (incognito ? '无痕模式中' : (session is SessionLoggedIn && session.offline ? '离线' : null));
+    final info = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      child: Row(
+        children: [
+          const AccountAvatar(radius: 15),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(user?.username ?? '未登录', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+                if (sub != null) Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: incognito ? scheme.primary : scheme.onSurfaceVariant)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    final account = user == null
+        ? InkWell(borderRadius: BorderRadius.circular(8), onTap: () => context.push(Routes.login), child: info)
+        : PopupMenuButton<String>(
+            tooltip: hz(context, '账号'),
+            position: PopupMenuPosition.over,
+            offset: const Offset(0, -8),
+            onSelected: (v) {
+              switch (v) {
+                case 'incognito':
+                  ref.read(incognitoProvider.notifier).set(!incognito);
+                case 'avatar':
+                  avatarMenu(context, ref);
+                case 'logout':
+                  confirmLogout(context, ref);
+              }
+            },
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: 'incognito',
+                child: ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.visibility_off_outlined),
+                  title: const Text('无痕模式'),
+                  trailing: incognito ? Icon(Icons.check, size: 18, color: scheme.primary) : null,
+                ),
+              ),
+              if (!isWebPreview) const PopupMenuItem(value: 'avatar', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.face_outlined), title: Text('更换头像'))),
+              const PopupMenuDivider(),
+              PopupMenuItem(value: 'logout', child: ListTile(dense: true, contentPadding: EdgeInsets.zero, leading: Icon(Icons.logout, color: scheme.error), title: Text('退出登录', style: TextStyle(color: scheme.error)))),
+            ],
+            child: info,
+          );
+    return Row(
+      children: [
+        Expanded(child: Material(type: MaterialType.transparency, child: account)),
+        IconButton(
+          key: const ValueKey('sidebar-settings'),
+          tooltip: hz(context, '设置'),
+          isSelected: settingsSelected,
+          onPressed: onSettings,
+          style: IconButton.styleFrom(
+            fixedSize: const Size(34, 34),
+            minimumSize: const Size(34, 34),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            backgroundColor: settingsSelected ? scheme.primary.withValues(alpha: dark ? 0.2 : 0.11) : null,
+          ),
+          icon: Icon(Icons.settings_outlined, size: 19, color: scheme.onSurfaceVariant),
+          selectedIcon: Icon(Icons.settings, size: 19, color: scheme.primary),
+        ),
+      ],
     );
   }
 }
