@@ -160,6 +160,6 @@ Map<String, Object> syncShelfOptions(Map remote) {
   return {
     for (final e in fields.entries)
       if (_typed(remote[e.key], e.value) case final Object v)
-        if (v is! int || (v >= 0 && v <= (e.key == 'sort' ? 7 : (e.key == 'display' ? 4 : 2)))) e.key: v,
+        if (v is! int || (v >= 0 && v <= (e.key == 'sort' ? 7 : (e.key == 'display' ? 5 : 2)))) e.key: v,
   };
 }

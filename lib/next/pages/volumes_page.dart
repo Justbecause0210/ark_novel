@@ -17,6 +17,7 @@ import '../progress.dart';
 import '../read_state.dart';
 import '../routes.dart';
 import '../settings.dart';
+import '../shelf_3d.dart' show MaskedRollSwitcher;
 import '../stats.dart';
 import '../swipe.dart';
 import '../volume_covers.dart';
@@ -43,6 +44,7 @@ class VolumesPage extends ConsumerStatefulWidget {
 class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProviderStateMixin {
   // 先停在第一卷（和书架上那叠对得上），开场动画放完再滑到正在读的那卷
   int _cur = 0;
+  int _dir = 1;
   final _pc = PageController(viewportFraction: 0.5);
   // 开场：封面飞到位以后，后面几卷从封面后面往右抽出来
   late final _intro = AnimationController(vsync: this, duration: const Duration(milliseconds: 450));
@@ -296,7 +298,10 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
         intro: _intro,
         coverOf: coverOf,
         onPage: (i) {
-          setState(() => _cur = i);
+          setState(() {
+            if (i != _cur) _dir = i > _cur ? 1 : -1;
+            _cur = i;
+          });
           _precacheAround(i, vols, coverOf);
         },
         onCoverSize: (s) {
@@ -371,7 +376,7 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
         opacity: shown,
         child: SlideTransition(
           position: Tween(begin: const Offset(0, 0.3), end: Offset.zero).animate(shown),
-          child: _Summary(aid: aid, vol: v, index: cur, count: vols.length),
+          child: _Summary(aid: aid, vol: v, index: cur, count: vols.length, direction: _dir),
         ),
       );
       final details = _Details(

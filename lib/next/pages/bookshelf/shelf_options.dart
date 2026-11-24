@@ -24,7 +24,7 @@ class ShelfOptions {
   /// 排序方向反过来（每种排序都有自己默认的方向）
   final bool reverse;
 
-  /// 0 网格 1 紧凑网格 2 列表 3 卷册（一本书画成一摞卷） 4 立体
+  /// 0 网格 1 紧凑网格 2 列表 3 卷册（一本书画成一摞卷） 4 立体 5 书脊（竖插书脊、当前书 3D 抽出展示封面）
   final int display;
 
   /// 筛选：有未读 / 已开始读 / 有缓存 / 有书签 / 已完结
@@ -306,9 +306,9 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
     return ListView(
       padding: const EdgeInsets.only(bottom: 16),
       children: [
-        XChips<int>(title: '显示方式', value: o.display, options: const {0: '网格', 1: '紧凑', 2: '列表', 3: '卷册', 4: '立体'}, onChanged: (v) => _set(o.copyWith(display: v))),
+        XChips<int>(title: '显示方式', value: o.display, options: const {0: '网格', 1: '紧凑', 2: '列表', 3: '卷册', 4: '立体', 5: '书脊'}, onChanged: (v) => _set(o.copyWith(display: v))),
         // 就是设置里的书架列数（竖屏、横屏分开记），这里放常用的几种；设置里选了别的也列出来
-        if (o.display != 2 && o.display != 4)
+        if (o.display != 2 && o.display != 4 && o.display != 5)
           XSegments<int>(
             title: '每行几本',
             value: cols,
@@ -331,7 +331,7 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
     final cols = ref.watch(appPref(colsKey, 0));
     final unreadBadge = ref.watch(appPref(P.unreadBadge, true));
     final cacheBadge = ref.watch(appPref(P.cacheBadge, false));
-    final resumeBar = ref.watch(appPref(P.resumeBar, true));
+    final resumeBar = ref.watch(appPref(P.resumeBar, false));
     final o = shelfOptionsFor(ref.watch(shelfOptionsProvider), widget.tabId);
     final scheme = Theme.of(context).colorScheme;
     final tabName = allShelfTabs(ref.read(libraryProvider).cats).firstWhere((c) => c.id == widget.tabId, orElse: () => const LibCategory('', '默认')).name;

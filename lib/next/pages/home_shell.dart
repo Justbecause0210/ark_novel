@@ -231,8 +231,12 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
 
   // 最后一项是主题导航图标的序号（图标按含义编号：0 发现 1 书架 2 更新 3 我的）
   static const _items = [(Icons.auto_stories_outlined, Icons.auto_stories, '书架', 1), (Icons.explore_outlined, Icons.explore, '发现', 0), (Icons.update_outlined, Icons.update, '更新', 2), (Icons.person_outline, Icons.person, '我的', 3)];
+  int _lastMainTab = 0;
 
-  void _go(int index) => shell.goBranch(index, initialLocation: index == shell.currentIndex);
+  void _go(int index) {
+    if (index < _items.length) _lastMainTab = index;
+    shell.goBranch(index, initialLocation: index == shell.currentIndex);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -268,7 +272,28 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               onTap: needsVerify
                   ? () async {
                       final ok = await context.push<bool>(Routes.verify);
-                      if (ok == true && mounted) unawaited(_syncAndCheck());
+                      if (ok == true && mounted) {
+                        await _syncAndCheck();
+                        if (!mounted) return;
+                        final after = ref.read(sessionProvider);
+                        final stillBlocked = (after is SessionLoggedIn && after.needsVerify) || (after is SessionLoggedOut && after.needsVerify);
+                        if (stillBlocked) {
+                          final onNet = ref.read(nodeProvider) == Wenku8Node.wwwWenku8Net;
+                          final messenger = ScaffoldMessenger.of(this.context)..hideCurrentSnackBar();
+                          messenger.showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                onNet
+                                    ? '网页未触发人机验证，但当前线路仍被拦截，可切到 wenku8.cc 或检查代理出口'
+                                    : '网页未触发人机验证，但接口仍被拦截，请检查系统代理与 App 代理出口是否一致',
+                              ),
+                              action: onNet
+                                  ? SnackBarAction(label: '切到 wenku8.cc', onPressed: () => ref.read(nodeProvider.notifier).set(Wenku8Node.wwwWenku8Cc))
+                                  : SnackBarAction(label: '网络设置', onPressed: () => this.context.push(Routes.settingsSection('network'))),
+                            ),
+                          );
+                        }
+                      }
                     }
                   : (_reconnecting
                         ? null
@@ -356,12 +381,13 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
         SingleActivator(LogicalKeyboardKey.digit3, meta: mac, control: !mac): () => _go(2),
         SingleActivator(LogicalKeyboardKey.digit4, meta: mac, control: !mac): () => _go(3),
         SingleActivator(LogicalKeyboardKey.keyF, meta: mac, control: !mac): () => context.push(Routes.search),
-        SingleActivator(LogicalKeyboardKey.comma, meta: mac, control: !mac): () => context.push(Routes.settings),
+        SingleActivator(LogicalKeyboardKey.comma, meta: mac, control: !mac): () => _go(4),
       },
       child: PopScope(
         canPop: false,
         onPopInvokedWithResult: (didPop, _) {
           if (didPop) return;
+          if (shell.currentIndex == 4) return _go(_lastMainTab);
           if (shell.currentIndex != 0) return _go(0);
           if (shelfSelecting.value || shelfSearching.value) return; // 书架自己先退出多选 / 搜索
           if (defaultTargetPlatform != TargetPlatform.android) return;
@@ -377,42 +403,67 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       ),
     );
     if (wide) {
-      final navTheme = theme.navigationBarTheme;
+      if (shell.currentIndex < _items.length) _lastMainTab = shell.currentIndex;
+      final dark = theme.brightness == Brightness.dark;
+      final railBg = Color.alphaBlend(scheme.onSurface.withValues(alpha: dark ? 0.03 : 0.022), scheme.surface);
+      final rightPane = mac ? MediaQuery.removePadding(context: context, removeTop: true, child: body) : body;
       return back(Scaffold(
         body: Row(
           children: [
-            NavigationRail(
-              selectedIndex: shell.currentIndex,
-              onDestinationSelected: _go,
-              groupAlignment: 0.0,
-              labelType: NavigationRailLabelType.all,
-              leading: mac ? const SizedBox(height: 28) : null,
-              backgroundColor: navTheme.backgroundColor ?? scheme.surfaceContainerLow,
-              indicatorColor: navTheme.indicatorColor ?? (palette.scene ? scheme.secondary.withValues(alpha: 0.26) : scheme.primary.withValues(alpha: 0.14)),
-              indicatorShape: navTheme.indicatorShape ?? (palette.scene ? RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)) : null),
-              destinations: [
-                for (final (i, item) in _items.indexed) NavigationRailDestination(icon: icon(i, false), selectedIcon: icon(i, true), label: Text(item.$3)),
-              ],
+            Container(
+              key: const ValueKey('desktop-sidebar'),
+              width: 78,
+              decoration: BoxDecoration(
+                color: railBg,
+                border: Border(right: BorderSide(color: scheme.outline.withValues(alpha: dark ? 0.5 : 0.42))),
+              ),
+              child: SafeArea(
+                top: !mac,
+                right: false,
+                child: Column(
+                  children: [
+                    SizedBox(height: mac ? 46 : 16),
+                    for (final (i, item) in _items.indexed) ...[
+                      if (i > 0) const SizedBox(height: 6),
+                      _SidebarTile(
+                        label: item.$3,
+                        selected: shell.currentIndex == i,
+                        icon: icon(i, shell.currentIndex == i),
+                        onTap: () => _go(i),
+                      ),
+                    ],
+                    const Spacer(),
+                    _SidebarTile(
+                      key: const ValueKey('sidebar-settings'),
+                      label: '设置',
+                      selected: shell.currentIndex == 4,
+                      icon: Icon(shell.currentIndex == 4 ? Icons.settings : Icons.settings_outlined, size: 22),
+                      onTap: () => _go(4),
+                    ),
+                    const SizedBox(height: 14),
+                  ],
+                ),
+              ),
             ),
-            const VerticalDivider(width: 1),
-            Expanded(child: body),
+            Expanded(child: rightPane),
           ],
         ),
       ));
     }
+    if (shell.currentIndex < _items.length) _lastMainTab = shell.currentIndex;
     return back(Scaffold(
       body: body,
-      // 书架多选时收起底部导航，让位给多选的操作条
+      // 书架多选或窄屏进入设置时收起底部导航
       bottomNavigationBar: ValueListenableBuilder<bool>(
         valueListenable: shelfSelecting,
-        builder: (context, selecting, _) => selecting && shell.currentIndex == 0
+        builder: (context, selecting, _) => (selecting && shell.currentIndex == 0) || shell.currentIndex >= _items.length
             ? const SizedBox.shrink()
             : Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Divider(),
                   NavigationBar(
-                    selectedIndex: shell.currentIndex,
+                    selectedIndex: shell.currentIndex.clamp(0, _items.length - 1),
                     onDestinationSelected: _go,
                     destinations: [for (final (i, item) in _items.indexed) NavigationDestination(icon: icon(i, false), selectedIcon: icon(i, true), label: hz(context, item.$3))],
                   ),
@@ -420,5 +471,73 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               ),
       ),
     ));
+  }
+}
+
+/// 宽屏极简侧栏条目：完整包裹图标与文字的柔和圆角底块，避免角色头像被细胶囊裁切，并保持桌面端舒适触感。
+class _SidebarTile extends StatefulWidget {
+  const _SidebarTile({super.key, required this.label, required this.selected, required this.icon, required this.onTap});
+
+  final String label;
+  final bool selected;
+  final Widget icon;
+  final VoidCallback onTap;
+
+  @override
+  State<_SidebarTile> createState() => _SidebarTileState();
+}
+
+class _SidebarTileState extends State<_SidebarTile> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final dark = theme.brightness == Brightness.dark;
+    final bg = widget.selected
+        ? scheme.primary.withValues(alpha: dark ? 0.18 : 0.10)
+        : (_hovered ? scheme.onSurface.withValues(alpha: dark ? 0.06 : 0.04) : Colors.transparent);
+    final fg = widget.selected ? scheme.primary : scheme.onSurfaceVariant.withValues(alpha: _hovered ? 0.95 : 0.78);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 9),
+      child: Semantics(
+        button: true,
+        selected: widget.selected,
+        label: hz(context, widget.label),
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          onEnter: (_) => setState(() => _hovered = true),
+          onExit: (_) => setState(() => _hovered = false),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              curve: Curves.easeOutCubic,
+              width: 60,
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconTheme(
+                    data: IconThemeData(color: fg, size: 22),
+                    child: SizedBox(height: 32, child: Center(child: widget.icon)),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    widget.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11.5, fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500, color: fg),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }

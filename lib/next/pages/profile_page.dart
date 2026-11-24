@@ -192,7 +192,7 @@ class ProfilePage extends ConsumerWidget {
                 onTap: () => ref.read(incognitoProvider.notifier).set(!ref.read(incognitoProvider)),
                 trailing: Switch(value: ref.watch(incognitoProvider), onChanged: (v) => ref.read(incognitoProvider.notifier).set(v)),
               ),
-              XNavRow(icon: Icons.settings_outlined, title: '设置', big: false, onTap: () => context.push(Routes.settings)),
+              XNavRow(icon: Icons.settings_outlined, title: '设置', big: false, onTap: () => context.go(Routes.settings)),
               if (user != null) XNavRow(icon: Icons.logout, title: '退出登录', big: false, color: scheme.error, onTap: () => _confirmLogout(context, ref)),
             ],
           ),
