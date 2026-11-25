@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:ark_novel/data/wenku8/wenku8_client.dart';
 import 'package:ark_novel/models/common/charset_type.dart';
 import 'package:ark_novel/models/common/wenku8_node.dart';
+import 'package:ark_novel/next/net_io.dart';
 import 'package:ark_novel/next/session.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/services.dart';
@@ -228,7 +229,79 @@ void main() {
     expect(friendlyError(DioException(requestOptions: ro, error: 'NSURLErrorNetworkConnectionLost Code=-1005')), contains('网络连接被中断'));
     expect(friendlyError(DioException(requestOptions: ro, error: 'NSURLErrorNotConnectedToInternet Code=-1009')), contains('网络已断开'));
     expect(friendlyError(DioException(requestOptions: ro, error: 'NSURLErrorSecureConnectionFailed Code=-1200')), contains('TLS'));
+    // cupertino_http 2.x 实际输出小写 code=-xxxx
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: bad URL [domain=NSURLErrorDomain, code=-1000], uri=https://www.wenku8.net/')), contains('NSURLError -1000'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1003]')), contains('无法解析域名'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1001]')), contains('连接超时'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1005]')), contains('网络连接被中断'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1009]')), contains('网络已断开'));
+    expect(friendlyError(DioException(requestOptions: ro, error: 'NSErrorClientException: x [domain=NSURLErrorDomain, code=-1200]')), contains('TLS'));
   });
+
+  test('CupertinoFallbackAdapter：合法 HTTPS 遇 NSURLError -1000 自动回落 Dart IO，其他错误与带流请求原样抛出', () async {
+    var primaryClosed = false;
+    var fallbackClosed = false;
+    var fallbackCalls = 0;
+
+    final adapter = CupertinoFallbackAdapter(
+      primary: _ThrowingAdapter(
+        (o) {
+          if (o.uri.path == '/bad-url') {
+            throw Exception('NSErrorClientException: bad URL [domain=NSURLErrorDomain, code=-1000], uri=${o.uri}');
+          }
+          if (o.uri.path == '/timeout') {
+            throw Exception('NSErrorClientException: timed out [domain=NSURLErrorDomain, code=-1001]');
+          }
+          return ResponseBody.fromString('primary', 200);
+        },
+        onClose: () => primaryClosed = true,
+      ),
+      fallback: () => _ThrowingAdapter(
+        (_) {
+          fallbackCalls++;
+          return ResponseBody.fromString('fallback', 200);
+        },
+        onClose: () => fallbackClosed = true,
+      ),
+    );
+
+    final ok = await adapter.fetch(RequestOptions(path: 'https://www.wenku8.net/ok'), null, null);
+    expect(ok.statusCode, 200);
+    expect(fallbackCalls, 0);
+
+    // 合法 HTTPS 地址遇到 -1000：回落到 fallback 成功
+    final recovered = await adapter.fetch(RequestOptions(path: 'https://www.wenku8.net/bad-url'), null, null);
+    expect(recovered.statusCode, 200);
+    expect(fallbackCalls, 1);
+
+    // 有请求体流时不能重放，原样抛出
+    await expectLater(
+      adapter.fetch(RequestOptions(path: 'https://www.wenku8.net/bad-url'), Stream<Uint8List>.value(Uint8List.fromList([1])), null),
+      throwsA(isA<Exception>()),
+    );
+    expect(fallbackCalls, 1);
+
+    // 其他错误（如 -1001 超时）不误回落
+    await expectLater(adapter.fetch(RequestOptions(path: 'https://www.wenku8.net/timeout'), null, null), throwsA(isA<Exception>()));
+    expect(fallbackCalls, 1);
+
+    adapter.close();
+    expect(primaryClosed, isTrue);
+    expect(fallbackClosed, isTrue);
+  });
+}
+
+class _ThrowingAdapter implements HttpClientAdapter {
+  _ThrowingAdapter(this.fn, {this.onClose});
+
+  final ResponseBody Function(RequestOptions) fn;
+  final void Function()? onClose;
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async => fn(options);
+
+  @override
+  void close({bool force = false}) => onClose?.call();
 }
 
 class _CancelAwareAdapter implements HttpClientAdapter {

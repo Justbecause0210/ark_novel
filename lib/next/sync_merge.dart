@@ -9,10 +9,13 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'app_prefs.dart';
+import 'cache.dart';
 import 'characters.dart';
 import 'files.dart';
+import 'highlights.dart';
 import 'library.dart';
 import 'progress.dart';
+import 'rules.dart';
 import 'stats.dart';
 import 'sync_validation.dart';
 import 'theme.dart';
@@ -97,6 +100,7 @@ class SyncMerge {
       'progress': byAid('progress:'),
       'history': _box.get('history2') ?? const [],
       'bookmarks': _box.get('bookmarks') ?? const [],
+      'highlights': _box.get('highlights') ?? const [],
       'read': byAid('read:'),
       'readchars': byAid('readchars:'),
       'rating': byAid('rating:'),
@@ -262,6 +266,37 @@ class SyncMerge {
     }
     puts['bookmarks'] = (marks..sort((a, b) => (b['time'] as int).compareTo(a['time'] as int)));
 
+    // 正文划线 / 摘录：按 id 合并，取时间戳 at 较新的；删除通过 `hl:$id` 墓碑同步
+    var highlightsChanged = false;
+    final localHighlights = _maps(_box.get('highlights'));
+    final mergedHighlights = <Map>[];
+    for (final h in localHighlights) {
+      final id = h['id'];
+      final at = h['at'];
+      if (id is! String || id.isEmpty || at is! int) continue;
+      if (dead('hl:$id', at)) {
+        highlightsChanged = true;
+        continue;
+      }
+      mergedHighlights.add(h);
+    }
+    for (final r in _maps(remote['highlights'])) {
+      final entry = HighlightEntry.fromMap(r);
+      if (entry == null || dead('hl:${entry.id}', entry.at)) continue;
+      final i = mergedHighlights.indexWhere((l) => l['id'] == entry.id);
+      if (i < 0) {
+        mergedHighlights.add(entry.toMap());
+        highlightsChanged = true;
+      } else if (entry.at > ((mergedHighlights[i]['at'] as int?) ?? 0)) {
+        mergedHighlights[i] = entry.toMap();
+        highlightsChanged = true;
+      }
+    }
+    if (highlightsChanged) {
+      mergedHighlights.sort((a, b) => ((b['at'] as int?) ?? 0).compareTo((a['at'] as int?) ?? 0));
+      puts['highlights'] = mergedHighlights;
+    }
+
     // 已读章节、字数、评分
     for (final e in ((remote['read'] as Map?) ?? const {}).entries) {
       puts['read:${e.key}'] = {...((_box.get('read:${e.key}') as List?) ?? const []).cast<String>(), ...(e.value as List).cast<String>()}.toList();
@@ -308,17 +343,28 @@ class SyncMerge {
 
     // 规则：按编号并集，同一条取修改时间较新的；备注：并集，本机优先
     int ts(Map r) => (r['ts'] as int?) ?? 0;
-    final rules = _maps(_box.get('rules')).where((r) => !dead('r:${r['id']}', ts(r))).toList();
+    final localRules = _maps(_box.get('rules'));
+    final rules = <Map>[];
+    var rulesChanged = false;
+    for (final r in localRules) {
+      if (dead('r:${r['id']}', ts(r))) {
+        rulesChanged = true;
+        continue;
+      }
+      rules.add(r);
+    }
     for (final r in _maps(remote['rules'])) {
       if (r['id'] == null || dead('r:${r['id']}', ts(r))) continue;
       final i = rules.indexWhere((l) => l['id'] == r['id']);
       if (i < 0) {
         rules.add(r);
+        rulesChanged = true;
       } else if (ts(r) > ts(rules[i])) {
         rules[i] = r;
+        rulesChanged = true;
       }
     }
-    puts['rules'] = rules;
+    if (rulesChanged) puts['rules'] = rules;
     for (final e in ((remote['notes'] as Map?) ?? const {}).entries) {
       final local = Map<String, String>.from(((_box.get('notes:${e.key}') as Map?) ?? const {}).map((k, v) => MapEntry('$k', '$v')));
       for (final n in (e.value as Map).entries) {
@@ -329,6 +375,7 @@ class SyncMerge {
 
     // 人物/设定词典：按书籍与 id 合并，取修改时间 ts 较新的；删除用 `ch:$aid:$id` 墓碑同步
     var charsChanged = false;
+    final removedCharAvatars = <String>{};
     final remoteChars = remote['chars'] is Map ? remote['chars'] as Map : const {};
     final charAids = <String>{
       for (final k in remoteChars.keys) '$k',
@@ -338,7 +385,18 @@ class SyncMerge {
     for (final aid in charAids) {
       final localRaw = _box.get('chars:$aid');
       if (localRaw == null && !remoteChars.containsKey(aid)) continue;
-      final merged = _maps(localRaw).where((c) => c['id'] is String && (c['id'] as String).isNotEmpty && !dead('ch:$aid:${c['id']}', ts(c))).toList();
+      final localList = _maps(localRaw);
+      final merged = <Map>[];
+      for (final c in localList) {
+        final id = c['id'];
+        if (id is! String || id.isEmpty) continue;
+        if (dead('ch:$aid:$id', ts(c))) {
+          final av = c['localAvatar'];
+          if (av is String && av.isNotEmpty) removedCharAvatars.add(av);
+          continue;
+        }
+        merged.add(c);
+      }
       final rList = remoteChars[aid];
       if (rList is List) {
         for (final r in _maps(rList)) {
@@ -348,6 +406,9 @@ class SyncMerge {
           if (i < 0) {
             merged.add(r);
           } else if (ts(r) > ts(merged[i])) {
+            final oldAv = merged[i]['localAvatar'];
+            final newAv = r['localAvatar'];
+            if (oldAv is String && oldAv.isNotEmpty && oldAv != newAv) removedCharAvatars.add(oldAv);
             merged[i] = r;
           }
         }
@@ -601,7 +662,22 @@ class SyncMerge {
     dels.removeAll(puts.keys);
     // 两个调用都先更新 Hive 内存，再一起等落盘；删除和写入之间不能让出事件循环。
     await Future.wait([if (dels.isNotEmpty) _box.deleteAll(dels), _box.putAll(puts)]);
+    if (rulesChanged) ReplaceRules.notifyChanged();
+    if (highlightsChanged) HighlightStore.notifyChanged();
+    if (puts.containsKey('lib:books')) PageStore.invalidateLooseCount();
     await avatar.cleanup?.call();
+    if (removedCharAvatars.isNotEmpty) {
+      final keptAvatars = <String>{
+        for (final k in _keys('chars:'))
+          for (final item in ((_box.get(k) as List?) ?? const []).whereType<Map>())
+            if (item['localAvatar'] is String && (item['localAvatar'] as String).isNotEmpty) item['localAvatar'] as String,
+      };
+      for (final fileName in removedCharAvatars) {
+        if (!keptAvatars.contains(fileName)) {
+          await BookCharacters.deleteLocalAvatar(fileName);
+        }
+      }
+    }
     // 先删本机的再记「删过了」：中途被打断的话下次合并会再删一次（按日期删，重复删没有副作用）
     for (final MapEntry(key: aid, value: at) in purge.entries) {
       await ReadingStats.purgeLocal(aid, before: at);

@@ -19,7 +19,6 @@ import 'app_prefs.dart';
 import 'cache.dart';
 import 'files.dart';
 import 'library.dart';
-import 'local_books.dart' show LocalBooks, isLocalImageUrl;
 import 'session.dart';
 import 'volumes.dart';
 
@@ -249,16 +248,6 @@ class ImageStore {
     }
     if (!fromPrefetch) _inflightRefs[url] = 1;
     late final Future<Uint8List> f;
-    // 本地导入书籍图片（localimg:// 或本地路径）：直接读本地并放入内存 LRU，不走网络也不进磁盘 imgcache
-    if (isLocalImageUrl(url)) {
-      f = _fetchLocal(url).whenComplete(() {
-        if (identical(_inflight[url], f)) {
-          _inflight.remove(url);
-          _inflightRefs.remove(url);
-        }
-      });
-      return _inflight[url] = f;
-    }
     final token = CancelToken();
     _cancelTokens[url] = token;
     // 只删自己：被取消后又重新请求时，这里已经换成新的那次了
@@ -272,17 +261,9 @@ class ImageStore {
     return _inflight[url] = f;
   }
 
-  Future<Uint8List> _fetchLocal(String url) async {
-    final bytes = await LocalBooks.readImageBytes(url);
-    if (bytes == null || bytes.isEmpty) throw StateError('local image not found: $url');
-    _put(url, bytes);
-    return bytes;
-  }
-
   /// 已经存在本机的图（内存或磁盘），没有返回 null，不联网
   Future<Uint8List?> cached(String rawUrl) async {
     final url = _norm(rawUrl);
-    if (isLocalImageUrl(url)) return peek(url) ?? await LocalBooks.readImageBytes(url);
     final f = File(p.join((await _cacheDir()).path, _name(url)));
     return peek(url) ?? (await f.exists() ? await f.readAsBytes() : null);
   }
@@ -318,11 +299,6 @@ class ImageStore {
   /// 本地缓存文件的路径（没缓存就先下载）：给通知栏封面这种只认文件的地方用
   Future<String> path(String rawUrl) async {
     final url = _norm(rawUrl);
-    if (isLocalImageUrl(url)) {
-      final localPath = await LocalBooks.resolveImagePath(url);
-      if (localPath == null) throw StateError('local image not found: $url');
-      return localPath;
-    }
     await load(url);
     // 内存里有、磁盘上的文件却可能已经被清理掉了：补写一份，别给出不存在的路径
     final file = File(p.join((await _cacheDir()).path, _name(url)));
@@ -455,7 +431,7 @@ class ImageStore {
       _hostFailedAt[host] = DateTime.now();
       rethrow;
     } finally {
-      if (identical(_hostChallenges[host], f)) _hostChallenges.remove(host);
+      if (identical(_hostChallenges[host], f)) unawaited(_hostChallenges.remove(host));
     }
   }
 
@@ -680,12 +656,28 @@ class ImageStore {
     return orig;
   }
 
+  int _srPauseCount = 0;
+
+  /// 是否已暂停后台封面超分队列（如用户正在阅读页内阅读时）。
+  bool get isSrPaused => _srPauseCount > 0;
+
+  /// 暂停后台超分队列（引用计数，支持多处配对调用），当前正在执行的单张完成后即停，避免阅读时发热掉帧。
+  void pauseSr() {
+    _srPauseCount++;
+  }
+
+  /// 恢复后台超分队列；当计数归零且仍有待处理任务时自动续跑。
+  void resumeSr() {
+    if (_srPauseCount > 0) _srPauseCount--;
+    if (_srPauseCount == 0 && _srQueue.isNotEmpty) _pumpSr().ignore();
+  }
+
   /// 一次放大一张（手机上一张一两秒，几张一起跑会卡）
   Future<void> _pumpSr() async {
-    if (_srRunning) return;
+    if (_srRunning || _srPauseCount > 0) return;
     _srRunning = true;
     try {
-      while (_srQueue.isNotEmpty) {
+      while (_srQueue.isNotEmpty && _srPauseCount == 0) {
         final url = _srQueue.removeAt(0);
         try {
           final out = await _upscale.invokeMethod<Uint8List>('upscale', {'bytes': await _load(url)});
@@ -729,13 +721,6 @@ class ImageStore {
       if (_memUsed > _memBytes ~/ 2) return;
       if (raw.isEmpty) continue;
       final url = _norm(raw);
-      if (isLocalImageUrl(url)) {
-        if (_mem.containsKey(url) || _inflight.containsKey(url)) continue;
-        final bytes = await LocalBooks.readImageBytes(url);
-        if (bytes == null || _mem.containsKey(url)) continue;
-        _put(url, bytes);
-        continue;
-      }
       final sr = _srShown(raw, url);
       final memKey = sr ? '$url#sr' : url;
       if (_mem.containsKey(memKey) || _inflight.containsKey(url)) continue;
@@ -764,7 +749,6 @@ class ImageStore {
       _memUsed -= _mem.remove('$url#sr')?.length ?? 0;
       _recentNetworkHits.remove(url);
       _srDone?.remove(name);
-      if (isLocalImageUrl(url)) continue;
       final f = File(p.join(dir.path, name));
       if (await f.exists()) await f.delete();
       if (srDir != null) {
@@ -827,9 +811,19 @@ class ImageStore {
     _recentNetworkHits.clear();
   }
 
+  /// 响应系统内存压力告警：清空原图字节缓存并收缩缩略图缓存至上限的 1/4，快速降低常驻 RSS。
+  void onMemoryPressure() {
+    _mem.clear();
+    _memUsed = 0;
+    final targetThumb = _thumbMemBytes ~/ 4;
+    while (_thumbMemUsed > targetThumb && _thumbMem.isNotEmpty) {
+      _thumbMemUsed -= _thumbMem.remove(_thumbMem.keys.first)!.length;
+    }
+  }
+
   /// 磁盘缓存超过 [maxBytes] 时按修改时间（最近一次用到的时间，见 [_touch]）从旧到新删，删到上限的 80%。
-  /// 不删：书架上显示的封面（网站小封面和第一卷的卷封面）、手动挑过的卷封面、离线缓存的插图，以及这些保留封面的缩略图。
-  Future<void> trim({int maxBytes = 500 << 20, int? maxThumbBytes}) async {
+  /// 不删：书架上显示的封面（网站小封面和第一卷的卷封面）、手动挑过的卷封面、离线缓存的插图，以及这些保留封面的缩略图与超分图。
+  Future<void> trim({int maxBytes = 500 << 20, int? maxThumbBytes, int? maxSrBytes}) async {
     final keep = {
       for (final url in [...LibraryStore.covers(), ...Volumes.keptCovers(LibraryStore.aids()), ...ChapterCache.offlineImages()]) _name(_norm(url)),
     };
@@ -839,6 +833,18 @@ class ImageStore {
       maxThumbBytes ?? math.min(64 << 20, maxBytes),
       shouldKeep: (name) => keep.contains(name.split('_').first),
     );
+    if (srSupported) {
+      final removed = await trimDir(await _srDir(), maxSrBytes ?? math.min(128 << 20, maxBytes), keep: keep);
+      if (removed.isNotEmpty) {
+        for (final name in removed) {
+          _srDone?.remove(name);
+        }
+        for (final k in _mem.keys.where((k) => k.endsWith('#sr')).toList()) {
+          final base = _name(k.substring(0, k.length - 3));
+          if (removed.contains(base)) _memUsed -= _mem.remove(k)?.length ?? 0;
+        }
+      }
+    }
   }
 
   /// 从磁盘读到时把修改时间改成现在，清理时常看的排在后面；一天内用过的不重复改
@@ -1047,25 +1053,28 @@ bool _isWebp(Uint8List b) => b.length > 12 && b[0] == 0x52 && b[1] == 0x49 && b[
 bool _isAnimatedWebp(Uint8List b) => _isWebp(b) && b.length > 20 && b[12] == 0x56 && b[13] == 0x50 && b[14] == 0x38 && b[15] == 0x58 && b[20] & 0x02 != 0;
 
 /// 目录总大小超过 [maxBytes] 时，按修改时间从旧到新删文件，直到不超过 [maxBytes] 的 80%。
-/// 文件名在 [keep] 里或满足 [shouldKeep] 的不删（但计入总大小）。
-Future<void> trimDir(Directory dir, int maxBytes, {Set<String> keep = const {}, bool Function(String name)? shouldKeep}) async {
-  if (!await dir.exists()) return;
-  final files = <(File, FileStat)>[];
+/// 文件名在 [keep] 里或满足 [shouldKeep] 的不删（但计入总大小）。返回实际删除的文件名集合。
+Future<Set<String>> trimDir(Directory dir, int maxBytes, {Set<String> keep = const {}, bool Function(String name)? shouldKeep}) async {
+  if (!await dir.exists()) return const {};
+  final files = <(File, FileStat, String)>[];
   var total = 0;
   await for (final f in dir.list()) {
     if (f is! File || _isTemp(f)) continue; // 正在写的临时文件，一会儿就改名了
     final st = await f.stat();
     total += st.size;
     final name = p.basename(f.path);
-    if (!keep.contains(name) && !(shouldKeep?.call(name) ?? false)) files.add((f, st));
+    if (!keep.contains(name) && !(shouldKeep?.call(name) ?? false)) files.add((f, st, name));
   }
-  if (total <= maxBytes) return;
+  if (total <= maxBytes) return const {};
   files.sort((a, b) => a.$2.modified.compareTo(b.$2.modified));
-  for (final (f, st) in files) {
+  final removed = <String>{};
+  for (final (f, st, name) in files) {
     if (total <= maxBytes * 0.8) break;
     await f.delete();
+    removed.add(name);
     total -= st.size;
   }
+  return removed;
 }
 
 /// 自选封面的裁剪框记在地址后面：`图片地址#crop=左,上,宽,高`（都是 0~1 的比例）。下载、缓存都按去掉它的地址算。

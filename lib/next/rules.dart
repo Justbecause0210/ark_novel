@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart' show ValueNotifier;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import 'sync.dart';
@@ -72,9 +74,20 @@ class ReplaceRules {
 
   static Box get _box => Hive.box('session');
 
-  static List<ReplaceRule> all() {
+  /// 规则变更通知（保存或同步合并后递增，供阅读器章节 provider 自动联动刷新）。
+  static final changes = ValueNotifier<int>(0);
+
+  static final _unset = Object();
+  static Object? _cachedRaw = _unset;
+  static List<ReplaceRule> _cachedList = const [];
+
+  /// 只读规则列表（按 Hive 内存引用缓存，避免高频重复反序列化）。调用方切勿修改返回列表。
+  static List<ReplaceRule> allView() {
+    if (!Hive.isBoxOpen('session')) return const [];
+    final raw = _box.get('rules');
+    if (identical(raw, _cachedRaw)) return _cachedList;
     final out = <ReplaceRule>[];
-    for (final (i, e) in ((_box.get('rules') as List?) ?? const []).cast<Map>().indexed) {
+    for (final (i, e) in ((raw as List?) ?? const []).cast<Map>().indexed) {
       out.add(
         ReplaceRule(
           pattern: e['p'] as String,
@@ -88,8 +101,13 @@ class ReplaceRules {
         ),
       );
     }
-    return out;
+    _cachedRaw = raw;
+    _cachedList = List<ReplaceRule>.unmodifiable(out);
+    return _cachedList;
   }
+
+  /// 返回可变副本，兼容调用方原地增删改。
+  static List<ReplaceRule> all() => List<ReplaceRule>.of(allView());
 
   /// 保存时顺带给改过的规则打上修改时间，删掉的规则记墓碑，同步靠它们决定谁新谁旧。
   static Future<void> save(List<ReplaceRule> rules) async {
@@ -108,6 +126,16 @@ class ReplaceRules {
     final kept = {for (final e in out) e['id']};
     await Sync.tombstone([for (final id in old.keys) if (!kept.contains(id)) 'r:$id']);
     await _box.put('rules', out);
+    _cachedRaw = _unset;
+    _cachedList = const [];
+    changes.value++;
+  }
+
+  /// 外部（如同步合并）写入 `rules` 后调用：清缓存并通知下游刷新。
+  static void notifyChanged() {
+    _cachedRaw = _unset;
+    _cachedList = const [];
+    changes.value++;
   }
 
   static final _backref = RegExp(r'\$(\d)');
@@ -123,7 +151,7 @@ class ReplaceRules {
   /// 依次套用启用的替换规则；替换串里可用 `$1` 引用分组。无效的规则直接跳过。
   static String apply(String text, [List<ReplaceRule>? rules]) {
     var out = text;
-    for (final r in rules ?? all()) {
+    for (final r in rules ?? allView()) {
       if (!r.enabled || r.kind != RuleKind.replace || r.pattern.isEmpty) continue;
       try {
         out = out.replaceAllMapped(
@@ -142,7 +170,7 @@ class ReplaceRules {
 
   /// 在 [text] 里找出所有高亮：先写的规则优先，重叠的后者让位；结果按位置排序、互不重叠。
   static List<Mark> marks(String text, [List<ReplaceRule>? rules, String aid = '']) {
-    final list = rules ?? all();
+    final list = rules ?? allView();
     final found = <Mark>[];
     for (final r in list) {
       if (!r.enabled || r.kind == RuleKind.replace || r.pattern.isEmpty || (r.aid.isNotEmpty && r.aid != aid)) continue;
@@ -168,6 +196,14 @@ class ReplaceRules {
     return out;
   }
 }
+
+/// 替换/高亮规则变更通知 provider，供阅读器章节缓存自动联动刷新。
+final replaceRulesChangesProvider = Provider<int>((ref) {
+  void listener() => ref.invalidateSelf();
+  ReplaceRules.changes.addListener(listener);
+  ref.onDispose(() => ReplaceRules.changes.removeListener(listener));
+  return ReplaceRules.changes.value;
+});
 
 /// 高亮人物的备注：每本书一份，按规则编号存。
 class RuleNotes {

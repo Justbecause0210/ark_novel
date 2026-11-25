@@ -18,13 +18,12 @@ import '../theme_doodle.dart';
 import '../theme_squire.dart';
 import '../volumes.dart';
 import '../widgets.dart';
+import 'home_shell.dart' show openLibraryPage;
 import '../x_list.dart';
 import '../text.dart';
 
-class ProfilePage extends ConsumerWidget {
-  const ProfilePage({super.key});
-
-  Future<void> _confirmLogout(BuildContext context, WidgetRef ref) async {
+/// 退出登录前确认（「我的」页和宽侧栏的账号菜单共用）
+Future<void> confirmLogout(BuildContext context, WidgetRef ref) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -37,9 +36,10 @@ class ProfilePage extends ConsumerWidget {
       ),
     );
     if (ok == true) await ref.read(sessionProvider.notifier).logout();
-  }
+}
 
-  void _avatarMenu(BuildContext context, WidgetRef ref) {
+/// 换头像：从相册选，或恢复网站头像
+void avatarMenu(BuildContext context, WidgetRef ref) {
     showModalBottomSheet(
       context: context,
       builder: (context) => SafeArea(
@@ -67,12 +67,47 @@ class ProfilePage extends ConsumerWidget {
         ),
       ),
     );
-  }
+}
+
+/// 账号头像：自己选的头像优先，其次网站头像，都没有时显示名字首字
+class AccountAvatar extends ConsumerWidget {
+  const AccountAvatar({super.key, this.radius = 28});
+
+  final double radius;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final session = ref.watch(sessionProvider);
     final custom = ref.watch(avatarProvider);
+    final theme = Theme.of(context);
+    final user = session is SessionLoggedIn ? session.user : null;
+    final name = user?.username ?? '未登录';
+    final useCustom = custom != null && !isWebPreview;
+    final initial = Text(name.characters.firstOrNull ?? '?', style: radius >= 24 ? theme.textTheme.titleLarge : TextStyle(fontSize: radius * 0.85, fontWeight: FontWeight.w600));
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: theme.colorScheme.surfaceContainerHigh,
+      foregroundImage: useCustom ? FileImage(File(custom)) : null,
+      // 网站头像走 App 的图片通道（Flutter 自带的 NetworkImage 会被 Cloudflare 403）；取不到时露出下面的首字
+      child: useCustom || user == null || user.avatar.isEmpty
+          ? initial
+          : Stack(
+              fit: StackFit.expand,
+              children: [
+                Center(child: initial),
+                ClipOval(child: NetImage(user.avatar.replaceFirst('http://', 'https://'))),
+              ],
+            ),
+    );
+  }
+}
+
+class ProfilePage extends ConsumerWidget {
+  const ProfilePage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final session = ref.watch(sessionProvider);
     final palette = appPalettes[ref.watch(paletteProvider)];
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
@@ -86,25 +121,9 @@ class ProfilePage extends ConsumerWidget {
             if (user.userLevel.isNotEmpty) user.userLevel,
             if (session is SessionLoggedIn && session.offline) '离线',
           ].join(' · ');
-    final useCustom = custom != null && !isWebPreview;
-    final initial = Text(name.characters.firstOrNull ?? '?', style: theme.textTheme.titleLarge);
-    final avatar = CircleAvatar(
-      radius: 28,
-      backgroundColor: scheme.surfaceContainer,
-      foregroundImage: useCustom ? FileImage(File(custom)) : null,
-      // 网站头像走 App 的图片通道（Flutter 自带的 NetworkImage 会被 Cloudflare 403）；取不到时露出下面的首字
-      child: useCustom || user == null || user.avatar.isEmpty
-          ? initial
-          : Stack(
-              fit: StackFit.expand,
-              children: [
-                Center(child: initial),
-                ClipOval(child: NetImage(user.avatar.replaceFirst('http://', 'https://'))),
-              ],
-            ),
-    );
+    const avatar = AccountAvatar();
 
-    final VoidCallback? onAvatarTap = user == null ? () => context.push(Routes.login) : (isWebPreview ? null : () => _avatarMenu(context, ref));
+    final VoidCallback? onAvatarTap = user == null ? () => context.push(Routes.login) : (isWebPreview ? null : () => avatarMenu(context, ref));
     final tappableAvatar = onAvatarTap == null
         ? avatar
         : Semantics(
@@ -179,11 +198,11 @@ class ProfilePage extends ConsumerWidget {
             children: [
               header,
               const XDivider(),
-              XNavRow(icon: Icons.insights_outlined, title: '阅读统计', onTap: () => context.push(Routes.stats)),
-              XNavRow(icon: Icons.collections_bookmark_outlined, title: '书籍墙', onTap: () => context.push(Routes.wall)),
-              XNavRow(icon: Icons.history, title: '阅读历史', onTap: () => context.push(Routes.history)),
-              XNavRow(icon: Icons.bookmark_border, title: '书签', onTap: () => context.push(Routes.bookmarks)),
-              XNavRow(icon: Icons.download_outlined, title: '离线缓存', onTap: () => context.push(Routes.cache)),
+              XNavRow(icon: Icons.insights_outlined, title: '阅读统计', onTap: () => openLibraryPage(context, Routes.stats)),
+              XNavRow(icon: Icons.collections_bookmark_outlined, title: '书籍墙', onTap: () => openLibraryPage(context, Routes.wall)),
+              XNavRow(icon: Icons.history, title: '阅读历史', onTap: () => openLibraryPage(context, Routes.history)),
+              XNavRow(icon: Icons.bookmark_border, title: '书签', onTap: () => openLibraryPage(context, Routes.bookmarks)),
+              XNavRow(icon: Icons.download_outlined, title: '离线缓存', onTap: () => openLibraryPage(context, Routes.cache)),
               const XDivider(),
               XNavRow(
                 icon: Icons.visibility_off_outlined,
@@ -192,8 +211,9 @@ class ProfilePage extends ConsumerWidget {
                 onTap: () => ref.read(incognitoProvider.notifier).set(!ref.read(incognitoProvider)),
                 trailing: Switch(value: ref.watch(incognitoProvider), onChanged: (v) => ref.read(incognitoProvider.notifier).set(v)),
               ),
-              XNavRow(icon: Icons.settings_outlined, title: '设置', big: false, onTap: () => context.push(Routes.settings)),
-              if (user != null) XNavRow(icon: Icons.logout, title: '退出登录', big: false, color: scheme.error, onTap: () => _confirmLogout(context, ref)),
+              // 宽屏侧栏底部已经有「设置」，这里不再重复
+              if (MediaQuery.sizeOf(context).width < 720) XNavRow(icon: Icons.settings_outlined, title: '设置', big: false, onTap: () => context.go(Routes.settings)),
+              if (user != null) XNavRow(icon: Icons.logout, title: '退出登录', big: false, color: scheme.error, onTap: () => confirmLogout(context, ref)),
             ],
           ),
         ),
@@ -225,7 +245,7 @@ class _StatsLine extends ConsumerWidget {
         return MouseRegion(
           cursor: SystemMouseCursors.click,
           child: GestureDetector(
-            onTap: () => context.push(Routes.stats),
+            onTap: () => openLibraryPage(context, Routes.stats),
             child: Text.rich(
               TextSpan(
                 style: const TextStyle(fontSize: 14),

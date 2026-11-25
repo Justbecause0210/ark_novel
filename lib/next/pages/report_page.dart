@@ -58,7 +58,12 @@ class _ReportPageState extends ConsumerState<ReportPage> {
       await WidgetsBinding.instance.endOfFrame;
       final boundary = _shot.currentContext!.findRenderObject() as RenderRepaintBoundary;
       final image = await boundary.toImage(pixelRatio: 3);
-      final bytes = (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      final Uint8List bytes;
+      try {
+        bytes = (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      } finally {
+        image.dispose();
+      }
       final file = File('${(await getTemporaryDirectory()).path}/report_${widget.aid}_$_page.png');
       await file.writeAsBytes(bytes);
       await SharePlus.instance.share(ShareParams(files: [XFile(file.path)], text: '《$title》阅读报告'));

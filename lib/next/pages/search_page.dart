@@ -54,6 +54,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
   @override
   Widget build(BuildContext context) {
     final api = ref.watch(apiProvider);
+    final node = ref.watch(nodeProvider);
     final guest = !isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut;
     final theme = Theme.of(context);
     return Scaffold(
@@ -134,7 +135,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                           ),
                         )
                       : PagedNovelGrid(
-                          key: ValueKey((_keyword, _byAuthor)),
+                          key: ValueKey((node, _keyword, _byAuthor)),
                           emptyTitle: '没有找到相关小说',
                           emptyDetail: '换个关键词试试，或切换上方的「书名 / 作者」',
                           sourceHtml: () => lastFailedHtml,

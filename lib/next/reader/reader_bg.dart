@@ -9,6 +9,10 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../epub_codec.dart' show detectImageFormat;
+import '../files.dart';
+import '../image_cache.dart' show shrinkImage;
+
 /// 阅读器内置纸张纹理选项：0 无纹理、1 宣纸细纹、2 复古纸微噪点、3 淡雅笔记纸。
 const kReaderBgTextures = <int, String>{
   0: '无纹理',
@@ -29,18 +33,29 @@ class ReaderBgImageController extends Notifier<String?> {
     return raw == null || raw.isEmpty ? null : raw;
   }
 
-  /// 弹出系统图片选择器并复制到 `ApplicationSupport/reader_bg/`；用户取消返回 false。
+  /// 弹出系统图片选择器并适度压缩后写入 `ApplicationSupport/reader_bg/`；用户取消返回 false。
   Future<bool> pick() async {
     final file = await FilePicker.pickFile(type: FileType.image);
     final src = file?.path;
     if (src == null || src.isEmpty) return false;
+    final rawBytes = await File(src).readAsBytes();
+    final bytes = await shrinkImage(rawBytes);
     final dir = Directory(p.join((await getApplicationSupportDirectory()).path, kReaderBgDir));
-    if (await dir.exists()) await dir.delete(recursive: true);
     await dir.create(recursive: true);
-    final ext = p.extension(src);
-    final dest = await File(src).copy(p.join(dir.path, 'bg_${DateTime.now().millisecondsSinceEpoch}${ext.isEmpty ? '.jpg' : ext}'));
+    final fmt = detectImageFormat(bytes, p.basename(src));
+    final dest = File(p.join(dir.path, 'bg_${DateTime.now().millisecondsSinceEpoch}${fmt.ext}'));
+    await writeFileAtomic(dest, bytes);
     await Hive.box('session').put(kReaderBgPathKey, dest.path);
     state = dest.path;
+    try {
+      await for (final entity in dir.list()) {
+        if (entity is File && entity.path != dest.path) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
     return true;
   }
 
@@ -91,21 +106,23 @@ class ReaderBackground extends StatelessWidget {
     // 盖一层与当前主题底色同向的柔和遮罩，即使透明度拉到最高也确保正文清晰护眼
     final veilAlpha = isDark ? 0.22 : 0.14;
 
+    final mq = MediaQuery.maybeOf(context);
+    final cacheW = mq == null ? null : (mq.size.width * mq.devicePixelRatio).round().clamp(360, 2400);
+
     return RepaintBoundary(
       child: Stack(
         fit: StackFit.expand,
         children: [
           ColoredBox(color: baseColor),
           if (hasImage) ...[
-            Opacity(
-              opacity: clampedOpacity,
-              child: Image.file(
-                File(imagePath!),
-                fit: BoxFit.cover,
-                filterQuality: FilterQuality.medium,
-                gaplessPlayback: true,
-                errorBuilder: (_, _, _) => const SizedBox.shrink(),
-              ),
+            Image.file(
+              File(imagePath!),
+              fit: BoxFit.cover,
+              opacity: AlwaysStoppedAnimation<double>(clampedOpacity),
+              cacheWidth: cacheW,
+              filterQuality: FilterQuality.medium,
+              gaplessPlayback: true,
+              errorBuilder: (_, _, _) => const SizedBox.shrink(),
             ),
             ColoredBox(color: baseColor.withValues(alpha: veilAlpha)),
           ],

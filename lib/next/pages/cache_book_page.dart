@@ -5,7 +5,6 @@ import 'package:go_router/go_router.dart';
 import '../cache.dart';
 import '../export_book.dart';
 import '../library.dart' show LibraryStore;
-import '../local_books.dart' show isLocalAid;
 import '../routes.dart';
 import '../widgets.dart';
 import 'novel_page.dart';
@@ -48,8 +47,7 @@ class _CacheBookPageState extends ConsumerState<CacheBookPage> {
           error: (e, _) => StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(novelProvider(widget.aid))),
           data: (data) {
           final all = data.catalogue.expand((v) => v.chapters).toList();
-          final local = isLocalAid(widget.aid);
-          final cached = local ? all.length : ChapterCache.count(widget.aid);
+          final cached = ChapterCache.count(widget.aid);
           final running = task?.running ?? false;
           return Column(
             children: [

@@ -468,10 +468,38 @@ class BookCharacters {
     changes.value++;
   }
 
+  /// 返回当前所有启用的高亮/变色规则 ID 集合，供列表页一次性 O(1) 判断避免 O(N×M) 重复遍历。
+  static Set<String> activeHighlightRuleIds() {
+    if (!Hive.isBoxOpen('session')) return const {};
+    return {for (final r in ReplaceRules.allView()) if (r.enabled && r.kind != RuleKind.replace) r.id};
+  }
+
   /// 判断当前人物是否实际开启了正文高亮（绑定了启用的 `ReplaceRule`）。
   static bool isHighlightActive(BookCharacter c) {
     if (c.ruleId.isEmpty || !Hive.isBoxOpen('session')) return false;
-    return ReplaceRules.all().any((r) => r.id == c.ruleId && r.enabled && r.kind != RuleKind.replace);
+    return ReplaceRules.allView().any((r) => r.id == c.ruleId && r.enabled && r.kind != RuleKind.replace);
+  }
+
+  /// 批量写入多个人物的萌娘百科中文简介（单次读取 + 单次落盘，不触发规则重写，消除并发 `upsert` 写丢失竞态）。
+  /// [onlyIfEmpty] 为 true 时跳过已有中文简介的条目，避免后台批量补全覆盖用户刚手填的内容。
+  /// 返回实际更新的人物条数。
+  static Future<int> batchUpdateCnSummaries(String aid, Map<String, String> summariesById, {bool onlyIfEmpty = false}) async {
+    if (summariesById.isEmpty || !Hive.isBoxOpen('session')) return 0;
+    final list = List<BookCharacter>.of(of(aid));
+    if (list.isEmpty) return 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var updated = 0;
+    for (var i = 0; i < list.length; i++) {
+      if (onlyIfEmpty && list[i].cnSummary.trim().isNotEmpty) continue;
+      final intro = summariesById[list[i].id]?.trim();
+      if (intro == null || intro.isEmpty || intro == list[i].cnSummary) continue;
+      list[i] = list[i].copyWith(cnSummary: intro, ts: now);
+      updated++;
+    }
+    if (updated == 0) return 0;
+    await _box.put('chars:$aid', [for (final c in list) c.toMap()]);
+    changes.value++;
+    return updated;
   }
 
   /// 计算当前书籍的阅读卷号（从 1 开始；未开始阅读返回 0）。
@@ -892,6 +920,6 @@ final moegirlApiProvider = Provider<MoegirlApi>((ref) {
   ref.watch(nativeNetProvider);
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 10), receiveTimeout: const Duration(seconds: 15), headers: {'User-Agent': 'ark_novel (https://github.com/chenshi221/ark_novel)'}))
     ..httpClientAdapter = store.adapter();
-  ref.onDispose(dio.close);
+  ref.onDispose(() => dio.close(force: true));
   return MoegirlApi(dio);
 });

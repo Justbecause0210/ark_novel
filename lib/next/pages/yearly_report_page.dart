@@ -13,7 +13,6 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../data/wenku8/wenku8_parser.dart';
 import '../cache.dart';
-import '../local_books.dart';
 import '../read_state.dart';
 import '../routes.dart';
 import '../stats.dart';
@@ -151,7 +150,7 @@ class YearlySummary {
       for (final aid in chapterBooks)
         for (final e in chapterSecondsByBook[aid]!.entries)
           if (ReadState.isRead(aid, e.key))
-            if ((isLocalAid(aid) ? LocalBooks.chapterLength(aid, e.key) : (hasCache ? ChapterCache.length(aid, e.key) : null)) case final n?)
+            if ((hasCache ? ChapterCache.length(aid, e.key) : null) case final n?)
               (n, e.value.values.fold(0, (a, b) => a + b)),
     ]);
     return buildYearlySummary(
@@ -509,7 +508,12 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
       await WidgetsBinding.instance.endOfFrame;
       final boundary = _shot.currentContext!.findRenderObject() as RenderRepaintBoundary;
       final image = await boundary.toImage(pixelRatio: 2.0);
-      final bytes = (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      final Uint8List bytes;
+      try {
+        bytes = (await image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+      } finally {
+        image.dispose();
+      }
       final file = File('${(await getTemporaryDirectory()).path}/ark_yearly_report_$year.png');
       await file.writeAsBytes(bytes);
       await SharePlus.instance.share(ShareParams(files: [XFile(file.path)], text: '$year 年度阅读报告 · Ark Novel'));

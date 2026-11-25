@@ -23,6 +23,7 @@ import '../models/user_info.dart';
 import 'backup.dart';
 import 'cache.dart';
 import 'env.dart';
+import 'meta_cache.dart';
 import 'net_stub.dart' if (dart.library.io) 'net_io.dart';
 import 'web_fetch.dart';
 
@@ -41,7 +42,9 @@ class SessionStore {
       await Hive.initFlutter('next');
     }
     if (!kIsWeb) await Backup.applyPending();
-    return SessionStore._(await Hive.openBox('session'));
+    final boxes = await Future.wait<Box>([Hive.openBox('session'), Hive.openBox(MetaCache.boxName)]);
+    await MetaCache.migrateFromSession();
+    return SessionStore._(boxes[0]);
   }
 
   /// 登录 cookie（`jieqiUserInfo=…;jieqiVisitInfo=…`）；网页预览：cookie 保存在转发程序里，这里只存一个标记。
@@ -414,22 +417,25 @@ String friendlyError(Object e) {
     if (detail.contains('127.0.0.1') || lower.contains('connection refused') || detail.contains('ERR_CONNECTION_REFUSED')) {
       return '连接被拒绝（本地 DNS 可能拦截了域名，建议切到 wenku8.cc 或开启代理）';
     }
-    if (detail.contains('ERR_NAME_NOT_RESOLVED') || detail.contains('HOSTNAME_NOT_RESOLVED') || lower.contains('failed host lookup') || detail.contains('NSURLErrorCannotFindHost') || detail.contains('Code=-1003') || lower.contains('cannot find host')) {
+    if (detail.contains('ERR_NAME_NOT_RESOLVED') || detail.contains('HOSTNAME_NOT_RESOLVED') || lower.contains('failed host lookup') || detail.contains('NSURLErrorCannotFindHost') || lower.contains('code=-1003') || lower.contains('cannot find host')) {
       return '无法解析域名，请检查网络或切换站点线路';
     }
-    if (detail.contains('ERR_CONNECTION_TIMED_OUT') || detail.contains('ERR_TIMED_OUT') || detail.contains('NSURLErrorTimedOut') || detail.contains('Code=-1001') || lower.contains('request timed out')) {
+    if (detail.contains('ERR_CONNECTION_TIMED_OUT') || detail.contains('ERR_TIMED_OUT') || detail.contains('NSURLErrorTimedOut') || lower.contains('code=-1001') || lower.contains('request timed out')) {
       return '连接超时，请检查网络或切换线路';
     }
-    if (detail.contains('ERR_INTERNET_DISCONNECTED') || detail.contains('ERR_NETWORK_CHANGED') || detail.contains('NSURLErrorNotConnectedToInternet') || detail.contains('Code=-1009') || lower.contains('appears to be offline')) {
+    if (detail.contains('ERR_INTERNET_DISCONNECTED') || detail.contains('ERR_NETWORK_CHANGED') || detail.contains('NSURLErrorNotConnectedToInternet') || lower.contains('code=-1009') || lower.contains('appears to be offline')) {
       return '网络已断开，请检查网络连接';
     }
-    if (detail.contains('ERR_CONNECTION_RESET') || detail.contains('ERR_CONNECTION_CLOSED') || detail.contains('ERR_CONNECTION_ABORTED') || detail.contains('NSURLErrorNetworkConnectionLost') || detail.contains('Code=-1005') || lower.contains('connection reset') || lower.contains('connection closed')) {
+    if (detail.contains('ERR_CONNECTION_RESET') || detail.contains('ERR_CONNECTION_CLOSED') || detail.contains('ERR_CONNECTION_ABORTED') || detail.contains('NSURLErrorNetworkConnectionLost') || lower.contains('code=-1005') || lower.contains('connection reset') || lower.contains('connection closed')) {
       return '网络连接被中断，请稍后重试或切换线路';
+    }
+    if (detail.contains('NSURLErrorBadURL') || (lower.contains('nsurlerrordomain') && (lower.contains('code=-1000') || lower.contains('bad url')))) {
+      return '系统网络栈请求异常（NSURLError -1000），如开启了虚拟网卡/代理，可在设置中关闭「系统网络栈」或填写 HTTP 代理';
     }
     if (detail.contains('ERR_PROXY_CONNECTION_FAILED') || detail.contains('ERR_TUNNEL_CONNECTION_FAILED')) {
       return '代理服务器连接失败，请检查代理地址与端口';
     }
-    if (err is HandshakeException || detail.contains('ERR_SSL_') || detail.contains('ERR_CERT_') || detail.contains('NSURLErrorSecureConnectionFailed') || detail.contains('NSURLErrorServerCertificate') || detail.contains('Code=-1200') || detail.contains('Code=-1202')) {
+    if (err is HandshakeException || detail.contains('ERR_SSL_') || detail.contains('ERR_CERT_') || detail.contains('NSURLErrorSecureConnectionFailed') || detail.contains('NSURLErrorServerCertificate') || lower.contains('code=-1200') || lower.contains('code=-1202')) {
       return '安全连接（TLS）握手失败，可能被网络拦截，建议切换线路或开关系统网络栈';
     }
     if (detail.contains('ERR_ADDRESS_UNREACHABLE') || lower.contains('network is unreachable')) {

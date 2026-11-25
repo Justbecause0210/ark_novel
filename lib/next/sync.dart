@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 
 import 'app_prefs.dart';
 import 'avatar.dart';
+import 'diag_log.dart';
 import 'incognito.dart';
 import 'library.dart';
 import 'pages/bookshelf_page.dart' show shelfOptionsProvider;
@@ -195,17 +196,41 @@ class Sync {
   /// 上次 [run] 时因为超过 90 天没更新而跳过的设备文件名。
   static List<String> lastSkipped = const [];
 
+  /// 最近一次同步的诊断摘要（仅内存保存，供同步页排查用）。
+  static ({int at, int merged, List<String> skipped, List<String> failed, String? error})? lastDiag;
+
+  /// 本机待回放的书架离线操作数（`lib:ops`）与当前墓碑数，供同步诊断面板展示（纯只读，不在 build 期间触发写盘）。
+  static ({String deviceId, int lastSync, int pendingOps, int tombCount}) localDiagnostics() {
+    final ops = _box.get('lib:ops');
+    final pendingOps = ops is List ? ops.length : 0;
+    final id = (_box.get('sync:device') as String?) ?? '';
+    return (deviceId: id, lastSync: lastSync, pendingOps: pendingOps, tombCount: SyncMerge.tombs().length);
+  }
+
+  /// 仅拉取并合并其他设备快照（不上传本机）。
+  static Future<int> pullOnly({Dio? dio, HttpClientAdapter? adapter}) => _execute(upload: false, pull: true, dio: dio, adapter: adapter);
+
+  /// 仅上传本机当前快照（跳过拉取其他设备）。
+  static Future<void> pushOnly({Dio? dio, HttpClientAdapter? adapter}) async {
+    await _execute(upload: true, pull: false, dio: dio, adapter: adapter);
+  }
+
   /// 完整同步一次：单次复用同一个 [WebDavClient]/[Dio] 先校验目录、拉取合并其他设备快照，再上传合并后的本机最新快照。
-  static Future<int> run({Dio? dio, HttpClientAdapter? adapter}) async {
+  static Future<int> run({Dio? dio, HttpClientAdapter? adapter}) => _execute(upload: true, pull: true, dio: dio, adapter: adapter);
+
+  static Future<int> _execute({required bool upload, required bool pull, Dio? dio, HttpClientAdapter? adapter}) async {
     if (_running) throw const SyncException('正在同步，请稍候');
     _running = true;
     WebDavClient? client;
+    var merged = 0;
+    final failed = <String>[];
+    final stale = <String>[];
     try {
-      if (lastSync > 0 && lastSync < SyncMerge.tombCutoff) throw const LocalSyncExpiredException();
+      if (upload && lastSync > 0 && lastSync < SyncMerge.tombCutoff) throw const LocalSyncExpiredException();
       client = await _client(dio: dio, adapter: adapter);
       await client.ensureDirectory();
       // 首次同步或换回旧目录时，本机没有 lastSync；仍要检查云端属于本机的旧快照，不能直接覆盖成「新」数据。
-      if (lastSync == 0) {
+      if (upload && lastSync == 0) {
         final ownText = await client.getText('$deviceId.json', what: '检查本机快照', allowNotFound: true);
         if (ownText != null) {
           final previous = jsonDecode(ownText) as Map<String, dynamic>;
@@ -216,34 +241,42 @@ class Sync {
           if (at < SyncMerge.tombCutoff) throw const LocalSyncExpiredException();
         }
       }
-      final files = await client.listJsonFiles();
-      var merged = 0;
-      final failed = <String>[];
-      final stale = <String>[];
-      for (final name in files) {
-        if (name == '$deviceId.json') continue;
-        // 一台设备的文件坏了（或者是认不得的格式）只跳过它，别的设备照样合并，并记录详细日志便于排查
-        try {
-          final text = await client.getText(name, what: '下载 $name');
-          final remote = jsonDecode(text!) as Map<String, dynamic>;
-          validateSyncSnapshot(remote);
-          if (remote['at'] case final num at when at < SyncMerge.tombCutoff) throw const StaleSnapshotException();
-          await _pullAvatar(client, remote);
-          await merge(remote);
-          merged++;
-        } on StaleSnapshotException {
-          stale.add(name);
-        } catch (e, st) {
-          debugPrint('同步合并 $name 失败：$e\n$st');
-          failed.add(name);
+      if (pull) {
+        final files = await client.listJsonFiles();
+        for (final name in files) {
+          if (name == '$deviceId.json') continue;
+          // 一台设备的文件坏了（或者是认不得的格式）只跳过它，别的设备照样合并，并记录详细日志便于排查
+          try {
+            final text = await client.getText(name, what: '下载 $name');
+            final remote = jsonDecode(text!) as Map<String, dynamic>;
+            validateSyncSnapshot(remote);
+            if (remote['at'] case final num at when at < SyncMerge.tombCutoff) throw const StaleSnapshotException();
+            await _pullAvatar(client, remote);
+            await merge(remote);
+            merged++;
+          } on StaleSnapshotException {
+            stale.add(name);
+          } catch (e, st) {
+            debugPrint('同步合并 $name 失败：$e\n$st');
+            DiagLog.record('sync.merge:$name', e, st);
+            failed.add(name);
+          }
         }
       }
-      await _pushAvatar(client);
-      await client.putJson('$deviceId.json', jsonEncode(snapshot()));
+      if (upload) {
+        await _pushAvatar(client);
+        await client.putJson('$deviceId.json', jsonEncode(snapshot()));
+      }
       lastSkipped = stale;
-      await _box.put('sync:last', DateTime.now().millisecondsSinceEpoch);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (upload) await _box.put('sync:last', now);
+      lastDiag = (at: now, merged: merged, skipped: List.unmodifiable(stale), failed: List.unmodifiable(failed), error: null);
       if (failed.isNotEmpty) throw SyncException('已合并 $merged 台设备，这些文件读不了，跳过了：${failed.join('、')}');
       return merged;
+    } catch (e, st) {
+      DiagLog.record('sync', e, st);
+      lastDiag = (at: DateTime.now().millisecondsSinceEpoch, merged: merged, skipped: List.unmodifiable(stale), failed: List.unmodifiable(failed), error: '$e');
+      rethrow;
     } finally {
       client?.close();
       _running = false;

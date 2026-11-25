@@ -4,7 +4,6 @@ import 'package:flutter/material.dart' hide Text;
 import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../cache.dart';
-import '../local_books.dart';
 import '../pages/stats_page.dart' show charsPerMinute, secondsPerChapter;
 import '../read_state.dart';
 import '../stats.dart';
@@ -151,7 +150,7 @@ class ReaderPaceSnapshot {
       for (final aid in books)
         for (final e in ReadingStats.chapterSeconds(aid).entries)
           if (ReadState.isRead(aid, e.key))
-            if ((isLocalAid(aid) ? LocalBooks.chapterLength(aid, e.key) : (hasCache ? ChapterCache.length(aid, e.key) : null)) case final n?)
+            if ((hasCache ? ChapterCache.length(aid, e.key) : null) case final n?)
               (n, e.value.values.fold(0, (a, b) => a + b)),
     ]);
     return ReaderPaceSnapshot(charsPerMin: cpm, globalSecPerChapter: secPerCh);
@@ -179,13 +178,12 @@ String resolveVolumeEtaText({
   final remainingCids = idx >= 0 ? textCids.skip(idx + 1).toList() : textCids.where((c) => c != cid && !read.contains(c)).toList();
 
   final bookSecPerCh = secondsPerChapter(ReadingStats.chapterSeconds(aid).values) ?? pace.globalSecPerChapter;
-  final local = isLocalAid(aid);
   final hasCache = Hive.isBoxOpen('chapter_index');
   final sec = estimateVolumeRemainingSeconds(
     currentChapterChars: currentChapterChars,
     currentChapterFraction: chapterFraction,
     remainingCids: remainingCids,
-    cachedLengthOf: (c) => local ? LocalBooks.chapterLength(aid, c) : (hasCache ? ChapterCache.length(aid, c) : null),
+    cachedLengthOf: (c) => hasCache ? ChapterCache.length(aid, c) : null,
     personalCharsPerMinute: pace.charsPerMin,
     avgSecondsPerChapter: bookSecPerCh,
   );

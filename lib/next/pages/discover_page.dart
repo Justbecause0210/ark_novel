@@ -20,14 +20,50 @@ class DiscoverPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    const tabs = [Tab(child: Text('推荐')), Tab(child: Text('排行')), Tab(child: Text('题材')), Tab(child: Text('完结'))];
+    final search = IconButton(icon: Icon(Icons.search, size: isDesktop ? 20 : null), tooltip: hz(context, '搜索'), onPressed: () => context.push(Routes.search));
+    // 桌面宽屏：标题和分区标签合成一行，和书架、更新页的顶栏一样高；标签用圆角选中块，不拉满整个宽度
+    final singleRow = isDesktop && MediaQuery.sizeOf(context).width >= 720;
+    final scheme = Theme.of(context).colorScheme;
     return DefaultTabController(
       length: 4,
       child: Scaffold(
-        appBar: AppBar(
-          title: const Text('发现'),
-          actions: [IconButton(icon: const Icon(Icons.search), tooltip: hz(context, '搜索'), onPressed: () => context.push(Routes.search))],
-          bottom: const TabBar(tabs: [Tab(child: Text('推荐')), Tab(child: Text('排行')), Tab(child: Text('题材')), Tab(child: Text('完结'))]),
-        ),
+        appBar: singleRow
+            ? AppBar(
+                titleSpacing: 20,
+                title: Row(
+                  children: [
+                    const Text('发现'),
+                    const SizedBox(width: 18),
+                    Flexible(
+                      child: TabBar(
+                        tabs: tabs,
+                        isScrollable: true,
+                        tabAlignment: TabAlignment.start,
+                        dividerHeight: 0,
+                        // 不要按下 / 悬停的整块高亮：它比圆角选中块大一圈，点的时候像残影
+                        overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+                        splashFactory: NoSplash.splashFactory,
+                        labelPadding: const EdgeInsets.symmetric(horizontal: 14),
+                        labelStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600),
+                        unselectedLabelStyle: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500),
+                        labelColor: scheme.onSurface,
+                        unselectedLabelColor: scheme.onSurfaceVariant,
+                        indicatorSize: TabBarIndicatorSize.tab,
+                        indicator: BoxDecoration(color: scheme.surfaceContainerHigh, borderRadius: BorderRadius.circular(8)),
+                        indicatorPadding: const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                    ),
+                  ],
+                ),
+                actions: [search, const SizedBox(width: 8)],
+                bottom: PreferredSize(preferredSize: const Size.fromHeight(1), child: Divider(height: 1, color: scheme.outline.withValues(alpha: 0.6))),
+              )
+            : AppBar(
+                title: const Text('发现'),
+                actions: [search],
+                bottom: const TabBar(tabs: tabs),
+              ),
         body: const TabBarView(children: [_RecommendTab(), _RankingTab(), _CategoryTab(), _CompletedTab()]),
       ),
     );
@@ -305,6 +341,7 @@ class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliv
       return const LoginPrompt(title: '排行榜需要登录', detail: '登录轻小说文库账号后可查看点击榜、推荐榜、收藏榜等榜单；「推荐」分区可直接浏览。');
     }
     final api = ref.watch(apiProvider);
+    final node = ref.watch(nodeProvider);
     final param = rankParam(_kind, _period);
     final scheme = Theme.of(context).colorScheme;
     return Column(
@@ -325,7 +362,7 @@ class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliv
             ),
           ),
         Expanded(
-          child: PagedNovelGrid(key: ValueKey(param), hide: _hideShelved(ref), fetch: (page) => api.ranking(param, page)),
+          child: PagedNovelGrid(key: ValueKey((node, param)), hide: _hideShelved(ref), fetch: (page) => api.ranking(param, page)),
         ),
       ],
     );
@@ -401,6 +438,7 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
       return const LoginPrompt(title: '题材筛选需要登录', detail: '登录轻小说文库账号后可按奇幻、校园、恋爱等题材标签筛选小说。');
     }
     final api = ref.watch(apiProvider);
+    final node = ref.watch(nodeProvider);
     return Stack(
       children: [
         Column(
@@ -423,7 +461,7 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
               },
             ),
             Expanded(
-              child: PagedNovelGrid(key: ValueKey((_tag, _sort)), hide: _hideShelved(ref), fetch: (page) => api.category(_tag, _sort.$2, page)),
+              child: PagedNovelGrid(key: ValueKey((node, _tag, _sort)), hide: _hideShelved(ref), fetch: (page) => api.category(_tag, _sort.$2, page)),
             ),
           ],
         ),
@@ -476,7 +514,7 @@ class _CompletedTabState extends ConsumerState<_CompletedTab> with AutomaticKeep
             ],
           ),
         ),
-        Expanded(child: PagedNovelGrid(hide: _hideShelved(ref), fetch: ref.watch(apiProvider).completed)),
+        Expanded(child: PagedNovelGrid(key: ValueKey(ref.watch(nodeProvider)), hide: _hideShelved(ref), fetch: ref.watch(apiProvider).completed)),
       ],
     );
   }

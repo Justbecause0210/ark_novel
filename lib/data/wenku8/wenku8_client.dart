@@ -403,18 +403,27 @@ class Wenku8Client {
     if (status >= 400) throw Wenku8HttpException(status);
   }
 
+  static bool _isMainSiteHost(String host) {
+    final h = host.toLowerCase();
+    return h == 'wenku8.net' || h.endsWith('.wenku8.net') || h == 'wenku8.cc' || h.endsWith('.wenku8.cc');
+  }
+
   /// wenku8 会用 3xx 跳转（例如跳到登录页）。dio 关闭了自动跳转，这里手动跟随，
   /// 好让解析层拿到最终页面并判断出"未登录"等情况。
   /// - location 可能是相对路径（`userdetail.php`、`/login.php`）或绝对地址，基于当前请求地址解析
+  /// - 主站明文 `http://` 跳转自动升级为 `https://`，避免丢掉 `Secure` cookie 或触发明文拦截
   /// - 最多跟随 [maxRedirects] 次，防止重定向死循环
   Future<Uint8List> _followRedirect(Response response, {int maxRedirects = 5, bool submitting = false, CancelToken? cancelToken, Map<String, dynamic>? extra}) async {
     var current = response;
     for (var i = 0; i < maxRedirects; i++) {
       final status = current.statusCode;
       if (status == null || status < 300 || status >= 400) break;
-      final location = current.headers.value('location');
+      final location = current.headers.value('location')?.trim();
       if (location == null || location.isEmpty) break;
-      final target = current.requestOptions.uri.resolve(location);
+      var target = current.requestOptions.uri.resolve(location);
+      if (target.scheme == 'http' && _isMainSiteHost(target.host)) {
+        target = target.replace(scheme: 'https');
+      }
       if (submitting && target.path.toLowerCase().endsWith('/login.php')) throw const Wenku8UnexpectedPageException('登录已失效，请重新登录后再提交');
       // 307/308 要保留 POST 方法和请求体，不能改成 GET，也不自动重发可能已有副作用的请求。
       if (submitting && (status == 307 || status == 308)) throw const Wenku8UnexpectedPageException('提交请求被重定向，结果未确认，请刷新后检查');
@@ -588,7 +597,7 @@ class _ThrottleInterceptor extends Interceptor {
         final err = gate == null ? cooldownError?.call(host, options) : null;
         if (gate != null || err != null) {
           _busy = false;
-          Future.microtask(_dispatch);
+          unawaited(Future.microtask(_dispatch));
           if (err != null) {
             handler.reject(err);
             return;
@@ -600,7 +609,7 @@ class _ThrottleInterceptor extends Interceptor {
     }
 
     options.extra['throttled'] = true;
-    options.cancelToken?.whenCancel.whenComplete(() => _release(options));
+    unawaited(options.cancelToken?.whenCancel.whenComplete(() => _release(options)));
     handler.next(options);
   }
 

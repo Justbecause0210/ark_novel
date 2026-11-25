@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -23,6 +24,27 @@ class _MockBgmAdapter implements HttpClientAdapter {
   Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
     requests.add('${options.method} ${options.path}');
     final (status, body) = handler(options);
+    return ResponseBody.fromString(
+      jsonEncode(body),
+      status,
+      headers: {
+        Headers.contentTypeHeader: ['application/json; charset=utf-8'],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+class _AsyncMockBgmAdapter implements HttpClientAdapter {
+  _AsyncMockBgmAdapter(this.handler);
+
+  final Future<(int status, Object body)> Function(RequestOptions options) handler;
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
+    final (status, body) = await handler(options);
     return ResponseBody.fromString(
       jsonEncode(body),
       status,
@@ -182,6 +204,143 @@ void main() {
       final again = await bgm.subjectInfo('777', fallbackTitle: '三日间的幸福');
       expect(again?.id, 99999);
       expect(adapter.requests.length, reqCount);
+    });
+
+    test('series 与 subjectInfo 并发同一本书时单飞去重且复用 /subjects/{id}/subjects 关系响应', () async {
+      await Hive.box('session').put('lib:books', {
+        '778': {'aid': '778', 'title': '三日间的幸福', 'img': '', 'added': 1, 'cats': <String>[]},
+      });
+      final adapter = _MockBgmAdapter((opt) {
+        if (opt.path.endsWith('/search/subjects')) {
+          return (
+            200,
+            {
+              'data': [
+                {
+                  'id': 99998,
+                  'platform': '小说',
+                  'series': true,
+                  'name': '三日間の幸福',
+                  'name_cn': '三日间的幸福',
+                  'images': {'large': 'https://lain.bgm.tv/pic/cover/l/mikka.jpg'},
+                },
+              ],
+            },
+          );
+        }
+        if (opt.path.endsWith('/subjects/99998/subjects')) {
+          return (
+            200,
+            [
+              {'id': 1, 'name': '三日間の幸福 (1)', 'relation': '单行本', 'type': 1, 'images': {'large': 'https://lain.bgm.tv/v1.jpg'}},
+              {'id': 2, 'name': 'Anime', 'name_cn': '动画', 'relation': '动画', 'type': 2, 'images': {'medium': 'https://lain.bgm.tv/a.jpg'}},
+            ],
+          );
+        }
+        if (opt.path.endsWith('/subjects/99998')) {
+          return (
+            200,
+            {
+              'id': 99998,
+              'name': '三日間の幸福',
+              'name_cn': '三日间的幸福',
+              'date': '2013-12-25',
+              'summary': '简介',
+              'rating': {'score': 8.3, 'total': 4500, 'rank': 55},
+              'tags': const <Map>[],
+            },
+          );
+        }
+        return (404, {});
+      });
+
+      final bgm = BangumiCovers(Dio()..httpClientAdapter = adapter);
+      final results = await Future.wait<Object?>([
+        bgm.series('778'),
+        bgm.subjectInfo('778', fallbackTitle: '三日间的幸福'),
+      ]);
+      expect(results[0], isNotNull);
+      expect((results[1] as BgmSubjectInfo?)?.id, 99998);
+      // 搜索只发 1 次、关系接口也只发 1 次（被 _recentRelations 复用）
+      expect(adapter.requests.where((r) => r.contains('/search/subjects')).length, 1);
+      expect(adapter.requests.where((r) => r.contains('/subjects/99998/subjects')).length, 1);
+    });
+
+    test('满并发排队时交替调用 subjectInfo 与 series 不会发生信号量死锁', () async {
+      await Hive.box('session').put('lib:books', {
+        for (final id in ['801', '802', '803', '804']) id: {'aid': id, 'title': '轻小说$id', 'img': '', 'added': 1, 'cats': <String>[]},
+      });
+      final gate = Completer<void>();
+      final adapter = _AsyncMockBgmAdapter((opt) async {
+        final kw = (opt.data as Map?)?['keyword'] as String?;
+        if (opt.path.endsWith('/search/subjects')) {
+          if (kw == '轻小说801' || kw == '轻小说802') await gate.future;
+          final numId = int.parse(kw!.replaceAll(RegExp('[^0-9]'), '')) + 10000;
+          return (
+            200,
+            {
+              'data': [
+                {'id': numId, 'platform': '小说', 'series': true, 'name': kw, 'name_cn': kw, 'images': {'large': 'https://lain.bgm.tv/$numId.jpg'}},
+              ],
+            },
+          );
+        }
+        if (opt.path.endsWith('/subjects')) {
+          return (200, const <Map>[]);
+        }
+        final m = RegExp(r'/subjects/(\d+)$').firstMatch(opt.path);
+        if (m != null) {
+          final id = int.parse(m[1]!);
+          return (200, {'id': id, 'name': '书$id', 'name_cn': '书$id', 'rating': {'score': 8.0, 'total': 100, 'rank': 10}, 'tags': const <Map>[]});
+        }
+        return (404, {});
+      });
+
+      final bgm = BangumiCovers(Dio()..httpClientAdapter = adapter);
+      // 先占满 _bookSem 的 2 个槽位
+      final f1 = bgm.series('801');
+      final f2 = bgm.series('802');
+      // 接着为 803、804 先调用 subjectInfo 再调用 series（旧实现会在这里形成 AB-BA 永久死锁）
+      final info3 = bgm.subjectInfo('803');
+      final info4 = bgm.subjectInfo('804');
+      final s3 = bgm.series('803');
+      final s4 = bgm.series('804');
+
+      gate.complete();
+      final all = await Future.wait<Object?>([f1, f2, info3, info4, s3, s4]).timeout(const Duration(seconds: 3));
+      expect((all[2] as BgmSubjectInfo?)?.id, 10803);
+      expect((all[3] as BgmSubjectInfo?)?.id, 10804);
+      expect((all[4] as BgmSeries?)?.id, 10803);
+      expect((all[5] as BgmSeries?)?.id, 10804);
+    });
+
+    test('本地无书名时，先发起的 series() 不会拖累带 fallbackTitle 的 subjectInfo() 写入负缓存', () async {
+      final adapter = _MockBgmAdapter((opt) {
+        if (opt.path.endsWith('/search/subjects')) {
+          return (
+            200,
+            {
+              'data': [
+                {'id': 99997, 'platform': '小说', 'series': true, 'name': '未入架新书', 'name_cn': '未入架新书', 'images': {'large': 'https://lain.bgm.tv/new.jpg'}},
+              ],
+            },
+          );
+        }
+        if (opt.path.endsWith('/subjects/99997/subjects')) return (200, const <Map>[]);
+        if (opt.path.endsWith('/subjects/99997')) {
+          return (200, {'id': 99997, 'name': '未入架新书', 'name_cn': '未入架新书', 'rating': {'score': 8.5, 'total': 200, 'rank': 20}, 'tags': const <Map>[]});
+        }
+        return (404, {});
+      });
+
+      final bgm = BangumiCovers(Dio()..httpClientAdapter = adapter);
+      final results = await Future.wait<Object?>([
+        bgm.series('901'),
+        bgm.subjectInfo('901', fallbackTitle: '未入架新书'),
+      ]);
+      expect(results[0], isNull);
+      expect((results[1] as BgmSubjectInfo?)?.id, 99997);
+      expect(BangumiCovers.savedInfo('901')?.id, 99997);
     });
   });
 

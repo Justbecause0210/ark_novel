@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:go_router/go_router.dart';
@@ -14,7 +16,7 @@ enum VolumeDoneAction { next, shelf, stay }
 /// 读完一卷时弹出的庆祝卡片：封面带着光晕浮上来，下面是这一卷用了几天、多久、多少字，顺手打星，
 /// 再选「下一卷」或「回书架」。关掉（点空白、返回键）算 [VolumeDoneAction.stay]。
 Future<VolumeDoneAction> showVolumeDone(BuildContext context, {required String aid, required Vol vol, required int index, required String cover, required bool hasNext}) async {
-  HapticFeedback.heavyImpact();
+  unawaited(HapticFeedback.heavyImpact());
   final r = await showGeneralDialog<VolumeDoneAction>(
     context: context,
     barrierDismissible: true,
@@ -159,7 +161,7 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
                               IconButton(
                                 visualDensity: VisualDensity.compact,
                                 onPressed: () async {
-                                  HapticFeedback.selectionClick();
+                                  unawaited(HapticFeedback.selectionClick());
                                   setState(() => _rating = _rating == i ? 0 : i);
                                   await Volumes.setRating(aid, v.title, _rating);
                                 },
