@@ -16,6 +16,8 @@ import '../history.dart';
 import '../image_cache.dart';
 import '../incognito.dart';
 import '../library.dart';
+import '../main.dart' show evictInactiveImageCache;
+import '../motion.dart';
 import '../reading_widget.dart';
 import '../routes.dart';
 import '../session.dart';
@@ -76,6 +78,12 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     if (mounted) setState(() {});
   }
 
+  void _onShellLibraryChanged() {
+    if (!mounted) return;
+    setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) => evictInactiveImageCache());
+  }
+
   void _onSyncChanged() {
     if (!mounted) return;
     ref.read(syncProvider.notifier).refreshProviders();
@@ -110,7 +118,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     Sync.changes.addListener(_onSyncChanged);
     LibraryStore.removedElsewhere.addListener(_onRemovedElsewhere);
-    shellLibraryPage.addListener(_onUnreadChanged);
+    shellLibraryPage.addListener(_onShellLibraryChanged);
     if (Hive.isBoxOpen('session')) {
       _unreadWatch = Hive.box('session').listenable(keys: ['updates', 'updates:seen'])..addListener(_onUnreadChanged);
     }
@@ -185,7 +193,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     WidgetsBinding.instance.removeObserver(this);
     Sync.changes.removeListener(_onSyncChanged);
     LibraryStore.removedElsewhere.removeListener(_onRemovedElsewhere);
-    shellLibraryPage.removeListener(_onUnreadChanged);
+    shellLibraryPage.removeListener(_onShellLibraryChanged);
     _libraryInShell = false;
     _timer?.cancel();
     _maintenance?.cancel();
@@ -275,9 +283,13 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
   int _lastMainTab = 0;
 
   void _go(int index) {
+    final changed = shellLibraryPage.value != null || index != shell.currentIndex;
     shellLibraryPage.value = null;
     if (index < _items.length) _lastMainTab = index;
     shell.goBranch(index, initialLocation: index == shell.currentIndex);
+    if (changed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => evictInactiveImageCache());
+    }
   }
 
   @override
@@ -303,7 +315,17 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     final libPage = _libraryWidget(libRoute);
     Widget rawIcon(int i, bool selected) {
       final (outlined, filled, _, artIndex) = _items[i];
-      return ThemeArt.navIcon(palette, artIndex, selected: selected) ?? Icon(selected ? filled : outlined);
+      final art = ThemeArt.navIcon(palette, artIndex, selected: selected);
+      if (art != null) return art;
+      return AnimatedScale(
+        scale: selected ? 1.06 : 1.0,
+        duration: AppMotion.dur(context, AppMotion.fast),
+        curve: AppMotion.snappy,
+        child: AppIconSwap(
+          duration: AppMotion.fast,
+          child: Icon(selected ? filled : outlined, key: ValueKey(selected)),
+        ),
+      );
     }
 
     Widget icon(int i, bool selected) {
@@ -313,8 +335,9 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
 
     final body = Column(
       children: [
-        if (offline)
-          Material(
+        AppCollapse(
+          visible: offline,
+          child: Material(
             color: scheme.surfaceContainer,
             child: InkWell(
               onTap: needsVerify
@@ -370,17 +393,22 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
                   child: Row(
                     children: [
-                      if (_reconnecting && !needsVerify)
-                        const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      else
-                        const Icon(Icons.cloud_off_outlined, size: 16),
+                      AppIconSwap(
+                        child: (_reconnecting && !needsVerify)
+                            ? const SizedBox(key: ValueKey('spin'), width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.cloud_off_outlined, key: ValueKey('off'), size: 16),
+                      ),
                       const SizedBox(width: 8),
                       Expanded(
-                        child: Text(
-                          needsVerify
-                              ? '被网站的验证拦住了，点这里去验证'
-                              : (_reconnecting ? '正在重新连接…' : '离线模式，显示的是已保存的内容，点这里重新连接'),
-                          style: const TextStyle(fontSize: 12),
+                        child: AppCrossfade(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            needsVerify
+                                ? '被网站的验证拦住了，点这里去验证'
+                                : (_reconnecting ? '正在重新连接…' : '离线模式，显示的是已保存的内容，点这里重新连接'),
+                            key: ValueKey((needsVerify, _reconnecting)),
+                            style: const TextStyle(fontSize: 12),
+                          ),
                         ),
                       ),
                     ],
@@ -389,8 +417,10 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               ),
             ),
           ),
-        if (incognito)
-          Material(
+        ),
+        AppCollapse(
+          visible: incognito,
+          child: Material(
             color: scheme.tertiaryContainer,
             child: InkWell(
               onTap: () => ref.read(incognitoProvider.notifier).set(false),
@@ -415,6 +445,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               ),
             ),
           ),
+        ),
         // 提示条已经让开了状态栏，下面的页面就别再留一次。用 Builder 取这里的 MediaQuery：
         // Mac 宽屏右侧已经去掉了给红绿灯留的顶部空白，直接用外层 context 会把空白又加回来
         Expanded(
@@ -427,7 +458,16 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
                 fit: StackFit.expand,
                 children: [
                   Offstage(offstage: libPage != null, child: TickerMode(enabled: libPage == null, child: shell)),
-                  if (libPage != null) KeyedSubtree(key: ValueKey(libRoute), child: libPage),
+                  IgnorePointer(
+                    ignoring: libPage == null,
+                    child: AppCrossfade(
+                      fill: true,
+                      duration: AppMotion.fast,
+                      child: libPage != null
+                          ? KeyedSubtree(key: ValueKey(libRoute), child: libPage)
+                          : const SizedBox.shrink(key: ValueKey('__lib_none__')),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -531,40 +571,60 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       return back(Scaffold(
         body: Row(
           children: [
-            Container(
+            AnimatedContainer(
               key: const ValueKey('desktop-sidebar'),
+              duration: AppMotion.dur(context, AppMotion.standard),
+              curve: AppMotion.curve,
               width: roomy ? 200 : 78,
               decoration: BoxDecoration(
                 color: railBg,
                 border: Border(right: BorderSide(color: scheme.outline.withValues(alpha: dark ? 0.5 : 0.42))),
               ),
-              child: SafeArea(
-                top: !mac,
-                right: false,
-                child: roomy
-                    ? Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: sourceList)
-                    : Column(
-                  children: [
-                    SizedBox(height: mac ? 46 : 16),
-                    for (final (i, item) in _items.indexed) ...[
-                      if (i > 0) const SizedBox(height: 6),
-                      _SidebarTile(
-                        label: item.$3,
-                        selected: cur == i,
-                        icon: icon(i, cur == i),
-                        onTap: () => _go(i),
-                      ),
-                    ],
-                    const Spacer(),
-                    _SidebarTile(
-                      key: const ValueKey('sidebar-settings'),
-                      label: '设置',
-                      selected: cur == 4,
-                      icon: Icon(cur == 4 ? Icons.settings : Icons.settings_outlined, size: 22),
-                      onTap: () => _go(4),
-                    ),
-                    const SizedBox(height: 14),
-                  ],
+              child: ClipRect(
+                child: SafeArea(
+                  top: !mac,
+                  right: false,
+                  child: AppCrossfade(
+                    fill: true,
+                    duration: AppMotion.fast,
+                    child: roomy
+                        ? OverflowBox(
+                            key: const ValueKey('sidebar-roomy'),
+                            minWidth: 200,
+                            maxWidth: 200,
+                            alignment: AlignmentDirectional.topStart,
+                            child: Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: sourceList),
+                          )
+                        : OverflowBox(
+                            key: const ValueKey('sidebar-compact'),
+                            minWidth: 78,
+                            maxWidth: 78,
+                            alignment: AlignmentDirectional.topStart,
+                            child: Column(
+                              children: [
+                                SizedBox(height: mac ? 46 : 16),
+                                for (final (i, item) in _items.indexed) ...[
+                                  if (i > 0) const SizedBox(height: 6),
+                                  _SidebarTile(
+                                    label: item.$3,
+                                    selected: cur == i,
+                                    icon: icon(i, cur == i),
+                                    onTap: () => _go(i),
+                                  ),
+                                ],
+                                const Spacer(),
+                                _SidebarTile(
+                                  key: const ValueKey('sidebar-settings'),
+                                  label: '设置',
+                                  selected: cur == 4,
+                                  icon: Icon(cur == 4 ? Icons.settings : Icons.settings_outlined, size: 22),
+                                  onTap: () => _go(4),
+                                ),
+                                const SizedBox(height: 14),
+                              ],
+                            ),
+                          ),
+                  ),
                 ),
               ),
             ),
@@ -580,19 +640,26 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       // 书架多选或窄屏进入设置时收起底部导航
       bottomNavigationBar: ValueListenableBuilder<bool>(
         valueListenable: shelfSelecting,
-        builder: (context, selecting, _) => (selecting && shell.currentIndex == 0) || shell.currentIndex >= _items.length
-            ? const SizedBox.shrink()
-            : Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Divider(),
-                  NavigationBar(
-                    selectedIndex: shell.currentIndex.clamp(0, _items.length - 1),
-                    onDestinationSelected: _go,
-                    destinations: [for (final (i, item) in _items.indexed) NavigationDestination(icon: icon(i, false), selectedIcon: icon(i, true), label: hz(context, item.$3))],
-                  ),
-                ],
-              ),
+        builder: (context, selecting, _) {
+          final showNav = !((selecting && shell.currentIndex == 0) || shell.currentIndex >= _items.length);
+          return AppCollapse(
+            visible: showNav,
+            axisAlignment: 1.0,
+            duration: AppMotion.standard,
+            reverseDuration: AppMotion.fast,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Divider(),
+                NavigationBar(
+                  selectedIndex: shell.currentIndex.clamp(0, _items.length - 1),
+                  onDestinationSelected: _go,
+                  destinations: [for (final (i, item) in _items.indexed) NavigationDestination(icon: icon(i, false), selectedIcon: icon(i, true), label: hz(context, item.$3))],
+                ),
+              ],
+            ),
+          );
+        },
       ),
     ));
   }
@@ -633,30 +700,33 @@ class _SidebarTileState extends State<_SidebarTile> {
           cursor: SystemMouseCursors.click,
           onEnter: (_) => setState(() => _hovered = true),
           onExit: (_) => setState(() => _hovered = false),
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.onTap,
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 160),
-              curve: Curves.easeOutCubic,
-              width: 60,
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconTheme(
-                    data: IconThemeData(color: fg, size: 22),
-                    child: SizedBox(height: 32, child: Center(child: widget.icon)),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    widget.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11.5, fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500, color: fg),
-                  ),
-                ],
+          child: AppPressScale(
+            scale: 0.96,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: widget.onTap,
+              child: AnimatedContainer(
+                duration: AppMotion.dur(context, AppMotion.fast),
+                curve: AppMotion.curve,
+                width: 60,
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(12)),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconTheme(
+                      data: IconThemeData(color: fg, size: 22),
+                      child: SizedBox(height: 32, child: Center(child: widget.icon)),
+                    ),
+                    const SizedBox(height: 3),
+                    AnimatedDefaultTextStyle(
+                      duration: AppMotion.dur(context, AppMotion.fast),
+                      curve: AppMotion.curve,
+                      style: TextStyle(fontSize: 11.5, fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500, color: fg),
+                      child: Text(widget.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
@@ -713,40 +783,48 @@ class _SourceItemState extends State<_SourceItem> {
         cursor: SystemMouseCursors.click,
         onEnter: (_) => setState(() => _hovered = true),
         onExit: (_) => setState(() => _hovered = false),
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 140),
-            curve: Curves.easeOutCubic,
-            height: 36,
-            margin: const EdgeInsets.only(bottom: 2),
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
-            child: Row(
-              children: [
-                SizedBox.square(
-                  dimension: 28,
-                  child: Center(
-                    child: IconTheme(data: IconThemeData(size: 19, color: widget.selected ? scheme.primary : scheme.onSurfaceVariant), child: widget.icon),
+        child: AppPressScale(
+          scale: 0.975,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              duration: AppMotion.dur(context, AppMotion.fast),
+              curve: AppMotion.curve,
+              height: 36,
+              margin: const EdgeInsets.only(bottom: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
+              child: Row(
+                children: [
+                  SizedBox.square(
+                    dimension: 28,
+                    child: Center(
+                      child: IconTheme(data: IconThemeData(size: 19, color: widget.selected ? scheme.primary : scheme.onSurfaceVariant), child: widget.icon),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: Text(
-                    widget.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 13.5, fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500, color: fg),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: AnimatedDefaultTextStyle(
+                      duration: AppMotion.dur(context, AppMotion.fast),
+                      curve: AppMotion.curve,
+                      style: TextStyle(fontSize: 13.5, fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500, color: fg),
+                      child: Text(widget.label, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    ),
                   ),
-                ),
-                if (widget.badge != null)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
-                    decoration: BoxDecoration(color: scheme.primary, borderRadius: BorderRadius.circular(9)),
-                    child: Text(widget.badge!, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: scheme.onPrimary, fontFeatures: const [FontFeature.tabularFigures()])),
+                  AppCollapse(
+                    visible: widget.badge != null,
+                    axis: Axis.horizontal,
+                    duration: AppMotion.fast,
+                    reverseDuration: AppMotion.instant,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+                      decoration: BoxDecoration(color: scheme.primary, borderRadius: BorderRadius.circular(9)),
+                      child: Text(widget.badge ?? '', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: scheme.onPrimary, fontFeatures: const [FontFeature.tabularFigures()])),
+                    ),
                   ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -772,38 +850,41 @@ class _SidebarResume extends ConsumerWidget {
           final scheme = Theme.of(context).colorScheme;
           return Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: Material(
-              color: scheme.surfaceContainerLowest,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: scheme.outline)),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: () => context.push(Routes.reader(h.aid, h.cid)),
-                onLongPress: () => context.push(Routes.novel(h.aid)),
-                child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 32,
-                        height: 45,
-                        decoration: BoxDecoration(borderRadius: BorderRadius.circular(4), boxShadow: const [BoxShadow(color: Color(0x33000000), blurRadius: 4, offset: Offset(0, 1))]),
-                        clipBehavior: Clip.antiAlias,
-                        child: CoverImage(cover, aid: h.aid, thumbnail: true, decodeSize: const Size(32, 45)),
-                      ),
-                      const SizedBox(width: 9),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text('继续阅读', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: scheme.primary)),
-                            const SizedBox(height: 1),
-                            Text(LibraryStore.shown(h.aid, h.title), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: scheme.onSurface)),
-                            Text(h.chapter, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
-                          ],
+            child: AppPressScale(
+              scale: 0.975,
+              child: Material(
+                color: scheme.surfaceContainerLowest,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10), side: BorderSide(color: scheme.outline)),
+                clipBehavior: Clip.antiAlias,
+                child: InkWell(
+                  onTap: () => context.push(Routes.reader(h.aid, h.cid)),
+                  onLongPress: () => context.push(Routes.novel(h.aid)),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 32,
+                          height: 45,
+                          decoration: BoxDecoration(borderRadius: BorderRadius.circular(4), boxShadow: const [BoxShadow(color: Color(0x33000000), blurRadius: 4, offset: Offset(0, 1))]),
+                          clipBehavior: Clip.antiAlias,
+                          child: CoverImage(cover, aid: h.aid, thumbnail: true, decodeSize: const Size(32, 45)),
                         ),
-                      ),
-                    ],
+                        const SizedBox(width: 9),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text('继续阅读', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: scheme.primary)),
+                              const SizedBox(height: 1),
+                              Text(LibraryStore.shown(h.aid, h.title), maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+                              Text(h.chapter, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),

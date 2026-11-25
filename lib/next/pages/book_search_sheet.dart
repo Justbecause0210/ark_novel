@@ -7,6 +7,7 @@ import '../../models/cat_volume.dart';
 import '../book_search.dart';
 import '../cache.dart';
 import '../hant.dart';
+import '../motion.dart';
 import '../reader/reader_sheets.dart';
 import '../settings.dart';
 import '../text.dart';
@@ -311,16 +312,21 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
                 isDense: true,
                 prefixIcon: const Icon(Icons.search, size: 20),
                 hint: Text(_isRegex ? '输入正则表达式（如 角色A|别名B）' : '搜索书内正文关键词', maxLines: 1, overflow: TextOverflow.ellipsis),
-                suffixIcon: q.isEmpty
-                    ? null
-                    : IconButton(
-                        tooltip: hz(context, '清空'),
-                        icon: const Icon(Icons.close, size: 18),
-                        onPressed: () {
-                          _controller.clear();
-                          _runSearch();
-                        },
-                      ),
+                suffixIcon: AppReveal(
+                  visible: q.isNotEmpty,
+                  offset: Offset.zero,
+                  beginScale: 0.72,
+                  duration: AppMotion.fast,
+                  reverseDuration: AppMotion.instant,
+                  child: IconButton(
+                    tooltip: hz(context, '清空'),
+                    icon: const Icon(Icons.close, size: 18),
+                    onPressed: () {
+                      _controller.clear();
+                      _runSearch();
+                    },
+                  ),
+                ),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               ),
             ),
@@ -363,18 +369,22 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
                   },
                 ),
                 const Spacer(),
-                if (_searching)
-                  TextButton(
+                AppCollapse(
+                  visible: _searching,
+                  axis: Axis.horizontal,
+                  duration: AppMotion.fast,
+                  child: TextButton(
                     onPressed: () {
                       _cancel?.cancel();
                       setState(() => _searching = false);
                     },
                     child: const Text('停止'),
                   ),
+                ),
               ],
             ),
           ),
-          if (_searching) const LinearProgressIndicator(minHeight: 2),
+          AppCollapse(visible: _searching, duration: AppMotion.fast, reverseDuration: AppMotion.fast, child: const LinearProgressIndicator(minHeight: 2)),
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 6),
             child: Align(
@@ -387,67 +397,73 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
           ),
           const Divider(height: 1),
           Expanded(
-            child: _rows.isEmpty
-                ? ListView(
-                    controller: widget.scrollController,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 64, 24, 24),
-                        child: Text(
-                          q.isEmpty
-                              ? (_scope == BookSearchScope.allCached && cachedCount == 0
-                                    ? '还没有已缓存的章节。\n可先在书籍详情页缓存章节或阅读后再搜全书。'
-                                    : '支持关键词检索与正则多词检索（例如：角色名|别名）。')
-                              : (_searching
-                                    ? '正在检索中…'
-                                    : (_error != null
-                                          ? '请检查正则表达式语法。'
-                                          : (_scope == BookSearchScope.allCached && cachedCount == 0 && _scanned == 0
-                                                ? '未找到结果（当前暂无已缓存章节）。'
-                                                : '未找到匹配内容。'))),
-                          textAlign: TextAlign.center,
-                          style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant, height: 1.6),
+            child: AppCrossfade(
+              fill: true,
+              duration: AppMotion.fast,
+              child: _rows.isEmpty
+                  ? ListView(
+                      key: const ValueKey('book-search-empty'),
+                      controller: widget.scrollController,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(24, 64, 24, 24),
+                          child: Text(
+                            q.isEmpty
+                                ? (_scope == BookSearchScope.allCached && cachedCount == 0
+                                      ? '还没有已缓存的章节。\n可先在书籍详情页缓存章节或阅读后再搜全书。'
+                                      : '支持关键词检索与正则多词检索（例如：角色名|别名）。')
+                                : (_searching
+                                      ? '正在检索中…'
+                                      : (_error != null
+                                            ? '请检查正则表达式语法。'
+                                            : (_scope == BookSearchScope.allCached && cachedCount == 0 && _scanned == 0
+                                                  ? '未找到结果（当前暂无已缓存章节）。'
+                                                  : '未找到匹配内容。'))),
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant, height: 1.6),
+                          ),
                         ),
-                      ),
-                    ],
-                  )
-                : ListView.builder(
-                    controller: widget.scrollController,
-                    padding: const EdgeInsets.only(bottom: 24),
-                    itemCount: _rows.length,
-                    itemBuilder: (context, i) {
-                      final row = _rows[i];
-                      if (row is _GroupHeaderRow) {
-                        final heading = row.volTitle.isNotEmpty && row.chapterTitle.isNotEmpty
-                            ? '${row.volTitle} · ${row.chapterTitle}'
-                            : (row.chapterTitle.isNotEmpty ? row.chapterTitle : row.volTitle);
-                        return Container(
-                          color: scheme.surfaceContainerLow,
-                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(heading, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
-                              ),
-                              const SizedBox(width: 8),
-                              Text('${row.count} 处', style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary)),
-                            ],
+                      ],
+                    )
+                  : ListView.builder(
+                      key: const ValueKey('book-search-results'),
+                      controller: widget.scrollController,
+                      padding: const EdgeInsets.only(bottom: 24),
+                      itemCount: _rows.length,
+                      itemBuilder: (context, i) {
+                        final row = _rows[i];
+                        if (row is _GroupHeaderRow) {
+                          final heading = row.volTitle.isNotEmpty && row.chapterTitle.isNotEmpty
+                              ? '${row.volTitle} · ${row.chapterTitle}'
+                              : (row.chapterTitle.isNotEmpty ? row.chapterTitle : row.volTitle);
+                          return Container(
+                            color: scheme.surfaceContainerLow,
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(heading, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelLarge?.copyWith(color: scheme.onSurfaceVariant)),
+                                ),
+                                const SizedBox(width: 8),
+                                Text('${row.count} 处', style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary)),
+                              ],
+                            ),
+                          );
+                        }
+                        final hit = (row as _HitRow).hit;
+                        return InkWell(
+                          onTap: () {
+                            Navigator.pop(context);
+                            widget.onSelectHit(hit);
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                            child: _snippetText(hit, theme),
                           ),
                         );
-                      }
-                      final hit = (row as _HitRow).hit;
-                      return InkWell(
-                        onTap: () {
-                          Navigator.pop(context);
-                          widget.onSelectHit(hit);
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                          child: _snippetText(hit, theme),
-                        ),
-                      );
-                    },
-                  ),
+                      },
+                    ),
+            ),
           ),
         ],
       ),

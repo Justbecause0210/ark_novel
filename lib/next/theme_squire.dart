@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart' hide Text;
+import 'motion.dart';
 import 'text.dart';
 
 /// 「遗迹·晴空」主题的美术：全部用代码画的扁平插画（天空、两层云、科林斯石柱、断墙、芥末色三角旗），
@@ -308,7 +309,8 @@ class RuinsNavIcon extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     return AnimatedScale(
       scale: selected ? 1.1 : 1,
-      duration: const Duration(milliseconds: 160),
+      duration: AppMotion.dur(context, AppMotion.fast),
+      curve: AppMotion.snappy,
       child: CustomPaint(size: const Size(26, 26), painter: _NavPainter(index, selected, scheme.primary, scheme.secondary, scheme.onSurfaceVariant, scheme.surface)),
     );
   }

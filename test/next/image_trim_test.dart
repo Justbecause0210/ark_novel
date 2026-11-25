@@ -263,6 +263,37 @@ void main() {
     expect(challengeCalls, 1);
   });
 
+  test('后台 prefetch 撞 403 不拉起无头 WebView 过盾，前景 load 仍正常触发过盾', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final dir = await Directory.systemTemp.createTemp('imgstore_prefetch_no_cf');
+    addTearDown(() => dir.delete(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir.path);
+
+    var challengeCalls = 0;
+    final net = _FakeAdapter((o) async => ResponseBody.fromBytes(const [], 403));
+    final c = ProviderContainer(
+      overrides: [
+        imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net),
+        imageChallengeProvider.overrideWithValue((url) async {
+          challengeCalls++;
+          return Uint8List.fromList(_jpeg(9));
+        }),
+      ],
+    );
+    addTearDown(c.dispose);
+    final store = c.read(imageStoreProvider);
+
+    const targetUrl = 'https://pic.wenku8.com/pictures/1/1/prefetch_only.jpg';
+    store.prefetch([targetUrl]);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(challengeCalls, 0);
+    expect(await store.cached(targetUrl), isNull);
+
+    final loaded = await store.load(targetUrl);
+    expect(challengeCalls, 1);
+    expect(loaded, isNotEmpty);
+  });
+
   test('cancelPrefetch 取消尚未开始的低优预取，且可见图加载优先于预取队列', () async {
     TestWidgetsFlutterBinding.ensureInitialized();
     final dir = await Directory.systemTemp.createTemp('imgstore_priority');

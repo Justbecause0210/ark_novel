@@ -1,20 +1,22 @@
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart' show PointerDeviceKind, PointerEnterEvent, PointerHoverEvent, PointerScrollEvent, PointerScrollInertiaCancelEvent, PointerSignalEvent;
+import 'package:flutter/gestures.dart' show PointerDeviceKind, PointerHoverEvent, PointerScrollEvent, PointerScrollInertiaCancelEvent, PointerSignalEvent;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/scheduler.dart' show Ticker;
 import 'package:flutter/services.dart' show HapticFeedback, KeyDownEvent, KeyEvent, KeyRepeatEvent, LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'cover_color.dart';
 import 'library.dart';
+import 'motion.dart';
 import 'pages/cover_picker_page.dart' show kCoverAspect;
 import 'pages/volumes_page.dart' show volumeHeroShuttle;
 import 'text.dart';
 import 'volumes.dart' show volumeChangeForProvider;
 import 'widgets.dart';
 
-/// 展示页通用的平滑缓动曲线（起速干脆、落点柔和）。
-const Curve kShelfEase = Cubic(0.2, 0.8, 0.2, 1.0);
+/// 展示页通用的平滑缓动曲线（统一接入全项目苹果减速曲线）。
+const Curve kShelfEase = AppMotion.curve;
 
 /// 平稳文字切换：原地极轻淡入淡出，无上下位移，避免切书时基线晃动。
 /// 系统开启「减弱动态效果」时直接替换内容。
@@ -23,7 +25,7 @@ class MaskedRollSwitcher extends StatelessWidget {
     super.key,
     required this.child,
     this.direction = 1,
-    this.duration = const Duration(milliseconds: 140),
+    this.duration = AppMotion.fast,
     this.delay = Duration.zero,
     this.alignment = Alignment.center,
     this.semanticLabel,
@@ -44,7 +46,7 @@ class MaskedRollSwitcher extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (MediaQuery.disableAnimationsOf(context)) {
+    if (AppMotion.reduce(context)) {
       final staticChild = Align(alignment: alignment, child: child);
       return semanticLabel != null
           ? Semantics(label: semanticLabel, child: ExcludeSemantics(child: staticChild))
@@ -54,8 +56,8 @@ class MaskedRollSwitcher extends StatelessWidget {
     final switcher = AnimatedSwitcher(
       duration: duration,
       reverseDuration: Duration(milliseconds: math.max(80, duration.inMilliseconds - 40)),
-      switchInCurve: Curves.easeOutCubic,
-      switchOutCurve: Curves.easeInCubic,
+      switchInCurve: AppMotion.curve,
+      switchOutCurve: AppMotion.exit,
       layoutBuilder: (current, previous) => Stack(alignment: alignment, children: [...previous, ?current]),
       transitionBuilder: (w, animation) {
         final incoming = w.key == currentKey;
@@ -100,25 +102,28 @@ class ShelfActionButton extends StatelessWidget {
     final fg = active ? scheme.primary : scheme.onSurface.withValues(alpha: 0.88);
     final border = active ? scheme.primary.withValues(alpha: 0.45) : scheme.onSurface.withValues(alpha: dark ? 0.18 : 0.14);
     final hoverBorder = active ? scheme.primary.withValues(alpha: 0.65) : scheme.onSurface.withValues(alpha: dark ? 0.34 : 0.28);
-    return OutlinedButton.icon(
-      onPressed: onPressed,
-      style: ButtonStyle(
-        minimumSize: const WidgetStatePropertyAll(Size(0, 36)),
-        padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 20)),
-        elevation: const WidgetStatePropertyAll(0),
-        shape: const WidgetStatePropertyAll(StadiumBorder()),
-        foregroundColor: WidgetStatePropertyAll(fg),
-        backgroundColor: WidgetStateProperty.resolveWith((states) {
-          if (states.contains(WidgetState.pressed)) return scheme.onSurface.withValues(alpha: dark ? 0.14 : 0.08);
-          if (states.contains(WidgetState.hovered)) return scheme.onSurface.withValues(alpha: dark ? 0.10 : 0.045);
-          return bg;
-        }),
-        side: WidgetStateProperty.resolveWith((states) => BorderSide(color: states.contains(WidgetState.hovered) ? hoverBorder : border, width: 1)),
-        overlayColor: const WidgetStatePropertyAll(Colors.transparent),
-        textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500, letterSpacing: 0.4)),
+    return AppPressScale(
+      scale: 0.965,
+      child: OutlinedButton.icon(
+        onPressed: onPressed,
+        style: ButtonStyle(
+          minimumSize: const WidgetStatePropertyAll(Size(0, 36)),
+          padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 20)),
+          elevation: const WidgetStatePropertyAll(0),
+          shape: const WidgetStatePropertyAll(StadiumBorder()),
+          foregroundColor: WidgetStatePropertyAll(fg),
+          backgroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.pressed)) return scheme.onSurface.withValues(alpha: dark ? 0.14 : 0.08);
+            if (states.contains(WidgetState.hovered)) return scheme.onSurface.withValues(alpha: dark ? 0.10 : 0.045);
+            return bg;
+          }),
+          side: WidgetStateProperty.resolveWith((states) => BorderSide(color: states.contains(WidgetState.hovered) ? hoverBorder : border, width: 1)),
+          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+          textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 13.5, fontWeight: FontWeight.w500, letterSpacing: 0.4)),
+        ),
+        icon: Icon(icon, size: 16),
+        label: Text(label),
       ),
-      icon: Icon(icon, size: 16),
-      label: Text(label),
     );
   }
 }
@@ -158,6 +163,26 @@ abstract final class Shelf3DLayout {
       shade: math.min(a, 1.5) * 0.22,
       opacity: (2.4 - a).clamp(0.0, 1.0),
     );
+  }
+
+  /// 根据舞台相对中心的横坐标 [localDx]，从前到后精确命中对应的可见封面。
+  static int? hitTest({
+    required double localDx,
+    required double page,
+    required int count,
+    required double coverWidth,
+  }) {
+    if (count <= 0) return null;
+    final lo = math.max(0, page.floor() - 2);
+    final hi = math.min(count - 1, page.ceil() + 2);
+    final order = [for (var i = lo; i <= hi; i++) i]..sort((a, b) => (a - page).abs().compareTo((b - page).abs()));
+    for (final i in order) {
+      final p = pose(i - page, coverWidth);
+      if (p.opacity <= 0.02) continue;
+      final halfW = coverWidth * p.scale * 0.5;
+      if ((localDx - p.dx).abs() <= halfW) return i;
+    }
+    return null;
   }
 }
 
@@ -214,12 +239,14 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
   PageController? _pc;
   double _fraction = 0;
   final _focus = FocusNode(debugLabel: 'shelf-3d');
+  final _stageKey = GlobalKey();
   DateTime _lastScrollEvent = DateTime(0);
   DateTime _lastWheelStep = DateTime(0);
   double _wheelAccum = 0;
   double _lastAbsDelta = 0;
   bool _wheelLocked = false;
   double _lastCoverWidth = 0;
+  double _coverW = 240;
   final _precached = <String>{};
   int _lastPrecachedCur = -1;
 
@@ -232,6 +259,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
   int? _hoveredIndex;
   final _lifts = <int, double>{};
   bool _reduceMotion = false;
+  bool _pointerOverBook = false;
 
   void _ensureTicking() {
     if (_reduceMotion) return;
@@ -245,6 +273,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
     _hoveredIndex = null;
     _targetTiltX = 0;
     _targetTiltY = 0;
+    if (_pointerOverBook) setState(() => _pointerOverBook = false);
     if (_reduceMotion) {
       _tiltX = _tiltY = 0;
       _lifts.clear();
@@ -255,33 +284,35 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
   }
 
   void _onStageHover(PointerHoverEvent e, double stageW, double stageH, double coverW, double coverH) {
-    if (e.kind != PointerDeviceKind.mouse || _reduceMotion) return;
+    if (e.kind != PointerDeviceKind.mouse) return;
     final dx = e.localPosition.dx - stageW / 2;
     final dy = e.localPosition.dy - stageH / 2;
-    final settled = (_page - _cur).abs() < 0.3;
-    final onCover = settled && dx.abs() <= coverW * 0.55 && dy.abs() <= coverH * 0.55;
+    final p = _page;
+    final inVert = dy.abs() <= coverH * 0.56;
+    final hit = inVert ? Shelf3DLayout.hitTest(localDx: dx, page: p, count: widget.books.length, coverWidth: coverW) : null;
+    final overBook = hit != null;
+    if (overBook != _pointerOverBook) setState(() => _pointerOverBook = overBook);
+
+    if (_reduceMotion) return;
+    final settled = (p - _cur).abs() < 0.3;
+    final onCover = settled && hit == _cur && dx.abs() <= coverW * 0.55 && dy.abs() <= coverH * 0.55;
+    final nextHover = (!onCover && hit != null && (hit - p).abs() > 0.5) ? hit : null;
     if (onCover) {
       _targetTiltY = -(dx / (coverW * 0.55)).clamp(-1.0, 1.0) * 0.105; // 约 ±6°
       _targetTiltX = (dy / (coverH * 0.55)).clamp(-1.0, 1.0) * 0.075; // 约 ±4.3°
+      _hoveredIndex = null;
+      _ensureTicking();
     } else {
-      _targetTiltY = -(dx / math.max(stageW, 1.0)).clamp(-0.5, 0.5) * 0.05;
+      _targetTiltY = 0;
       _targetTiltX = 0;
+      if (nextHover != _hoveredIndex) {
+        _hoveredIndex = nextHover;
+        if (nextHover != null) _lifts.putIfAbsent(nextHover, () => 0);
+      }
+      if (_hoveredIndex != null || _tiltX != 0 || _tiltY != 0 || _lifts.isNotEmpty) {
+        _ensureTicking();
+      }
     }
-    _ensureTicking();
-  }
-
-  void _onItemEnter(int i, PointerEnterEvent e) {
-    if (e.kind != PointerDeviceKind.mouse || _reduceMotion) return;
-    if (_hoveredIndex == i) return;
-    _hoveredIndex = i;
-    _lifts.putIfAbsent(i, () => 0);
-    _ensureTicking();
-  }
-
-  void _onItemExit(int i) {
-    if (_hoveredIndex != i) return;
-    _hoveredIndex = null;
-    if (_lifts.isNotEmpty) _ensureTicking();
   }
 
   void _onTick(Duration elapsed) {
@@ -337,7 +368,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
     if (!mounted || widget.books.isEmpty || _lastCoverWidth <= 0) return;
     _lastPrecachedCur = center;
     final size = Size(_lastCoverWidth, _lastCoverWidth / kCoverAspect);
-    for (var d = 1; d <= 3; d++) {
+    for (var d = 1; d <= 2; d++) {
       for (final idx in [center + d, center - d]) {
         if (idx < 0 || idx >= widget.books.length) continue;
         final url = widget.coverOf(widget.books[idx]);
@@ -417,7 +448,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
     pc.animateToPage(
       target,
       duration: Duration(milliseconds: math.min(260 + 40 * (target - _cur).abs(), 600)),
-      curve: Curves.easeOutCubic,
+      curve: AppMotion.curve,
     );
   }
 
@@ -431,6 +462,23 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
     } else {
       _go(i);
     }
+  }
+
+  int? _hitAtGlobal(Offset globalPos) {
+    final box = _stageKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    final local = box.globalToLocal(globalPos);
+    return Shelf3DLayout.hitTest(localDx: local.dx - box.size.width / 2, page: _page, count: widget.books.length, coverWidth: _coverW);
+  }
+
+  void _onTapGlobal(Offset globalPos) {
+    final i = _hitAtGlobal(globalPos);
+    if (i != null) _tap(i);
+  }
+
+  void _onSelectGlobal(Offset globalPos) {
+    final i = _hitAtGlobal(globalPos);
+    if (i != null) widget.onToggleSelect(widget.books[i]);
   }
 
   void _onWheel(PointerSignalEvent e) {
@@ -504,6 +552,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
         final infoH = Shelf3DLayout.infoHeight(textScale);
         final height = c.maxHeight.isFinite ? c.maxHeight : 640.0;
         final w = Shelf3DLayout.coverWidth(c.maxWidth, math.max(200.0, height - infoH));
+        _coverW = w;
         // 封面按宽度定下来以后，多出来的高度上下平分（整组居中），不全堆在最下面
         final stageH = Shelf3DLayout.stageHeight(w);
         final canScroll = stageH + infoH > height + 1;
@@ -551,62 +600,61 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
     final persp = 1 / (w * 3.2);
     // 裁掉左右伸出去的书：TabBarView 切标签时不画到相邻标签上。上下不裁，封面的影子要完整
     return MouseRegion(
+      cursor: _pointerOverBook ? SystemMouseCursors.click : SystemMouseCursors.basic,
       onHover: (e) => _onStageHover(e, stageW, stageH, w, h),
       onExit: (_) => _resetPointerMotion(),
       child: ClipRect(
+        key: _stageKey,
         clipper: const ShelfSidesClipper(),
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            ExcludeSemantics(
-              child: IgnorePointer(
-                child: AnimatedBuilder(
-                  animation: Listenable.merge([pc, _motion]),
-                  builder: (context, _) {
-                    final p = _page;
-                    final shown = [for (var i = math.max(0, p.floor() - 2); i <= math.min(books.length - 1, p.ceil() + 2); i++) i]
-                      ..sort((a, b) => (b - p).abs().compareTo((a - p).abs())); // 远的先画，近的压在上面
-                    return Stack(alignment: Alignment.center, clipBehavior: Clip.none, children: [for (final i in shown) _book(i, i - p, w, h, persp)]);
-                  },
-                ),
-              ),
-            ),
-            PageView.builder(
-              controller: pc,
-              itemCount: books.length,
-              // 不用 PageView 自带的一次一页：快速一甩能划过好几本，停下时再对齐到某一本
-              pageSnapping: false,
-              physics: const ShelfFlingSnapPhysics(),
-              onPageChanged: (i) {
-                HapticFeedback.selectionClick(); // 每划过一本轻震一下
-                setState(() {
-                  if (i != _cur) _dir = i > _cur ? 1 : -1;
-                  _cur = i;
-                });
-                if (_lifts.isNotEmpty || _tiltX != 0 || _tiltY != 0) _ensureTicking();
-                widget.onFocusChanged?.call(books[i].aid);
-                _precacheAround(i);
-              },
-              itemBuilder: (context, i) => Semantics(
-                button: true,
-                selected: widget.selected.contains(books[i].aid),
-                label: books[i].shown,
-                hint: hz(context, i == _cur ? '点击打开分卷，长按多选' : '点击切换到这本书'),
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  onEnter: (e) => _onItemEnter(i, e),
-                  onExit: (_) => _onItemExit(i),
-                  child: GestureDetector(
-                    key: ValueKey('shelf-3d-hit-${books[i].aid}'),
-                    behavior: HitTestBehavior.opaque,
-                    onTap: () => _tap(i),
-                    onLongPress: () => widget.onToggleSelect(books[i]),
-                    onSecondaryTap: () => widget.onToggleSelect(books[i]),
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTapUp: (d) => _onTapGlobal(d.globalPosition),
+          onLongPressStart: (d) => _onSelectGlobal(d.globalPosition),
+          onSecondaryTapUp: (d) => _onSelectGlobal(d.globalPosition),
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              ExcludeSemantics(
+                child: IgnorePointer(
+                  child: AnimatedBuilder(
+                    animation: Listenable.merge([pc, _motion]),
+                    builder: (context, _) {
+                      final p = _page;
+                      final shown = [for (var i = math.max(0, p.floor() - 2); i <= math.min(books.length - 1, p.ceil() + 2); i++) i]
+                        ..sort((a, b) => (b - p).abs().compareTo((a - p).abs())); // 远的先画，近的压在上面
+                      return Stack(alignment: Alignment.center, clipBehavior: Clip.none, children: [for (final i in shown) _book(i, i - p, w, h, persp)]);
+                    },
                   ),
                 ),
               ),
-            ),
-          ],
+              PageView.builder(
+                controller: pc,
+                itemCount: books.length,
+                // 不用 PageView 自带的一次一页：快速一甩能划过好几本，停下时再对齐到某一本
+                pageSnapping: false,
+                physics: const ShelfFlingSnapPhysics(),
+                onPageChanged: (i) {
+                  HapticFeedback.selectionClick(); // 每划过一本轻震一下
+                  setState(() {
+                    if (i != _cur) _dir = i > _cur ? 1 : -1;
+                    _cur = i;
+                  });
+                  if (_lifts.isNotEmpty || _tiltX != 0 || _tiltY != 0) _ensureTicking();
+                  widget.onFocusChanged?.call(books[i].aid);
+                  _precacheAround(i);
+                },
+                itemBuilder: (context, i) => Semantics(
+                  button: true,
+                  selected: widget.selected.contains(books[i].aid),
+                  label: books[i].shown,
+                  hint: hz(context, i == _cur ? '点击打开分卷，长按多选' : '点击切换到这本书'),
+                  onTap: () => _tap(i),
+                  onLongPress: () => widget.onToggleSelect(books[i]),
+                  child: SizedBox.expand(key: ValueKey('shelf-3d-hit-${books[i].aid}')),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -763,8 +811,10 @@ class ShelfCoverCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final radius = BorderRadius.circular(borderRadius);
-    final baseShadow = Theme.of(context).brightness == Brightness.dark ? 0.5 : 0.26;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final baseShadow = dark ? 0.5 : 0.26;
     final shadowOpacity = (shadow / baseShadow).clamp(0.0, 1.0);
+    final backing = (url.isEmpty ? null : savedCoverColor(url)) ?? (dark ? const Color(0xFF2A2927) : const Color(0xFFEAE4D8));
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -788,7 +838,7 @@ class ShelfCoverCard extends StatelessWidget {
         RepaintBoundary(
           child: ClipRRect(
             borderRadius: radius,
-            child: CoverImage(url, decodeSize: decodeSize),
+            child: CoverImage(url, decodeSize: decodeSize, borderRadius: 0, backgroundColor: backing),
           ),
         ),
         if (shade > 0.005)
@@ -798,13 +848,19 @@ class ShelfCoverCard extends StatelessWidget {
               color: Colors.black.withValues(alpha: shade),
             ),
           ),
-        if (selected)
-          DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: radius,
-              border: Border.all(color: Theme.of(context).colorScheme.primary, width: 3),
+        IgnorePointer(
+          child: AnimatedOpacity(
+            opacity: selected ? 1.0 : 0.0,
+            duration: AppMotion.dur(context, AppMotion.fast),
+            curve: AppMotion.curve,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: radius,
+                border: Border.all(color: Theme.of(context).colorScheme.primary, width: 3),
+              ),
             ),
           ),
+        ),
       ],
     );
   }
@@ -843,8 +899,8 @@ class ShelfPageIndicator extends StatelessWidget {
                   child: Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 9),
                     child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 220),
-                      curve: Curves.easeOutCubic,
+                      duration: AppMotion.dur(context, AppMotion.fast),
+                      curve: AppMotion.snappy,
                       width: i == index ? 16 : 5,
                       height: 4.5,
                       decoration: BoxDecoration(

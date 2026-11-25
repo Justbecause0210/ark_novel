@@ -9,6 +9,7 @@ import '../catalog.dart';
 import '../data.dart';
 import '../env.dart';
 import '../library.dart';
+import '../motion.dart';
 import '../routes.dart';
 import '../session.dart';
 import '../widgets.dart';
@@ -80,99 +81,103 @@ class _RecommendTab extends ConsumerStatefulWidget {
   ConsumerState<_RecommendTab> createState() => _RecommendTabState();
 }
 
-class _RecommendTabState extends ConsumerState<_RecommendTab> with AutomaticKeepAliveClientMixin {
-  @override
-  bool get wantKeepAlive => true;
-
+class _RecommendTabState extends ConsumerState<_RecommendTab> {
   @override
   Widget build(BuildContext context) {
-    super.build(context);
     final theme = Theme.of(context);
     return RefreshIndicator(
       onRefresh: () => ref.refresh(_recommendProvider.future),
-      child: ref
-          .watch(_recommendProvider)
-          .when(
-            loading: () => const _RecommendSkeleton(),
-            error: (e, _) => StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(_recommendProvider)),
-            data: (blocks) => blocks.isEmpty
-                ? StatePanel(title: '暂无推荐内容', detail: '请稍后重试或检查网络连接', onRetry: () => ref.invalidate(_recommendProvider))
-                : LayoutBuilder(
-              builder: (context, c) {
-                final cols = gridColumns(c.maxWidth) >= 6 ? 6 : 3;
-                final itemW = ((c.maxWidth - 32 - 14 * (cols - 1)) / cols).clamp(1.0, double.infinity);
-                final coverSize = Size(itemW, itemW * 4 / 3);
-                final delegate = SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52);
-                return CustomScrollView(
-                  scrollCacheExtent: const ScrollCacheExtent.viewport(0.8),
-                  slivers: [
-                    for (final block in blocks) ...[
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                        sliver: SliverToBoxAdapter(child: Text(block.title, style: theme.textTheme.titleLarge)),
-                      ),
-                      // 一个分区通常 6 本：手机上 3 列排两排，宽屏放得下就 6 列一排
-                      SliverPadding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        sliver: SliverGrid.builder(
-                          gridDelegate: delegate,
-                          itemCount: block.list.length,
-                          itemBuilder: (_, i) => NovelCard(title: block.list[i].title, aid: block.list[i].aid, imageUrl: block.list[i].imageUrl, decodeSize: coverSize),
-                        ),
-                      ),
-                    ],
-                    const SliverPadding(padding: EdgeInsets.only(bottom: 24)),
-                  ],
-                );
-              },
+      child: AppCrossfade(
+        fill: true,
+        duration: AppMotion.fast,
+        child: ref
+            .watch(_recommendProvider)
+            .when(
+              loading: () => const _RecommendSkeleton(key: ValueKey('rec-loading')),
+              error: (e, _) => StatePanel(key: const ValueKey('rec-error'), title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(_recommendProvider)),
+              data: (blocks) => blocks.isEmpty
+                  ? StatePanel(key: const ValueKey('rec-empty'), title: '暂无推荐内容', detail: '请稍后重试或检查网络连接', onRetry: () => ref.invalidate(_recommendProvider))
+                  : LayoutBuilder(
+                      key: const ValueKey('rec-data'),
+                      builder: (context, c) {
+                        final cols = gridColumns(c.maxWidth) >= 6 ? 6 : 3;
+                        final itemW = ((c.maxWidth - 32 - 14 * (cols - 1)) / cols).clamp(1.0, double.infinity);
+                        final coverSize = Size(itemW, itemW * 4 / 3);
+                        final delegate = SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52);
+                        return CustomScrollView(
+                          key: const PageStorageKey('discover:recommend'),
+                          scrollCacheExtent: const ScrollCacheExtent.viewport(0.4),
+                          slivers: [
+                            for (final block in blocks) ...[
+                              SliverPadding(
+                                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                                sliver: SliverToBoxAdapter(child: Text(block.title, style: theme.textTheme.titleLarge)),
+                              ),
+                              // 一个分区通常 6 本：手机上 3 列排两排，宽屏放得下就 6 列一排
+                              SliverPadding(
+                                padding: const EdgeInsets.symmetric(horizontal: 16),
+                                sliver: SliverGrid.builder(
+                                  gridDelegate: delegate,
+                                  itemCount: block.list.length,
+                                  itemBuilder: (_, i) => NovelCard(title: block.list[i].title, aid: block.list[i].aid, imageUrl: block.list[i].imageUrl, decodeSize: coverSize),
+                                ),
+                              ),
+                            ],
+                            const SliverPadding(padding: EdgeInsets.only(bottom: 24)),
+                          ],
+                        );
+                      },
+                    ),
             ),
-          ),
+      ),
     );
   }
 }
 
 /// 推荐页首次加载骨架：两个分区标题条 + 封面网格占位。
 class _RecommendSkeleton extends StatelessWidget {
-  const _RecommendSkeleton();
+  const _RecommendSkeleton({super.key});
 
   @override
   Widget build(BuildContext context) {
     final color = Theme.of(context).colorScheme.surfaceContainer;
     Widget bar(double w, [double h = 12]) => Container(height: h, width: w, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(6)));
-    return LayoutBuilder(
-      builder: (context, c) {
-        final cols = gridColumns(c.maxWidth) >= 6 ? 6 : 3;
-        final delegate = SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52);
-        return CustomScrollView(
-          physics: const NeverScrollableScrollPhysics(),
-          slivers: [
-            for (var s = 0; s < 2; s++) ...[
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
-                sliver: SliverToBoxAdapter(child: Align(alignment: Alignment.centerLeft, child: bar(110, 20))),
-              ),
-              SliverPadding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                sliver: SliverGrid.builder(
-                  gridDelegate: delegate,
-                  itemCount: 6,
-                  itemBuilder: (_, _) => Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(child: DecoratedBox(decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: const SizedBox.expand())),
-                      const SizedBox(height: 8),
-                      bar(double.infinity),
-                      const SizedBox(height: 6),
-                      bar(48),
-                    ],
+    return AppSkeletonPulse(
+      child: LayoutBuilder(
+        builder: (context, c) {
+          final cols = gridColumns(c.maxWidth) >= 6 ? 6 : 3;
+          final delegate = SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: cols, mainAxisSpacing: 16, crossAxisSpacing: 14, childAspectRatio: 0.52);
+          return CustomScrollView(
+            physics: const NeverScrollableScrollPhysics(),
+            slivers: [
+              for (var s = 0; s < 2; s++) ...[
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
+                  sliver: SliverToBoxAdapter(child: Align(alignment: Alignment.centerLeft, child: bar(110, 20))),
+                ),
+                SliverPadding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  sliver: SliverGrid.builder(
+                    gridDelegate: delegate,
+                    itemCount: 6,
+                    itemBuilder: (_, _) => Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(child: DecoratedBox(decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: const SizedBox.expand())),
+                        const SizedBox(height: 8),
+                        bar(double.infinity),
+                        const SizedBox(height: 6),
+                        bar(48),
+                      ],
+                    ),
                   ),
                 ),
-              ),
+              ],
+              const SliverPadding(padding: EdgeInsets.only(bottom: 24)),
             ],
-            const SliverPadding(padding: EdgeInsets.only(bottom: 24)),
-          ],
-        );
-      },
+          );
+        },
+      ),
     );
   }
 }
@@ -189,16 +194,23 @@ class _Pill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(999),
-      child: Container(
-        padding: EdgeInsets.symmetric(horizontal: small ? 8 : 12, vertical: small ? 3 : 6),
-        decoration: BoxDecoration(color: selected ? scheme.primary.withValues(alpha: 0.12) : null, borderRadius: BorderRadius.circular(999)),
-        child: Text(
-          text,
-          maxLines: 1,
-          style: TextStyle(fontSize: small ? 12 : 14, height: 1.3, color: selected ? scheme.primary : scheme.onSurfaceVariant, fontWeight: selected ? FontWeight.w600 : FontWeight.w400),
+    final dur = AppMotion.dur(context, AppMotion.fast);
+    return AppPressScale(
+      scale: 0.95,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(999),
+        child: AnimatedContainer(
+          duration: dur,
+          curve: AppMotion.curve,
+          padding: EdgeInsets.symmetric(horizontal: small ? 8 : 12, vertical: small ? 3 : 6),
+          decoration: BoxDecoration(color: selected ? scheme.primary.withValues(alpha: 0.12) : Colors.transparent, borderRadius: BorderRadius.circular(999)),
+          child: AnimatedDefaultTextStyle(
+            duration: dur,
+            curve: AppMotion.curve,
+            style: TextStyle(fontSize: small ? 12 : 14, height: 1.3, color: selected ? scheme.primary : scheme.onSurfaceVariant, fontWeight: selected ? FontWeight.w600 : FontWeight.w400),
+            child: Text(text, maxLines: 1),
+          ),
         ),
       ),
     );
@@ -243,10 +255,15 @@ class _ChipsState<T> extends State<_Chips<T>> {
 
   /// 只滚这一排（Scrollable.ensureVisible 会连外面左右翻页的 TabBarView 一起拨动）
   void _reveal() => WidgetsBinding.instance.addPostFrameCallback((_) {
+    if (!mounted) return;
     final box = _selected.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !_scroll.hasClients) return;
     final to = RenderAbstractViewport.of(box).getOffsetToReveal(box, 0.5).offset.clamp(0.0, _scroll.position.maxScrollExtent);
-    _scroll.animateTo(to, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+    if (AppMotion.reduce(context)) {
+      _scroll.jumpTo(to);
+    } else {
+      _scroll.animateTo(to, duration: AppMotion.fast, curve: AppMotion.curve);
+    }
   });
 
   @override
@@ -317,7 +334,7 @@ class _RankingTab extends ConsumerStatefulWidget {
   ConsumerState<_RankingTab> createState() => _RankingTabState();
 }
 
-class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliveClientMixin {
+class _RankingTabState extends ConsumerState<_RankingTab> {
   // 从上次的参数（比如 weekvisit）拆出榜单和时间
   late final _saved = parseRank(AppPrefs.read(P.discoverRank, ''));
   late var _kind = _saved.$1;
@@ -332,11 +349,7 @@ class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliv
   }
 
   @override
-  bool get wantKeepAlive => true;
-
-  @override
   Widget build(BuildContext context) {
-    super.build(context);
     if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
       return const LoginPrompt(title: '排行榜需要登录', detail: '登录轻小说文库账号后可查看点击榜、推荐榜、收藏榜等榜单；「推荐」分区可直接浏览。');
     }
@@ -348,8 +361,11 @@ class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliv
       children: [
         _Chips(options: [for (final k in rankKinds) k.$2], value: _kind, label: (k) => rankKinds.firstWhere((e) => e.$2 == k).$1, trailing: _hideShelfChip(context, ref), onChanged: (k) => _set(kind: k)),
         // 日 / 周 / 月 / 总：一个小分段，只有点击、推荐有
-        if (rankPeriodic.contains(_kind))
-          Align(
+        AppCollapse(
+          visible: rankPeriodic.contains(_kind),
+          duration: AppMotion.fast,
+          reverseDuration: AppMotion.instant,
+          child: Align(
             alignment: Alignment.centerLeft,
             child: Container(
               margin: const EdgeInsets.fromLTRB(12, 0, 12, 4),
@@ -361,6 +377,7 @@ class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliv
               ),
             ),
           ),
+        ),
         Expanded(
           child: PagedNovelGrid(key: ValueKey((node, param)), hide: _hideShelved(ref), fetch: (page) => api.ranking(param, page)),
         ),
@@ -376,7 +393,7 @@ class _CategoryTab extends ConsumerStatefulWidget {
   ConsumerState<_CategoryTab> createState() => _CategoryTabState();
 }
 
-class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAliveClientMixin {
+class _CategoryTabState extends ConsumerState<_CategoryTab> {
   var _tag = categoryTags.contains(AppPrefs.read(P.discoverTag, '')) ? AppPrefs.read(P.discoverTag, '') : categoryTags.first;
   var _sort = categorySorts.firstWhere((e) => e.$2 == AppPrefs.read(P.discoverTagSort, ''), orElse: () => categorySorts.first);
   var _open = false; // 全部标签的下拉面板
@@ -429,11 +446,7 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
   }
 
   @override
-  bool get wantKeepAlive => true;
-
-  @override
   Widget build(BuildContext context) {
-    super.build(context);
     if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
       return const LoginPrompt(title: '题材筛选需要登录', detail: '登录轻小说文库账号后可按奇幻、校园、恋爱等题材标签筛选小说。');
     }
@@ -448,7 +461,16 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
               value: _tag,
               label: (e) => e,
               onChanged: _pick,
-              trailing: _sideIcon(tooltip: hz(context, '全部标签'), icon: const Icon(Icons.expand_more), onPressed: () => setState(() => _open = true)),
+              trailing: _sideIcon(
+                tooltip: hz(context, '全部标签'),
+                icon: AnimatedRotation(
+                  turns: _open ? 0.5 : 0.0,
+                  duration: AppMotion.dur(context, AppMotion.fast),
+                  curve: AppMotion.snappy,
+                  child: const Icon(Icons.expand_more),
+                ),
+                onPressed: () => setState(() => _open = !_open),
+              ),
             ),
             _Chips(
               options: categorySorts,
@@ -466,12 +488,25 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAl
           ],
         ),
         // 点面板外面收起
-        if (_open) Positioned.fill(child: GestureDetector(onTap: () => setState(() => _open = false), child: const ColoredBox(color: Colors.black12))),
+        Positioned.fill(
+          child: IgnorePointer(
+            ignoring: !_open,
+            child: GestureDetector(
+              onTap: () => setState(() => _open = false),
+              child: AnimatedOpacity(
+                opacity: _open ? 1.0 : 0.0,
+                duration: AppMotion.dur(context, AppMotion.standard),
+                curve: AppMotion.curve,
+                child: const ColoredBox(color: Colors.black12),
+              ),
+            ),
+          ),
+        ),
         Positioned(
           left: 0,
           right: 0,
           top: 0,
-          child: AnimatedSize(duration: const Duration(milliseconds: 180), curve: Curves.easeOut, alignment: Alignment.topCenter, child: _open ? _panel() : const SizedBox(width: double.infinity)),
+          child: AppCollapse(visible: _open, duration: AppMotion.standard, reverseDuration: AppMotion.fast, child: _panel()),
         ),
       ],
     );
@@ -485,14 +520,10 @@ class _CompletedTab extends ConsumerStatefulWidget {
   ConsumerState<_CompletedTab> createState() => _CompletedTabState();
 }
 
-/// 和其他标签一样留着：左右切回来不用重新加载
-class _CompletedTabState extends ConsumerState<_CompletedTab> with AutomaticKeepAliveClientMixin {
-  @override
-  bool get wantKeepAlive => true;
-
+/// 通过 PageStorageKey 保留滚动位置，离开标签时释放已解码的封面 GPU 纹理
+class _CompletedTabState extends ConsumerState<_CompletedTab> {
   @override
   Widget build(BuildContext context) {
-    super.build(context);
     if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
       return const LoginPrompt(title: '完结列表需要登录', detail: '登录轻小说文库账号后可浏览全部已完结小说。');
     }
@@ -505,9 +536,14 @@ class _CompletedTabState extends ConsumerState<_CompletedTab> with AutomaticKeep
             children: [
               const SizedBox(width: 16),
               Expanded(
-                child: Text(
-                  hideOn ? '已隐藏书架里的书' : '全部已完结小说',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                child: AppCrossfade(
+                  alignment: Alignment.centerLeft,
+                  duration: AppMotion.fast,
+                  child: Text(
+                    hideOn ? '已隐藏书架里的书' : '全部已完结小说',
+                    key: ValueKey(hideOn),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                  ),
                 ),
               ),
               _hideShelfChip(context, ref),

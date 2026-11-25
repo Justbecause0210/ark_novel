@@ -140,8 +140,8 @@ class PagedBody extends StatefulWidget {
 }
 
 class _PagedBodyState extends State<PagedBody> {
-  // 分页结果留几章：翻过去时刚排过的相邻章不用再排一遍
-  static final _pageCache = <(Size, TextStyle, double, String, String), List<int>>{};
+  // 分页结果留几章：翻过去时刚排过的相邻章不用再排一遍（键用文本长度与哈希，避免静态缓存强引用整章字符串）
+  static final _pageCache = <(Size, TextStyle, double, int, int, String), List<int>>{};
 
   final _curl = PageCurlController();
   final _keys = <int, GlobalKey>{};
@@ -173,8 +173,10 @@ class _PagedBodyState extends State<PagedBody> {
     if (p == _page) return;
     if (widget.curl) {
       _curl.goTo(p);
+    } else if (AppMotion.reduce(context)) {
+      _controller?.jumpToPage(p + _base);
     } else {
-      _controller?.animateToPage(p + _base, duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
+      _controller?.animateToPage(p + _base, duration: AppMotion.fast, curve: AppMotion.decelerate);
     }
   }
 
@@ -317,13 +319,16 @@ class _PagedBodyState extends State<PagedBody> {
     });
   }
 
+  static TextStyle _layoutStyleOf(TextStyle s) => s.copyWith(color: const Color(0xFF000000));
+
   List<int> _paged(Chapter c, String title, Size size, double head) {
-    final key = (size, widget.style, widget.paragraphSpacing, c.text, title);
+    final layoutStyle = _layoutStyleOf(widget.style);
+    final key = (size, layoutStyle, widget.paragraphSpacing, c.text.length, c.text.hashCode, title);
     // 用过的挪到最后（LRU）：满了删最久没用的，正在读的这章不会被相邻章节挤掉
     final hit = _pageCache.remove(key);
     if (hit != null) return _pageCache[key] = hit;
-    if (_pageCache.length >= 6) _pageCache.remove(_pageCache.keys.first);
-    return _pageCache[key] = paginate(c.text, widget.style, size, strut: readerStrut(widget.style), firstTop: head, paragraphSpacing: widget.paragraphSpacing);
+    if (_pageCache.length >= 4) _pageCache.remove(_pageCache.keys.first);
+    return _pageCache[key] = paginate(c.text, layoutStyle, size, strut: readerStrut(layoutStyle), firstTop: head, paragraphSpacing: widget.paragraphSpacing);
   }
 
   /// 字符偏移所在的那一屏。
@@ -382,7 +387,7 @@ class _PagedBodyState extends State<PagedBody> {
     }
   }
 
-  /// 插图章：整章的图按顺序在后台下好；前后一屏的图与临近章末时下一章首图提前解码，翻过去直接出图。
+  /// 插图章：整章的图按顺序在后台低优预取；当前屏与下一屏的图及临近章末时下一章首图提前解码，翻过去直接出图。
   void _prefetch() {
     if (_imgBox.isEmpty) return;
     _precacheCovers();
@@ -395,12 +400,16 @@ class _PagedBodyState extends State<PagedBody> {
     if (_c.images.isEmpty) return;
     if (!identical(_fetched, _c)) {
       _fetched = _c;
-      for (final url in _c.images) {
-        NetImage.precache(context, url, _imgBox, decode: false);
+      if (!isWebPreview) {
+        try {
+          ProviderScope.containerOf(context, listen: false).read(imageStoreProvider).prefetch(_c.images);
+        } on Object {
+          // 兼容未实现 prefetch 的轻量测试桩
+        }
       }
     }
     final skip = _lead + _me.covers;
-    for (var i = (_page - 1) * _cols - skip; i < (_page + 2) * _cols - skip; i++) {
+    for (var i = _page * _cols - skip; i < (_page + 2) * _cols - skip; i++) {
       if (i >= _textPages && i < _total) NetImage.precache(context, _c.images[i - _textPages], _imgBox, fit: BoxFit.contain);
     }
   }
@@ -440,7 +449,8 @@ class _PagedBodyState extends State<PagedBody> {
     return i >= f.covers && i - f.covers < f.textPages;
   }
 
-  Widget _readerImage(String url, {List<String>? gallery, int index = 0}) => _readerImageWidget(url, widget.style.color, gallery: gallery, index: index);
+  Widget _readerImage(String url, {List<String>? gallery, int index = 0}) =>
+      _readerImageWidget(url, widget.style.color, gallery: gallery, index: index, decodeSize: _imgBox.isEmpty ? null : _imgBox);
 
   /// 排在第 [slot] 个位置的页：前面、后面排不下的是相邻章节的页，还没加载好就空着。
   Widget _slot(BuildContext context, int slot, bool live, EdgeInsets pad, {_Chrome chrome = _Chrome.full}) {
@@ -613,8 +623,8 @@ class _PagedBodyState extends State<PagedBody> {
     final target = _page + delta;
     if (target < 0 && (!_canTurnPrev || !widget.animate)) return _reachStart();
     if (target >= _units && (!_canTurnNext || !widget.animate)) return _reachEnd();
-    if (widget.animate) {
-      _controller?.animateToPage(target + _base, duration: const Duration(milliseconds: 180), curve: Curves.easeOut);
+    if (widget.animate && !AppMotion.reduce(context)) {
+      _controller?.animateToPage(target + _base, duration: AppMotion.fast, curve: AppMotion.decelerate);
     } else {
       _controller?.jumpToPage(target + _base);
     }
@@ -630,8 +640,9 @@ class _PagedBodyState extends State<PagedBody> {
         final size = Size(box.maxWidth / cols - pad.horizontal, box.maxHeight - pad.vertical);
         _layoutSize = size;
         PagedBody.lastLayout = (size, cols);
-        // 同样的版面（大小、样式、段间距、正文）不重复分页；开关菜单栏、拖滑块这类重建不会触发全文排版
-        final sig = Object.hash(size, cols, widget.style, widget.paragraphSpacing, _c.text.length, _c.text.hashCode, widget.title, widget.volumeCover != null);
+        // 同样的版面（大小、排版样式、段间距、正文）不重复分页；开关菜单栏、拖滑块、换主题/暖色这类不改字形宽高的重建不会触发全文排版
+        final layoutStyle = _layoutStyleOf(widget.style);
+        final sig = Object.hash(size, cols, layoutStyle, widget.paragraphSpacing, _c.text.length, _c.text.hashCode, widget.title, widget.volumeCover != null);
         if (sig != _sig) {
           final keep = _anchor;
           _sig = sig;

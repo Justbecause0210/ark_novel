@@ -5,6 +5,7 @@ import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:go_router/go_router.dart';
 
 import '../cover_color.dart';
+import '../motion.dart';
 import '../routes.dart';
 import '../theme_doodle.dart';
 import '../volumes.dart';
@@ -17,14 +18,18 @@ enum VolumeDoneAction { next, shelf, stay }
 /// 再选「下一卷」或「回书架」。关掉（点空白、返回键）算 [VolumeDoneAction.stay]。
 Future<VolumeDoneAction> showVolumeDone(BuildContext context, {required String aid, required Vol vol, required int index, required String cover, required bool hasNext}) async {
   unawaited(HapticFeedback.heavyImpact());
+  final reduce = AppMotion.reduce(context);
   final r = await showGeneralDialog<VolumeDoneAction>(
     context: context,
     barrierDismissible: true,
     barrierLabel: '关闭',
     barrierColor: Colors.black.withValues(alpha: 0.82),
-    transitionDuration: const Duration(milliseconds: 520),
+    transitionDuration: reduce ? Duration.zero : AppMotion.expressive,
     pageBuilder: (context, _, _) => _VolumeDoneCard(aid: aid, vol: vol, index: index, cover: cover, hasNext: hasNext),
-    transitionBuilder: (context, a, _, child) => FadeTransition(opacity: CurvedAnimation(parent: a, curve: const Interval(0, 0.6)), child: child),
+    transitionBuilder: (context, a, _, child) => FadeTransition(
+      opacity: reduce ? a : CurvedAnimation(parent: a, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit),
+      child: child,
+    ),
   );
   return r ?? VolumeDoneAction.stay;
 }
@@ -43,8 +48,21 @@ class _VolumeDoneCard extends StatefulWidget {
 }
 
 class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProviderStateMixin {
-  late final _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 1400))..forward();
+  late final _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 960));
   late int _rating = Volumes.rating(widget.aid, widget.vol.title);
+  bool _started = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
+    if (AppMotion.reduce(context)) {
+      _c.value = 1.0;
+    } else {
+      _c.forward();
+    }
+  }
 
   @override
   void dispose() {
@@ -52,14 +70,15 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
     super.dispose();
   }
 
-  Animation<double> _at(double from, double to, [Curve curve = Curves.easeOutCubic]) => CurvedAnimation(parent: _c, curve: Interval(from, to, curve: curve));
+  Animation<double> _at(double from, double to, [Curve curve = AppMotion.decelerate]) => CurvedAnimation(parent: _c, curve: Interval(from, to, curve: curve));
 
   /// 依次浮上来：每一块晚一点出现
   Widget _rise(double from, Widget child) {
+    if (AppMotion.reduce(context)) return child;
     final a = _at(from, (from + 0.35).clamp(0, 1));
     return FadeTransition(
       opacity: a,
-      child: SlideTransition(position: Tween(begin: const Offset(0, 0.25), end: Offset.zero).animate(a), child: child),
+      child: SlideTransition(position: Tween(begin: const Offset(0, 0.2), end: Offset.zero).animate(a), child: child),
     );
   }
 
@@ -74,16 +93,16 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
     Widget stat(String value, String label) => Expanded(
       child: Column(
         children: [
-          Text(value, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w600)),
+          Text(value, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w600, fontFeatures: [FontFeature.tabularFigures()])),
           const SizedBox(height: 2),
           Text(label, style: muted),
         ],
       ),
     );
 
-    final coverIn = _at(0, 0.55, Curves.easeOutBack);
+    final coverIn = _at(0, 0.52, AppMotion.decelerate);
     final art = CharacterArt.of(context);
-    final cheerIn = _at(0.35, 0.8, Curves.easeOutBack);
+    final cheerIn = _at(0.3, 0.76, AppMotion.snappy);
     return SafeArea(
       child: Center(
         child: Material(
@@ -154,22 +173,20 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
                     0.55,
                     Column(
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            for (var i = 1; i <= 5; i++)
-                              IconButton(
-                                visualDensity: VisualDensity.compact,
-                                onPressed: () async {
-                                  unawaited(HapticFeedback.selectionClick());
-                                  setState(() => _rating = _rating == i ? 0 : i);
-                                  await Volumes.setRating(aid, v.title, _rating);
-                                },
-                                icon: Icon(i <= _rating ? Icons.star_rounded : Icons.star_outline_rounded, color: const Color(0xFFFFC53D), size: 32),
-                              ),
-                          ],
+                        AnimatedStarRating(
+                          rating: _rating,
+                          starSize: 32,
+                          itemSize: 44,
+                          onChanged: (nextRating) async {
+                            setState(() => _rating = nextRating);
+                            await Volumes.setRating(aid, v.title, _rating);
+                          },
                         ),
-                        Text(_rating == 0 ? '给这一卷打个分' : '已记下 $_rating 星', style: muted),
+                        const SizedBox(height: 2),
+                        AppCrossfade(
+                          duration: AppMotion.fast,
+                          child: Text(_rating == 0 ? '给这一卷打个分' : '已记下 $_rating 星', key: ValueKey(_rating), style: muted),
+                        ),
                       ],
                     ),
                   ),
@@ -196,19 +213,25 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
                     Row(
                       children: [
                         Expanded(
-                          child: OutlinedButton(
-                            style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white38)),
-                            onPressed: () => Navigator.pop(context, VolumeDoneAction.shelf),
-                            child: const Text('回书架'),
+                          child: AppPressScale(
+                            scale: 0.97,
+                            child: OutlinedButton(
+                              style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white38)),
+                              onPressed: () => Navigator.pop(context, VolumeDoneAction.shelf),
+                              child: const Text('回书架'),
+                            ),
                           ),
                         ),
                         if (widget.hasNext) ...[
                           const SizedBox(width: 12),
                           Expanded(
-                            child: FilledButton(
-                              style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
-                              onPressed: () => Navigator.pop(context, VolumeDoneAction.next),
-                              child: const Text('下一卷'),
+                            child: AppPressScale(
+                              scale: 0.97,
+                              child: FilledButton(
+                                style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: Colors.black),
+                                onPressed: () => Navigator.pop(context, VolumeDoneAction.next),
+                                child: const Text('下一卷'),
+                              ),
                             ),
                           ),
                         ],

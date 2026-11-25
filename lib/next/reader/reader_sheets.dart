@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart' hide Text;
-import 'package:flutter/services.dart' show Clipboard, ClipboardData, MethodChannel;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData, HapticFeedback, MethodChannel;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
 
@@ -11,6 +11,7 @@ import '../cache.dart';
 import '../env.dart';
 import '../fonts.dart';
 import '../highlights.dart';
+import '../motion.dart';
 import '../read_state.dart';
 import '../rules.dart';
 import '../settings.dart';
@@ -145,7 +146,9 @@ class ReaderTtsBar extends StatelessWidget {
               IconButton(
                 tooltip: hz(context, paused ? '继续朗读' : '暂停朗读'),
                 visualDensity: VisualDensity.compact,
-                icon: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 24, color: accent),
+                icon: AppIconSwap(
+                  child: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, key: ValueKey(paused), size: 24, color: accent),
+                ),
                 onPressed: tts.togglePause,
               ),
               IconButton(
@@ -163,7 +166,7 @@ class ReaderTtsBar extends StatelessWidget {
                 ),
                 onPressed: onOpenSettings,
                 icon: Icon(Icons.timer_outlined, size: 18, color: sleep.enabled ? accent : fg.withValues(alpha: 0.8)),
-                label: Text(sleep.enabled ? sleep.shortLabel : '定时', style: const TextStyle(fontSize: 12)),
+                label: Text(sleep.enabled ? sleep.shortLabel : '定时', style: const TextStyle(fontSize: 12, fontFeatures: [FontFeature.tabularFigures()])),
               ),
               IconButton(
                 tooltip: hz(context, '朗读设置'),
@@ -398,7 +401,8 @@ class _ReaderCatalogueSheetState extends State<_ReaderCatalogueSheet> with Singl
                 subtitle: Text('$readCount/${v.chapters.length} 章已读', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
                 trailing: AnimatedRotation(
                   turns: open ? 0.5 : 0,
-                  duration: const Duration(milliseconds: 180),
+                  duration: AppMotion.dur(context, AppMotion.fast),
+                  curve: AppMotion.snappy,
                   child: Icon(Icons.expand_more, color: scheme.onSurfaceVariant),
                 ),
                 onTap: () => setState(() {
@@ -645,7 +649,7 @@ class _ReaderCatalogueSheetState extends State<_ReaderCatalogueSheet> with Singl
           controller: _tabs,
           tabs: const [Tab(child: Text('目录')), Tab(child: Text('书签')), Tab(child: Text('摘录')), Tab(child: Text('备注'))],
         ),
-        Expanded(child: body),
+        Expanded(child: AppCrossfade(fill: true, duration: AppMotion.fast, child: body)),
       ],
     );
   }
@@ -698,8 +702,8 @@ Future<void> showReaderTtsSheet(
                               Expanded(
                                 child: FilledButton.icon(
                                   onPressed: tts.togglePause,
-                                  icon: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 18),
-                                  label: Text(paused ? '继续' : '暂停'),
+                                  icon: AppIconSwap(child: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, key: ValueKey(paused), size: 18)),
+                                  label: AppCrossfade(child: Text(paused ? '继续' : '暂停', key: ValueKey(paused))),
                                 ),
                               ),
                               const SizedBox(width: 8),
@@ -745,7 +749,11 @@ Future<void> showReaderTtsSheet(
                           options: const {0: '关闭', 15: '15 分钟', 30: '30 分钟', 60: '60 分钟', -1: '本章结束'},
                           onChanged: tts.setSleepOption,
                         ),
-                        if (sleep.at != null) XNote('将于 ${sleep.stopTimeText} 停止朗读'),
+                        AppCollapse(
+                          visible: sleep.at != null,
+                          duration: AppMotion.fast,
+                          child: sleep.at == null ? const SizedBox.shrink() : XNote('将于 ${sleep.stopTimeText} 停止朗读'),
+                        ),
                       ],
                     ),
                   ),
@@ -785,205 +793,247 @@ Future<void> showReaderSettingsSheet(
           final scheme = themed.colorScheme;
           return Theme(
             data: themed,
-            child: Material(
-              color: pal.bg,
-              shape: Border(top: BorderSide(color: scheme.outline)),
-              child: SafeArea(
-                // 略高于半屏：三个分页都不用滑，上面留一些正文
-                child: SizedBox(
-                  height: MediaQuery.sizeOf(context).height * 0.56,
-                  child: Column(
-                    children: [
-                      XSegments<int>(
-                        value: currentTab,
-                        options: const {0: '显示', 1: '排版', 2: '翻页'},
-                        onChanged: (v) {
-                          setSheet(() => currentTab = v);
-                          onTabChanged(v);
-                        },
-                      ),
-                      Expanded(
-                        child: _ScrollFade(
-                          child: SingleChildScrollView(
-                            key: ValueKey(currentTab), // 换分页时回到顶上
-                            padding: const EdgeInsets.only(bottom: 16),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                if (currentTab == 0) ...[
-                                  // 一排背景色样：色块里写个"文"字，选中的外面一圈
-                                  Padding(
-                                    padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
-                                    child: Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        for (final (i, name) in ['纸张', '护眼', '夜间', '跟随应用', '纯黑', '晴空'].indexed)
-                                          GestureDetector(
-                                            onTap: () => set(prefs.copyWith(theme: i)),
-                                            child: Column(
-                                              children: [
-                                                Container(
-                                                  width: 42,
-                                                  height: 42,
-                                                  padding: const EdgeInsets.all(2.5),
-                                                  decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: prefs.theme == i ? scheme.primary : Colors.transparent, width: 2)),
-                                                  child: Builder(
-                                                    builder: (_) {
-                                                      final p = readerPaletteOf(prefs.copyWith(theme: i), app.colorScheme);
-                                                      return DecoratedBox(
-                                                        decoration: BoxDecoration(shape: BoxShape.circle, color: p.bg, border: Border.all(color: scheme.outline)),
-                                                        child: Center(child: Text('文', style: TextStyle(fontSize: 14, color: i == 5 ? readerSkyAccent.$1 : p.fg))),
-                                                      );
-                                                    },
-                                                  ),
+            child: AnimatedContainer(
+              duration: AppMotion.dur(context, AppMotion.standard),
+              curve: AppMotion.curve,
+              decoration: BoxDecoration(
+                color: pal.bg,
+                border: Border(top: BorderSide(color: scheme.outline)),
+              ),
+              child: Material(
+                type: MaterialType.transparency,
+                child: SafeArea(
+                  // 略高于半屏：三个分页都不用滑，上面留一些正文
+                  child: SizedBox(
+                    height: MediaQuery.sizeOf(context).height * 0.56,
+                    child: Column(
+                      children: [
+                        XSegments<int>(
+                          value: currentTab,
+                          options: const {0: '显示', 1: '排版', 2: '翻页'},
+                          onChanged: (v) {
+                            setSheet(() => currentTab = v);
+                            onTabChanged(v);
+                          },
+                        ),
+                        Expanded(
+                          child: _ScrollFade(
+                            child: AppCrossfade(
+                              fill: true,
+                              duration: AppMotion.fast,
+                              child: SingleChildScrollView(
+                                key: ValueKey(currentTab), // 换分页时回到顶上
+                                padding: const EdgeInsets.only(bottom: 16),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (currentTab == 0) ...[
+                                      // 一排背景色样：色块里写个"文"字，选中的外面一圈
+                                      Padding(
+                                        padding: const EdgeInsets.fromLTRB(20, 6, 20, 12),
+                                        child: Row(
+                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                          children: [
+                                            for (final (i, name) in ['纸张', '护眼', '夜间', '跟随应用', '纯黑', '晴空'].indexed)
+                                              GestureDetector(
+                                                onTap: () {
+                                                  HapticFeedback.selectionClick();
+                                                  set(prefs.copyWith(theme: i));
+                                                },
+                                                child: Column(
+                                                  children: [
+                                                    AnimatedScale(
+                                                      scale: prefs.theme == i ? 1.08 : 1.0,
+                                                      duration: AppMotion.dur(context, AppMotion.fast),
+                                                      curve: AppMotion.snappy,
+                                                      child: AnimatedContainer(
+                                                        duration: AppMotion.dur(context, AppMotion.fast),
+                                                        curve: AppMotion.curve,
+                                                        width: 42,
+                                                        height: 42,
+                                                        padding: const EdgeInsets.all(2.5),
+                                                        decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: prefs.theme == i ? scheme.primary : Colors.transparent, width: 2)),
+                                                        child: Builder(
+                                                          builder: (_) {
+                                                            final p = readerPaletteOf(prefs.copyWith(theme: i), app.colorScheme);
+                                                            return DecoratedBox(
+                                                              decoration: BoxDecoration(shape: BoxShape.circle, color: p.bg, border: Border.all(color: scheme.outline)),
+                                                              child: Center(child: Text('文', style: TextStyle(fontSize: 14, color: i == 5 ? readerSkyAccent.$1 : p.fg))),
+                                                            );
+                                                          },
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    const SizedBox(height: 4),
+                                                    AnimatedDefaultTextStyle(
+                                                      duration: AppMotion.dur(context, AppMotion.fast),
+                                                      curve: AppMotion.curve,
+                                                      style: TextStyle(fontSize: 12, color: prefs.theme == i ? scheme.primary : scheme.onSurfaceVariant, fontWeight: prefs.theme == i ? FontWeight.w600 : FontWeight.w400),
+                                                      child: Text(name, maxLines: 1),
+                                                    ),
+                                                  ],
                                                 ),
-                                                const SizedBox(height: 4),
-                                                Text(name, maxLines: 1, style: TextStyle(fontSize: 12, color: prefs.theme == i ? scheme.primary : scheme.onSurfaceVariant, fontWeight: prefs.theme == i ? FontWeight.w600 : null)),
-                                              ],
-                                            ),
-                                          ),
-                                      ],
-                                    ),
-                                  ),
-                                  // 越往左越暗：滑块值是亮度，存的是遮罩不透明度
-                                  XSlider(compact: true, title: '页面亮度', label: '${((1 - prefs.dim) * 100).round()}%', slider: Slider(min: 0.3, max: 1.0, divisions: 14, value: (1 - prefs.dim).clamp(0.3, 1.0), onChanged: (v) => set(prefs.copyWith(dim: 1 - v)))),
-                                  if (android) ...[
-                                    XSwitch(title: '独立屏幕亮度', help: '不跟随系统亮度，最高能调得比系统更亮；退出阅读后恢复。', value: prefs.customBrightness, onChanged: (v) => set(prefs.copyWith(customBrightness: v))),
-                                    if (prefs.customBrightness) XSlider(compact: true, title: '屏幕亮度', label: '${(prefs.brightness * 100).round()}%', slider: Slider(min: 0.02, max: 1.0, value: prefs.brightness.clamp(0.02, 1.0), onChanged: (v) => set(prefs.copyWith(brightness: v)))),
-                                  ],
-                                  XSlider(compact: true, title: '暖色滤镜', label: prefs.warm == 0 ? '关闭' : '${(prefs.warm * 200).round()}%', slider: Slider(min: 0, max: 0.5, divisions: 10, value: prefs.warm, onChanged: (v) => set(prefs.copyWith(warm: v)))),
-                                  XTile(
-                                    title: '色彩',
-                                    trailing: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      spacing: 8,
-                                      children: [
-                                        _toggleChip(scheme, '灰度', prefs.grayscale, (v) => set(prefs.copyWith(grayscale: v))),
-                                        _toggleChip(scheme, '反色', prefs.invert, (v) => set(prefs.copyWith(invert: v))),
-                                      ],
-                                    ),
-                                  ),
-                                  XChips<int>(
-                                    title: '纸张纹理',
-                                    value: prefs.bgTexture,
-                                    options: kReaderBgTextures,
-                                    onChanged: (v) => set(prefs.copyWith(bgTexture: v)),
-                                  ),
-                                  if (!isWebPreview)
-                                    () {
-                                      final bgImg = ref.watch(readerBgImageProvider);
-                                      return Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          XTile(
-                                            title: '自定义背景图',
-                                            subtitle: bgImg != null ? '已应用本地背景图片' : '叠加本地图片并保留护眼遮罩',
-                                            trailing: Row(
-                                              mainAxisSize: MainAxisSize.min,
-                                              spacing: 6,
-                                              children: [
-                                                OutlinedButton(
-                                                  style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 12)),
-                                                  onPressed: () => ref.read(readerBgImageProvider.notifier).pick(),
-                                                  child: Text(bgImg == null ? '选图' : '更换'),
-                                                ),
-                                                if (bgImg != null)
-                                                  TextButton(
-                                                    style: TextButton.styleFrom(visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
-                                                    onPressed: () => ref.read(readerBgImageProvider.notifier).clear(),
-                                                    child: const Text('清除'),
-                                                  ),
-                                              ],
-                                            ),
-                                          ),
-                                          if (bgImg != null)
-                                            XSlider(
-                                              compact: true,
-                                              title: '背景浓度',
-                                              label: '${(prefs.bgImageOpacity * 100).round()}%',
-                                              slider: Slider(
-                                                min: 0.05,
-                                                max: 0.85,
-                                                divisions: 16,
-                                                value: prefs.bgImageOpacity.clamp(0.05, 0.85),
-                                                onChanged: (v) => set(prefs.copyWith(bgImageOpacity: v)),
                                               ),
+                                          ],
+                                        ),
+                                      ),
+                                      // 越往左越暗：滑块值是亮度，存的是遮罩不透明度
+                                      XSlider(compact: true, title: '页面亮度', label: '${((1 - prefs.dim) * 100).round()}%', slider: Slider(min: 0.3, max: 1.0, divisions: 14, value: (1 - prefs.dim).clamp(0.3, 1.0), onChanged: (v) => set(prefs.copyWith(dim: 1 - v)))),
+                                      if (android) ...[
+                                        XSwitch(title: '独立屏幕亮度', help: '不跟随系统亮度，最高能调得比系统更亮；退出阅读后恢复。', value: prefs.customBrightness, onChanged: (v) => set(prefs.copyWith(customBrightness: v))),
+                                        AppCollapse(
+                                          visible: prefs.customBrightness,
+                                          child: XSlider(compact: true, title: '屏幕亮度', label: '${(prefs.brightness * 100).round()}%', slider: Slider(min: 0.02, max: 1.0, value: prefs.brightness.clamp(0.02, 1.0), onChanged: (v) => set(prefs.copyWith(brightness: v)))),
+                                        ),
+                                      ],
+                                      XSlider(compact: true, title: '暖色滤镜', label: prefs.warm == 0 ? '关闭' : '${(prefs.warm * 200).round()}%', slider: Slider(min: 0, max: 0.5, divisions: 10, value: prefs.warm, onChanged: (v) => set(prefs.copyWith(warm: v)))),
+                                      XTile(
+                                        title: '色彩',
+                                        trailing: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          spacing: 8,
+                                          children: [
+                                            _toggleChip(scheme, '灰度', prefs.grayscale, (v) => set(prefs.copyWith(grayscale: v))),
+                                            _toggleChip(scheme, '反色', prefs.invert, (v) => set(prefs.copyWith(invert: v))),
+                                          ],
+                                        ),
+                                      ),
+                                      XChips<int>(
+                                        title: '纸张纹理',
+                                        value: prefs.bgTexture,
+                                        options: kReaderBgTextures,
+                                        onChanged: (v) => set(prefs.copyWith(bgTexture: v)),
+                                      ),
+                                      if (!isWebPreview)
+                                        () {
+                                          final bgImg = ref.watch(readerBgImageProvider);
+                                          return Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              XTile(
+                                                title: '自定义背景图',
+                                                subtitle: bgImg != null ? '已应用本地背景图片' : '叠加本地图片并保留护眼遮罩',
+                                                trailing: Row(
+                                                  mainAxisSize: MainAxisSize.min,
+                                                  spacing: 6,
+                                                  children: [
+                                                    OutlinedButton(
+                                                      style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 12)),
+                                                      onPressed: () => ref.read(readerBgImageProvider.notifier).pick(),
+                                                      child: Text(bgImg == null ? '选图' : '更换'),
+                                                    ),
+                                                    AppCollapse(
+                                                      visible: bgImg != null,
+                                                      axis: Axis.horizontal,
+                                                      duration: AppMotion.fast,
+                                                      child: TextButton(
+                                                        style: TextButton.styleFrom(visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 8)),
+                                                        onPressed: () => ref.read(readerBgImageProvider.notifier).clear(),
+                                                        child: const Text('清除'),
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                              AppCollapse(
+                                                visible: bgImg != null,
+                                                child: XSlider(
+                                                  compact: true,
+                                                  title: '背景浓度',
+                                                  label: '${(prefs.bgImageOpacity * 100).round()}%',
+                                                  slider: Slider(
+                                                    min: 0.05,
+                                                    max: 0.85,
+                                                    divisions: 16,
+                                                    value: prefs.bgImageOpacity.clamp(0.05, 0.85),
+                                                    onChanged: (v) => set(prefs.copyWith(bgImageOpacity: v)),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          );
+                                        }(),
+                                    ],
+                                    if (currentTab == 1) ...[
+                                      _LayoutSlider(title: '字号', label: (v) => '${v.round()}', min: 14, max: 32, divisions: 18, value: prefs.fontSize, onCommit: (v) => set(prefs.copyWith(fontSize: v))),
+                                      _LayoutSlider(title: '行距', label: (v) => v.toStringAsFixed(1), min: 1.3, max: 2.4, divisions: 11, value: prefs.lineHeight, onCommit: (v) => set(prefs.copyWith(lineHeight: v))),
+                                      _LayoutSlider(title: '字间距', label: (v) => v == 0 ? '默认' : v.toStringAsFixed(1), min: -0.5, max: 4.0, divisions: 18, value: prefs.letterSpacing, onCommit: (v) => set(prefs.copyWith(letterSpacing: v))),
+                                      _LayoutSlider(title: '段间距', label: (v) => v <= 0 ? '紧排' : '${v.round()}', min: 0, max: 24, divisions: 12, value: prefs.paragraphSpacing, onCommit: (v) => set(prefs.copyWith(paragraphSpacing: v))),
+                                      _LayoutSlider(title: '页边距', label: (v) => '${v.round()}', min: 8, max: 48, divisions: 20, value: prefs.margin, onCommit: (v) => set(prefs.copyWith(margin: v))),
+                                      XChips<int>(
+                                        title: '字体',
+                                        value: prefs.font,
+                                        options: FontStore.names,
+                                        onChanged: (k) async {
+                                          if (k == 2 && FontStore.customFamily == null && !await FontStore.pick()) return;
+                                          set(prefs.copyWith(font: k));
+                                        },
+                                        extra: [
+                                          if (!isWebPreview)
+                                            ActionChip(
+                                              avatar: const Icon(Icons.upload_file_outlined, size: 18),
+                                              label: const Text('导入字体'),
+                                              onPressed: () async {
+                                                if (await FontStore.pick()) set(prefs.copyWith(font: 2));
+                                              },
                                             ),
                                         ],
-                                      );
-                                    }(),
-                                ],
-                                if (currentTab == 1) ...[
-                                  _LayoutSlider(title: '字号', label: (v) => '${v.round()}', min: 14, max: 32, divisions: 18, value: prefs.fontSize, onCommit: (v) => set(prefs.copyWith(fontSize: v))),
-                                  _LayoutSlider(title: '行距', label: (v) => v.toStringAsFixed(1), min: 1.3, max: 2.4, divisions: 11, value: prefs.lineHeight, onCommit: (v) => set(prefs.copyWith(lineHeight: v))),
-                                  _LayoutSlider(title: '字间距', label: (v) => v == 0 ? '默认' : v.toStringAsFixed(1), min: -0.5, max: 4.0, divisions: 18, value: prefs.letterSpacing, onCommit: (v) => set(prefs.copyWith(letterSpacing: v))),
-                                  _LayoutSlider(title: '段间距', label: (v) => v <= 0 ? '紧排' : '${v.round()}', min: 0, max: 24, divisions: 12, value: prefs.paragraphSpacing, onCommit: (v) => set(prefs.copyWith(paragraphSpacing: v))),
-                                  _LayoutSlider(title: '页边距', label: (v) => '${v.round()}', min: 8, max: 48, divisions: 20, value: prefs.margin, onCommit: (v) => set(prefs.copyWith(margin: v))),
-                                  XChips<int>(
-                                    title: '字体',
-                                    value: prefs.font,
-                                    options: FontStore.names,
-                                    onChanged: (k) async {
-                                      if (k == 2 && FontStore.customFamily == null && !await FontStore.pick()) return;
-                                      set(prefs.copyWith(font: k));
-                                    },
-                                    extra: [
-                                      if (!isWebPreview)
-                                        ActionChip(
-                                          avatar: const Icon(Icons.upload_file_outlined, size: 18),
-                                          label: const Text('导入字体'),
-                                          onPressed: () async {
-                                            if (await FontStore.pick()) set(prefs.copyWith(font: 2));
-                                          },
-                                        ),
+                                      ),
+                                      XSwitch(title: '繁体', value: prefs.hant, onChanged: (v) => set(prefs.copyWith(hant: v))),
                                     ],
-                                  ),
-                                  XSwitch(title: '繁体', value: prefs.hant, onChanged: (v) => set(prefs.copyWith(hant: v))),
-                                ],
-                                if (currentTab == 2) ...[
-                                  XSegments<int>(value: prefs.mode, options: const {0: '滚动', 1: '滑动', 2: '仿真', 3: '覆盖'}, onChanged: (v) => set(prefs.copyWith(mode: v))),
-                                  if (prefs.mode != 0) ...[
-                                    XChips<int>(
-                                      title: '点击区域',
-                                      value: prefs.tapZone,
-                                      options: const {0: '默认', 1: 'L 形', 2: 'Kindle 式', 3: '边缘式', 4: '仅菜单'},
-                                      onChanged: (v) => set(prefs.copyWith(tapZone: v)),
-                                    ),
-                                    TapZoneDiagram(zone: prefs.tapZone, invert: prefs.tapInvert),
-                                    XSwitch(title: '宽屏双页', value: prefs.dual, onChanged: (v) => set(prefs.copyWith(dual: v))),
+                                    if (currentTab == 2) ...[
+                                      XSegments<int>(value: prefs.mode, options: const {0: '滚动', 1: '滑动', 2: '仿真', 3: '覆盖'}, onChanged: (v) => set(prefs.copyWith(mode: v))),
+                                      AppCollapse(
+                                        visible: prefs.mode != 0,
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            XChips<int>(
+                                              title: '点击区域',
+                                              value: prefs.tapZone,
+                                              options: const {0: '默认', 1: 'L 形', 2: 'Kindle 式', 3: '边缘式', 4: '仅菜单'},
+                                              onChanged: (v) => set(prefs.copyWith(tapZone: v)),
+                                            ),
+                                            TapZoneDiagram(zone: prefs.tapZone, invert: prefs.tapInvert),
+                                            XSwitch(title: '宽屏双页', value: prefs.dual, onChanged: (v) => set(prefs.copyWith(dual: v))),
+                                          ],
+                                        ),
+                                      ),
+                                      XSwitch(title: '沉浸式阅读', value: prefs.fullscreen, onChanged: (v) => set(prefs.copyWith(fullscreen: v))),
+                                      XSwitch(title: '页脚信息', value: prefs.showStatus, onChanged: (v) => set(prefs.copyWith(showStatus: v))),
+                                      XTile(
+                                        title: '页眉与页脚字段',
+                                        subtitle: '${ReaderChromeField.labels[prefs.headerLeft] ?? '留空'} · ${ReaderChromeField.labels[prefs.footerRight] ?? '留空'}',
+                                        trailing: const Icon(Icons.chevron_right),
+                                        onTap: () => _showChromeFieldsSheet(context, themed),
+                                      ),
+                                      XTile(
+                                        title: '朗读设置',
+                                        trailing: const Icon(Icons.chevron_right),
+                                        onTap: () {
+                                          Navigator.pop(context);
+                                          onOpenTtsSettings();
+                                        },
+                                      ),
+                                      XTile(
+                                        title: '更多阅读设置',
+                                        trailing: const Icon(Icons.chevron_right),
+                                        onTap: () async {
+                                          Navigator.pop(context);
+                                          await onOpenMoreSettings();
+                                        },
+                                      ),
+                                    ],
                                   ],
-                                  XSwitch(title: '沉浸式阅读', value: prefs.fullscreen, onChanged: (v) => set(prefs.copyWith(fullscreen: v))),
-                                  XSwitch(title: '页脚信息', value: prefs.showStatus, onChanged: (v) => set(prefs.copyWith(showStatus: v))),
-                                  XTile(
-                                    title: '页眉与页脚字段',
-                                    subtitle: '${ReaderChromeField.labels[prefs.headerLeft] ?? '留空'} · ${ReaderChromeField.labels[prefs.footerRight] ?? '留空'}',
-                                    trailing: const Icon(Icons.chevron_right),
-                                    onTap: () => _showChromeFieldsSheet(context, themed),
-                                  ),
-                                  XTile(
-                                    title: '朗读设置',
-                                    trailing: const Icon(Icons.chevron_right),
-                                    onTap: () {
-                                      Navigator.pop(context);
-                                      onOpenTtsSettings();
-                                    },
-                                  ),
-                                  XTile(
-                                    title: '更多阅读设置',
-                                    trailing: const Icon(Icons.chevron_right),
-                                    onTap: () async {
-                                      Navigator.pop(context);
-                                      await onOpenMoreSettings();
-                                    },
-                                  ),
-                                ],
-                              ],
+                                ),
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -1023,8 +1073,11 @@ Future<void> _showChromeFieldsSheet(BuildContext context, ThemeData sheetTheme) 
                   child: Row(
                     children: [
                       const Expanded(child: Text('页眉与页脚字段', style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700))),
-                      if (!isDefault)
-                        TextButton(
+                      AppCollapse(
+                        visible: !isDefault,
+                        axis: Axis.horizontal,
+                        duration: AppMotion.fast,
+                        child: TextButton(
                           onPressed: () => set(
                             prefs.copyWith(
                               headerLeft: ReaderChromeField.chapterTitle,
@@ -1035,6 +1088,7 @@ Future<void> _showChromeFieldsSheet(BuildContext context, ThemeData sheetTheme) 
                           ),
                           child: const Text('恢复默认'),
                         ),
+                      ),
                     ],
                   ),
                 ),

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/scheduler.dart';
 
+import '../motion.dart';
 import '../text.dart';
 import 'reader_sheets.dart' show ReaderPalette;
 
@@ -375,15 +376,21 @@ class ReaderAutoScrollBar extends StatelessWidget {
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 2),
-              child: Text(
-                controller.speedLabel,
-                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg.withValues(alpha: 0.85)),
+              child: AppCrossfade(
+                duration: AppMotion.instant,
+                child: Text(
+                  controller.speedLabel,
+                  key: ValueKey(controller.speedLabel),
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg.withValues(alpha: 0.85), fontFeatures: const [FontFeature.tabularFigures()]),
+                ),
               ),
             ),
             IconButton(
               tooltip: hz(context, paused ? '继续自动阅读' : '暂停自动阅读'),
               visualDensity: VisualDensity.compact,
-              icon: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, size: 24, color: accent),
+              icon: AppIconSwap(
+                child: Icon(paused ? Icons.play_arrow_rounded : Icons.pause_rounded, key: ValueKey(paused), size: 24, color: accent),
+              ),
               onPressed: controller.togglePause,
             ),
             IconButton(
@@ -439,22 +446,32 @@ class ReaderAutoTurnProgressBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: controller,
-      builder: (_, _) {
-        if (!controller.isActive || controller.isScrollMode) return const SizedBox.shrink();
+      builder: (context, _) {
+        final show = controller.isActive && !controller.isScrollMode;
         final barColor = accent.withValues(alpha: controller.isPaused ? 0.28 : 0.55);
         final trackColor = palette.fg.withValues(alpha: 0.08);
-        return IgnorePointer(
-          child: ValueListenableBuilder<double>(
-            valueListenable: controller.progress,
-            builder: (_, v, _) => SizedBox(
-              height: 2.5,
-              width: double.infinity,
-              child: ColoredBox(
-                color: trackColor,
-                child: FractionallySizedBox(
-                  alignment: Alignment.centerLeft,
-                  widthFactor: v.clamp(0.0, 1.0),
-                  child: ColoredBox(color: barColor),
+        return AppReveal(
+          visible: show,
+          offset: Offset.zero,
+          beginScale: 1.0,
+          duration: AppMotion.fast,
+          child: IgnorePointer(
+            child: ValueListenableBuilder<double>(
+              valueListenable: controller.progress,
+              builder: (_, v, _) => SizedBox(
+                height: 2.5,
+                width: double.infinity,
+                child: ColoredBox(
+                  color: trackColor,
+                  child: FractionallySizedBox(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: v.clamp(0.0, 1.0),
+                    child: AnimatedContainer(
+                      duration: AppMotion.dur(context, AppMotion.fast),
+                      curve: AppMotion.curve,
+                      color: barColor,
+                    ),
+                  ),
                 ),
               ),
             ),

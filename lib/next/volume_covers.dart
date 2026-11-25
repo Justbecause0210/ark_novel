@@ -42,6 +42,21 @@ class VolumeCoverQueue {
   final _officialTried = <(String, String)>{}; // 本轮已经尝试过原站取封面的卷，避免 build 反复入队
   final _failedUrls = <String>{}; // 本轮实际下载失败的封面地址（如旧缓存没命中或站点小封面被拦），刷新或重启后清空重试
   bool _netBlocked = false; // 连着几本失败时先熔断，本轮直接走 Bangumi 兜底；刷新或下次启动再试原站
+  int _bgPauseCount = 0;
+
+  bool get isBackgroundPaused => _bgPauseCount > 0;
+
+  void pauseBackground() {
+    _bgPauseCount++;
+  }
+
+  void resumeBackground() {
+    if (_bgPauseCount > 0 && --_bgPauseCount == 0) {
+      if (_bg.isNotEmpty || _queue.isNotEmpty) Future.microtask(_pump);
+      if (_bgmQueue.isNotEmpty) Future.microtask(_pumpBangumi);
+      if (_tempQueue.isNotEmpty) Future.microtask(_pumpTemp);
+    }
+  }
 
   /// 后台把这些书在书架上显示的封面（第一卷的）取下来（打开 App、同步完书架后调用）。其他卷不常看，打开卷册页时再取。
   /// 若之前有书因文库失败临时用了 Bangumi 兜底，重新调用时会再尝试恢复原站封面（恢复前继续显示临时封面不闪烁）。
@@ -173,6 +188,7 @@ class VolumeCoverQueue {
     }
 
     while (_queue.isNotEmpty || _bg.isNotEmpty) {
+      if (_queue.isEmpty && _bgPauseCount > 0) break;
       final (aid, title) = _queue.isNotEmpty ? _queue.removeLast() : _bg.removeAt(0);
       final v = Volumes.of(aid).where((v) => v.title == title).firstOrNull;
       final existing = Volumes.cover(aid, title);
@@ -250,6 +266,7 @@ class VolumeCoverQueue {
   }
 
   void _pumpTemp() {
+    if (_bgPauseCount > 0) return;
     while (_tempRunning < _maxBgmConcurrent && _tempQueue.isNotEmpty) {
       final aid = _tempQueue.removeAt(0);
       if (_bgmFailed.contains(aid) || _tempFilling.contains(aid)) continue;
@@ -309,6 +326,7 @@ class VolumeCoverQueue {
   }
 
   void _pumpBangumi() {
+    if (_bgPauseCount > 0) return;
     while (_bgmRunning < _maxBgmConcurrent && _bgmQueue.isNotEmpty) {
       final aid = _bgmQueue.removeAt(0);
       if (_bgmFailed.contains(aid) || _bgmFilling.contains(aid)) continue;

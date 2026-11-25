@@ -1,7 +1,9 @@
+import 'dart:async' show unawaited;
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart' hide Text;
-import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:flutter/physics.dart' show SpringSimulation;
+import 'package:flutter/services.dart' show HapticFeedback, LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -19,6 +21,7 @@ import '../env.dart';
 import '../export_book.dart';
 import '../image_cache.dart';
 import '../library.dart';
+import '../motion.dart';
 import '../stats.dart';
 import '../volume_covers.dart';
 import '../volumes.dart' show Vol, Volumes, volumeChangeForProvider;
@@ -76,6 +79,34 @@ final novelProvider = StreamProvider.autoDispose.family<NovelPage, String>((ref,
   }
 });
 
+/// 阅读器专用的详情与目录：本地已有 `PageStore` 缓存时直接返回，不在每次进入阅读页时发起网络刷新（避免额外 HTML 解析与潜在无头过盾）；
+/// 本地无缓存时拉取一次最新详情与目录；最小化单测环境仅覆盖 [novelProvider] 时同步委托回退。
+final readerNovelProvider = FutureProvider.autoDispose.family<NovelPage, String>((ref, aid) async {
+  if (ref.exists(novelProvider(aid))) {
+    final existing = ref.watch(novelProvider(aid)).value;
+    if (existing != null) return existing;
+  }
+  final Api api;
+  try {
+    api = ref.watch(apiProvider);
+  } catch (_) {
+    return ref.watch(novelProvider(aid).future);
+  }
+  final saved = await api.saved(aid);
+  if (saved != null) {
+    await Volumes.saveCatalogue(aid, saved.catalogue);
+    await UpdateStore.noteKnownCount(aid, saved.catalogue.expand((v) => v.chapters).length);
+    return saved;
+  }
+  final fresh = await api.novel(aid);
+  final d = fresh.detail;
+  if (ref.mounted) await ref.read(libraryProvider.notifier).noteDetail(aid, title: d.title, img: d.imgUrl, status: d.status);
+  await Volumes.saveCatalogue(aid, fresh.catalogue);
+  await UpdateStore.noteKnownCount(aid, fresh.catalogue.expand((v) => v.chapters).length);
+  if (ReadingStats.perBook().containsKey(aid)) await ReadingStats.setMeta(aid, d.title, d.author, d.imgUrl);
+  return fresh;
+});
+
 class NovelPageView extends ConsumerWidget {
   const NovelPageView({super.key, required this.aid});
 
@@ -84,19 +115,24 @@ class NovelPageView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final novel = ref.watch(novelProvider(aid));
-    return novel.when(
-      loading: () => Scaffold(appBar: AppBar(), body: const _NovelSkeleton()),
-      error: (e, _) => Scaffold(
-        appBar: AppBar(),
-        body: StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(novelProvider(aid))),
+    return AppCrossfade(
+      fill: true,
+      duration: AppMotion.fast,
+      child: novel.when(
+        loading: () => Scaffold(key: const ValueKey('novel-loading'), appBar: AppBar(), body: const _NovelSkeleton()),
+        error: (e, _) => Scaffold(
+          key: const ValueKey('novel-error'),
+          appBar: AppBar(),
+          body: StatePanel(title: '加载失败', detail: e.toString(), error: e, onRetry: () => ref.invalidate(novelProvider(aid))),
+        ),
+        data: (data) => _Body(key: ValueKey('novel-data:$aid'), aid: aid, data: data),
       ),
-      data: (data) => _Body(aid: aid, data: data),
     );
   }
 }
 
 class _Body extends ConsumerStatefulWidget {
-  const _Body({required this.aid, required this.data});
+  const _Body({super.key, required this.aid, required this.data});
 
   final String aid;
   final NovelPage data;
@@ -187,6 +223,7 @@ class _BodyState extends ConsumerState<_Body> {
 
   /// 本地书架：先改本地，网站那边由书架同步去推；没登录也能用。有分类时加入后让选分类。
   Future<void> _toggleShelf(bool inLib) async {
+    unawaited(HapticFeedback.lightImpact());
     final d = data.detail;
     if (inLib) return ref.read(libraryProvider.notifier).remove([aid]);
     final cats = ref.read(libraryProvider).cats;
@@ -212,10 +249,22 @@ class _BodyState extends ConsumerState<_Body> {
   String? _firstCid() => data.catalogue.expand((v) => v.chapters).firstOrNull?.cid;
 
   void _openCoverViewer(BuildContext context, String cover) {
-    showDialog<void>(
+    final reduce = AppMotion.reduce(context);
+    showGeneralDialog<void>(
       context: context,
-      barrierColor: Colors.black87,
-      builder: (ctx) => _CoverFullscreenDialog(url: cover, ref: ref),
+      barrierDismissible: true,
+      barrierLabel: hz(context, '关闭'),
+      barrierColor: Colors.transparent,
+      transitionDuration: reduce ? Duration.zero : AppMotion.standard,
+      pageBuilder: (ctx, _, _) => _CoverFullscreenDialog(url: cover, ref: ref),
+      transitionBuilder: (_, anim, _, child) {
+        if (reduce) return FadeTransition(opacity: anim, child: child);
+        final curved = CurvedAnimation(parent: anim, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit);
+        return FadeTransition(
+          opacity: curved,
+          child: ScaleTransition(scale: Tween<double>(begin: 0.94, end: 1.0).animate(curved), child: child),
+        );
+      },
     );
   }
 
@@ -290,11 +339,14 @@ class _BodyState extends ConsumerState<_Body> {
               child: Semantics(
                 button: true,
                 label: hz(context, '查看封面大图'),
-                child: MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: () => _openCoverViewer(context, cover),
-                    child: CoverImage(cover, aid: aid),
+                child: AppPressScale(
+                  scale: 0.965,
+                  child: MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: GestureDetector(
+                      onTap: () => _openCoverViewer(context, cover),
+                      child: CoverImage(cover, aid: aid),
+                    ),
                   ),
                 ),
               ),
@@ -332,37 +384,43 @@ class _BodyState extends ConsumerState<_Body> {
           children: [
             Expanded(
               flex: 3,
-              child: FilledButton(
-                style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(56), padding: const EdgeInsets.symmetric(horizontal: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-                onPressed: startCid == null ? null : () => _open(Routes.reader(aid, startCid)),
-                child: Row(
-                  children: [
-                    const Icon(Icons.play_arrow_rounded, size: 26),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(progress == null ? '开始阅读' : '继续阅读', style: const TextStyle(fontWeight: FontWeight.w700)),
-                          // 读到哪一章写在按钮里，不用点进去才知道
-                          if (all.where((c) => c.cid == startCid).firstOrNull?.title case final t?)
-                            Text(t, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onPrimary.withValues(alpha: 0.8))),
-                        ],
+              child: AppPressScale(
+                scale: 0.975,
+                child: FilledButton(
+                  style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(56), padding: const EdgeInsets.symmetric(horizontal: 14), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+                  onPressed: startCid == null ? null : () => _open(Routes.reader(aid, startCid)),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.play_arrow_rounded, size: 26),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(progress == null ? '开始阅读' : '继续阅读', style: const TextStyle(fontWeight: FontWeight.w700)),
+                            // 读到哪一章写在按钮里，不用点进去才知道
+                            if (all.where((c) => c.cid == startCid).firstOrNull?.title case final t?)
+                              Text(t, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onPrimary.withValues(alpha: 0.8))),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
               flex: 2,
-              child: OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(56), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-                onPressed: () => _toggleShelf(inLib),
-                icon: Icon(inLib ? Icons.bookmark_remove_outlined : Icons.bookmark_add_outlined, size: 20),
-                label: Text(inLib ? '移出书架' : '加入书架'),
+              child: AppPressScale(
+                scale: 0.975,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(56), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
+                  onPressed: () => _toggleShelf(inLib),
+                  icon: AppIconSwap(child: Icon(inLib ? Icons.bookmark_remove_outlined : Icons.bookmark_add_outlined, key: ValueKey(inLib), size: 20)),
+                  label: AppCrossfade(child: Text(inLib ? '移出书架' : '加入书架', key: ValueKey(inLib))),
+                ),
               ),
             ),
           ],
@@ -372,7 +430,11 @@ class _BodyState extends ConsumerState<_Body> {
           children: [
             actionBtn(
               onPressed: _voting ? null : _vote,
-              icon: _voting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.thumb_up_outlined, size: 18),
+              icon: AppIconSwap(
+                child: _voting
+                    ? const SizedBox(key: ValueKey('voting'), width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.thumb_up_outlined, key: ValueKey('vote'), size: 18),
+              ),
               label: '推荐',
             ),
             actionBtn(onPressed: () => _open(Routes.comments(aid)), icon: const Icon(Icons.forum_outlined, size: 18), label: '书评'),
@@ -421,7 +483,7 @@ class _BodyState extends ConsumerState<_Body> {
                   ],
                 ),
                 const SizedBox(height: 6),
-                LinearProgressIndicator(value: all.isEmpty ? 0 : (all.length - unread) / all.length, minHeight: 4, borderRadius: BorderRadius.circular(2)),
+                AppProgressBar(value: all.isEmpty ? 0 : (all.length - unread) / all.length, minHeight: 4, borderRadius: 2),
                 if (latest.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   Text('最新章节', style: theme.textTheme.labelLarge?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
@@ -457,8 +519,26 @@ class _BodyState extends ConsumerState<_Body> {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(intro, maxLines: _introOpen ? null : 5, overflow: _introOpen ? null : TextOverflow.ellipsis, style: style),
-                if (over) TextButton(onPressed: () => setState(() => _introOpen = !_introOpen), child: Text(_introOpen ? '收起' : '展开')),
+                AnimatedSize(
+                  duration: AppMotion.dur(context, AppMotion.standard),
+                  curve: AppMotion.curve,
+                  alignment: Alignment.topCenter,
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: Text(intro, maxLines: _introOpen ? null : 5, overflow: _introOpen ? null : TextOverflow.ellipsis, style: style),
+                  ),
+                ),
+                if (over)
+                  TextButton.icon(
+                    onPressed: () => setState(() => _introOpen = !_introOpen),
+                    icon: AnimatedRotation(
+                      turns: _introOpen ? 0.5 : 0.0,
+                      duration: AppMotion.dur(context, AppMotion.fast),
+                      curve: AppMotion.snappy,
+                      child: const Icon(Icons.expand_more, size: 18),
+                    ),
+                    label: AppCrossfade(child: Text(_introOpen ? '收起' : '展开', key: ValueKey(_introOpen))),
+                  ),
               ],
             );
           },
@@ -503,7 +583,14 @@ class _BodyState extends ConsumerState<_Body> {
                   IconButton(
                     tooltip: hz(context, isDone ? '取消本卷已读' : '标记本卷读完'),
                     visualDensity: VisualDensity.compact,
-                    icon: Icon(isDone ? Icons.check_circle : Icons.check_circle_outline, size: 18, color: isDone ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant),
+                    icon: AppIconSwap(
+                      child: Icon(
+                        isDone ? Icons.check_circle : Icons.check_circle_outline,
+                        key: ValueKey(isDone),
+                        size: 18,
+                        color: isDone ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
                     onPressed: () async {
                       final ok = await showDialog<bool>(
                         context: context,
@@ -521,7 +608,8 @@ class _BodyState extends ConsumerState<_Body> {
                   ),
                   AnimatedRotation(
                     turns: expanded ? 0.5 : 0.0,
-                    duration: const Duration(milliseconds: 180),
+                    duration: AppMotion.dur(context, AppMotion.fast),
+                    curve: AppMotion.snappy,
                     child: Icon(Icons.expand_more, size: 20, color: theme.colorScheme.onSurfaceVariant),
                   ),
                 ],
@@ -599,62 +687,79 @@ class _BodyState extends ConsumerState<_Body> {
       ),
     );
 
-    final body = _picked.isEmpty
-        ? list
-        : Stack(
-            children: [
-              list,
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: Material(
-                  elevation: 3,
-                  color: theme.colorScheme.surfaceContainer,
-                  child: SafeArea(
-                    top: false,
-                    child: Row(
-                      children: [
-                        IconButton(tooltip: hz(context, '取消'), icon: const Icon(Icons.close), onPressed: () => setState(_picked.clear)),
-                        Expanded(child: Text('已选 ${_picked.length} 章', maxLines: 1, overflow: TextOverflow.ellipsis)),
-                        TextButton(onPressed: () => _markPicked(true), child: const Text('已读')),
-                        TextButton(onPressed: () => _markPicked(false), child: const Text('未读')),
-                        TextButton(
-                          onPressed: () {
-                            final chosen = all.where((c) => _picked.contains(c.cid)).toList();
-                            if (chosen.isNotEmpty) {
-                              ref.read(downloadProvider.notifier).start(aid, data.detail.title, chosen, total: all.length, img: data.detail.imgUrl, firstCid: all.first.cid);
-                              _snack(context, '已开始缓存 ${chosen.length} 章');
-                            }
-                            setState(_picked.clear);
-                          },
-                          child: const Text('缓存'),
+    final body = Stack(
+      children: [
+        list,
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: AppReveal(
+            visible: _picked.isNotEmpty,
+            offset: const Offset(0, 1.0),
+            beginScale: 1.0,
+            duration: AppMotion.standard,
+            reverseDuration: AppMotion.fast,
+            child: Material(
+              elevation: 3,
+              color: theme.colorScheme.surfaceContainer,
+              child: SafeArea(
+                top: false,
+                child: Row(
+                  children: [
+                    IconButton(tooltip: hz(context, '取消'), icon: const Icon(Icons.close), onPressed: () => setState(_picked.clear)),
+                    Expanded(
+                      child: AppCrossfade(
+                        alignment: Alignment.centerLeft,
+                        duration: AppMotion.fast,
+                        child: Text(
+                          '已选 ${_picked.length} 章',
+                          key: ValueKey(_picked.length),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()]),
                         ),
-                        // 按钮全摆出来窄屏放不下，不常用的收进"更多"
-                        PopupMenuButton<void Function()>(
-                          tooltip: hz(context, '更多'),
-                          onSelected: (f) => f(),
-                          itemBuilder: (_) => [
-                            // 从第一章选到已选的最后一章，方便"之前的全部标为已读"
-                            PopupMenuItem(value: () => setState(() => _picked.addAll(all.take(all.lastIndexWhere((c) => _picked.contains(c.cid)) + 1).map((c) => c.cid))), child: const Text('选到开头')),
-                            if (_picked.length == 1) PopupMenuItem(value: _markBefore, child: const Text('前面的标为已读')),
-                            PopupMenuItem(
-                              value: () {
-                                final selected = {..._picked};
-                                setState(_picked.clear);
-                                showExportBookDialog(context, ref, aid: aid, novel: data, selectedCids: selected);
-                              },
-                              child: const Text('导出选中章节'),
-                            ),
-                          ],
+                      ),
+                    ),
+                    TextButton(onPressed: () => _markPicked(true), child: const Text('已读')),
+                    TextButton(onPressed: () => _markPicked(false), child: const Text('未读')),
+                    TextButton(
+                      onPressed: () {
+                        final chosen = all.where((c) => _picked.contains(c.cid)).toList();
+                        if (chosen.isNotEmpty) {
+                          ref.read(downloadProvider.notifier).start(aid, data.detail.title, chosen, total: all.length, img: data.detail.imgUrl, firstCid: all.first.cid);
+                          _snack(context, '已开始缓存 ${chosen.length} 章');
+                        }
+                        setState(_picked.clear);
+                      },
+                      child: const Text('缓存'),
+                    ),
+                    // 按钮全摆出来窄屏放不下，不常用的收进"更多"
+                    PopupMenuButton<void Function()>(
+                      tooltip: hz(context, '更多'),
+                      onSelected: (f) => f(),
+                      itemBuilder: (_) => [
+                        // 从第一章选到已选的最后一章，方便"之前的全部标为已读"
+                        PopupMenuItem(value: () => setState(() => _picked.addAll(all.take(all.lastIndexWhere((c) => _picked.contains(c.cid)) + 1).map((c) => c.cid))), child: const Text('选到开头')),
+                        if (_picked.length == 1) PopupMenuItem(value: _markBefore, child: const Text('前面的标为已读')),
+                        PopupMenuItem(
+                          value: () {
+                            final selected = {..._picked};
+                            setState(_picked.clear);
+                            showExportBookDialog(context, ref, aid: aid, novel: data, selectedCids: selected);
+                          },
+                          child: const Text('导出选中章节'),
                         ),
                       ],
                     ),
-                  ),
+                  ],
                 ),
               ),
-            ],
-          );
+            ),
+          ),
+        ),
+      ],
+    );
 
     return CallbackShortcuts(
       bindings: {
@@ -671,7 +776,12 @@ class _BodyState extends ConsumerState<_Body> {
             appBar: AppBar(
               title: ValueListenableBuilder<bool>(
                 valueListenable: _showTitle,
-                builder: (context, show, child) => AnimatedOpacity(opacity: show ? 1 : 0, duration: const Duration(milliseconds: 180), child: child),
+                builder: (context, show, child) => AnimatedOpacity(
+                  opacity: show ? 1 : 0,
+                  duration: AppMotion.dur(context, AppMotion.fast),
+                  curve: AppMotion.curve,
+                  child: child,
+                ),
                 child: Text(shownTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
               ),
               actions: [
@@ -742,75 +852,163 @@ class _CoverFullscreenDialog extends StatefulWidget {
   State<_CoverFullscreenDialog> createState() => _CoverFullscreenDialogState();
 }
 
-class _CoverFullscreenDialogState extends State<_CoverFullscreenDialog> {
+class _CoverFullscreenDialogState extends State<_CoverFullscreenDialog> with TickerProviderStateMixin {
   final _transform = TransformationController();
+  late final AnimationController _zoomAnim = AnimationController(vsync: this, duration: AppMotion.standard);
+  late final AnimationController _dragAnim = AnimationController.unbounded(vsync: this);
+  Animation<Matrix4>? _matrixAnim;
+  Offset _doubleTapPos = Offset.zero;
   bool _controls = true;
+  bool _zoomed = false;
+  double _dragY = 0;
+  int _dragGen = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _transform.addListener(_syncZoom);
+    _dragAnim.addListener(() {
+      if (mounted) setState(() => _dragY = _dragAnim.value);
+    });
+  }
 
   @override
   void dispose() {
+    _transform.removeListener(_syncZoom);
     _transform.dispose();
+    _zoomAnim.dispose();
+    _dragAnim.dispose();
     super.dispose();
   }
 
+  void _syncZoom() {
+    final z = _transform.value.getMaxScaleOnAxis() > 1.05;
+    if (z != _zoomed && mounted) setState(() => _zoomed = z);
+  }
+
   void _toggleZoom() {
+    final Matrix4 target;
     if (_transform.value.getMaxScaleOnAxis() > 1.2) {
-      _transform.value = Matrix4.identity();
+      target = Matrix4.identity();
     } else {
-      _transform.value = Matrix4.diagonal3Values(2.2, 2.2, 1.0);
+      const s = 2.4;
+      final dx = -_doubleTapPos.dx * (s - 1);
+      final dy = -_doubleTapPos.dy * (s - 1);
+      target = Matrix4(s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1, 0, dx, dy, 0, 1);
     }
+    if (AppMotion.reduce(context)) {
+      _transform.value = target;
+      return;
+    }
+    _matrixAnim = Matrix4Tween(begin: _transform.value.clone(), end: target).animate(CurvedAnimation(parent: _zoomAnim, curve: AppMotion.curve))
+      ..addListener(() => _transform.value = _matrixAnim!.value);
+    _zoomAnim.forward(from: 0);
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails d) {
+    if (_zoomed) return;
+    _dragGen++;
+    if (_dragAnim.isAnimating) _dragAnim.stop();
+    setState(() => _dragY = (_dragY + d.delta.dy).clamp(-60.0, 420.0));
+  }
+
+  void _onVerticalDragEnd(DragEndDetails d) {
+    if (_zoomed) return;
+    final vy = d.velocity.pixelsPerSecond.dy;
+    if (_dragY > 110 || (_dragY > 36 && vy > 700)) {
+      Navigator.of(context).maybePop();
+      return;
+    }
+    _springBack(vy);
+  }
+
+  void _springBack([double vy = 0]) {
+    if (_dragY == 0) return;
+    final gen = ++_dragGen;
+    if (AppMotion.reduce(context)) {
+      setState(() => _dragY = 0);
+      return;
+    }
+    _dragAnim.animateWith(SpringSimulation(AppMotion.smoothSpring, _dragY, 0, vy.clamp(-2400.0, 2400.0), tolerance: AppMotion.pixelTolerance)).then((_) {
+      if (mounted && gen == _dragGen && _dragY != 0) setState(() => _dragY = 0);
+    });
   }
 
   @override
-  Widget build(BuildContext context) => Dialog.fullscreen(
-    backgroundColor: Colors.black,
-    child: Stack(
-      fit: StackFit.expand,
-      children: [
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: () => setState(() => _controls = !_controls),
-          onDoubleTap: _toggleZoom,
-          child: InteractiveViewer(
-            transformationController: _transform,
-            minScale: 0.8,
-            maxScale: 5.0,
-            child: Center(child: NetImage(widget.url, fit: BoxFit.contain, full: true)),
+  Widget build(BuildContext context) {
+    final progress = (_dragY.clamp(0.0, 320.0) / 320.0).clamp(0.0, 1.0);
+    final bgAlpha = (1.0 - progress * 0.72).clamp(0.25, 1.0);
+    final dragScale = 1.0 - progress * 0.14;
+    final showControls = _controls && _dragY.abs() < 6;
+    return Material(
+      color: Colors.black.withValues(alpha: bgAlpha),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _controls = !_controls),
+            onDoubleTapDown: (d) => _doubleTapPos = d.localPosition,
+            onDoubleTap: _toggleZoom,
+            onVerticalDragUpdate: _zoomed ? null : _onVerticalDragUpdate,
+            onVerticalDragEnd: _zoomed ? null : _onVerticalDragEnd,
+            onVerticalDragCancel: _zoomed ? null : _springBack,
+            child: Transform.translate(
+              offset: Offset(0, _dragY),
+              child: Transform.scale(
+                scale: dragScale,
+                child: InteractiveViewer(
+                  transformationController: _transform,
+                  panEnabled: _zoomed,
+                  minScale: 1.0,
+                  maxScale: 5.0,
+                  child: Center(child: NetImage(widget.url, fit: BoxFit.contain, full: true)),
+                ),
+              ),
+            ),
           ),
-        ),
-        if (_controls)
           Positioned(
             top: MediaQuery.paddingOf(context).top + 8,
             right: 12,
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!isWebPreview)
-                  IconButton.filledTonal(
-                    tooltip: hz(context, '保存或分享封面'),
-                    style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
-                    icon: const Icon(Icons.ios_share, size: 20),
-                    onPressed: () async {
-                      try {
-                        final filePath = await widget.ref.read(imageStoreProvider).path(widget.url);
-                        await SharePlus.instance.share(ShareParams(files: [XFile(filePath)]));
-                      } catch (e) {
-                        if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出图片失败：$e')));
-                      }
-                    },
-                  ),
-                const SizedBox(width: 8),
-                IconButton.filledTonal(
-                  tooltip: hz(context, '关闭'),
-                  style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
-                  icon: const Icon(Icons.close, size: 20),
-                  onPressed: () => Navigator.pop(context),
+            child: IgnorePointer(
+              ignoring: !showControls,
+              child: AnimatedOpacity(
+                opacity: showControls ? 1.0 : 0.0,
+                duration: AppMotion.dur(context, AppMotion.fast),
+                curve: AppMotion.curve,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (!isWebPreview)
+                      IconButton.filledTonal(
+                        tooltip: hz(context, '保存或分享封面'),
+                        style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
+                        icon: const Icon(Icons.ios_share, size: 20),
+                        onPressed: () async {
+                          try {
+                            final filePath = await widget.ref.read(imageStoreProvider).path(widget.url);
+                            await SharePlus.instance.share(ShareParams(files: [XFile(filePath)]));
+                          } catch (e) {
+                            if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出图片失败：$e')));
+                          }
+                        },
+                      ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      tooltip: hz(context, '关闭'),
+                      style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
+                      icon: const Icon(Icons.close, size: 20),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
-      ],
-    ),
-  );
+        ],
+      ),
+    );
+  }
 }
 
 /// 详情页首屏加载骨架屏：封面色块 + 书名/作者/状态占位 + 主按钮 + 简介与目录灰条。
@@ -821,58 +1019,60 @@ class _NovelSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = Theme.of(context).colorScheme.surfaceContainer;
     Widget bar(double w, {double h = 14, double r = 6}) => Container(width: w, height: h, decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(r)));
-    return contentWidth(
-      ListView(
-        physics: const NeverScrollableScrollPhysics(),
-        padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              bar(110, h: 150, r: 10),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    bar(double.infinity, h: 22),
-                    const SizedBox(height: 10),
-                    bar(140, h: 16),
-                    const SizedBox(height: 12),
-                    bar(180),
-                    const SizedBox(height: 8),
-                    bar(120),
-                  ],
+    return AppSkeletonPulse(
+      child: contentWidth(
+        ListView(
+          physics: const NeverScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                bar(110, h: 150, r: 10),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      bar(double.infinity, h: 22),
+                      const SizedBox(height: 10),
+                      bar(140, h: 16),
+                      const SizedBox(height: 12),
+                      bar(180),
+                      const SizedBox(height: 8),
+                      bar(120),
+                    ],
+                  ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(flex: 3, child: bar(double.infinity, h: 52, r: 16)),
-              const SizedBox(width: 12),
-              Expanded(flex: 2, child: bar(double.infinity, h: 52, r: 16)),
-            ],
-          ),
-          const SizedBox(height: 20),
-          bar(double.infinity, h: 96, r: 14),
-          const SizedBox(height: 20),
-          bar(64, h: 18),
-          const SizedBox(height: 10),
-          bar(double.infinity),
-          const SizedBox(height: 8),
-          bar(double.infinity),
-          const SizedBox(height: 8),
-          bar(200),
-          const SizedBox(height: 24),
-          bar(64, h: 18),
-          const SizedBox(height: 12),
-          for (var i = 0; i < 4; i++) ...[
-            bar(double.infinity, h: 36, r: 8),
+              ],
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(flex: 3, child: bar(double.infinity, h: 52, r: 16)),
+                const SizedBox(width: 12),
+                Expanded(flex: 2, child: bar(double.infinity, h: 52, r: 16)),
+              ],
+            ),
+            const SizedBox(height: 20),
+            bar(double.infinity, h: 96, r: 14),
+            const SizedBox(height: 20),
+            bar(64, h: 18),
+            const SizedBox(height: 10),
+            bar(double.infinity),
             const SizedBox(height: 8),
+            bar(double.infinity),
+            const SizedBox(height: 8),
+            bar(200),
+            const SizedBox(height: 24),
+            bar(64, h: 18),
+            const SizedBox(height: 12),
+            for (var i = 0; i < 4; i++) ...[
+              bar(double.infinity, h: 36, r: 8),
+              const SizedBox(height: 8),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

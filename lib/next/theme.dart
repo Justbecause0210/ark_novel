@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'env.dart';
+import 'motion.dart';
 import 'theme_doodle.dart';
 
 /// "Claude 风格"配色：暖米白底、陶土橙强调色、暖深灰暗色模式。
@@ -226,8 +227,20 @@ ThemeData buildAppTheme(Brightness brightness, [AppPalette palette = const AppPa
     switchTheme: appSwitchTheme(scheme),
     popupMenuTheme: const PopupMenuThemeData(position: PopupMenuPosition.under),
     snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.iOS: ApplePageTransitionsBuilder(),
+        TargetPlatform.android: ApplePageTransitionsBuilder(),
+        TargetPlatform.macOS: ApplePageTransitionsBuilder(),
+        TargetPlatform.windows: ApplePageTransitionsBuilder(),
+        TargetPlatform.linux: ApplePageTransitionsBuilder(),
+      },
+    ),
     dialogTheme: palette.scene ? DialogThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))) : null,
-    bottomSheetTheme: palette.scene ? const BottomSheetThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(12)))) : null,
+    bottomSheetTheme: BottomSheetThemeData(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(palette.scene ? 12 : 20))),
+      showDragHandle: false,
+    ),
     chipTheme: palette.scene ? ChipThemeData(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(r))) : null,
     segmentedButtonTheme: palette.scene ? SegmentedButtonThemeData(style: ButtonStyle(shape: WidgetStatePropertyAll(RoundedRectangleBorder(borderRadius: BorderRadius.circular(r))))) : null,
     extensions: [?characterArtOf(palette)],

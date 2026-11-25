@@ -41,15 +41,16 @@ class _ReaderLoadingView extends StatelessWidget {
           ),
         ),
       ),
-      if (showBack) _ReaderFloatingBackButton(palette: palette, onPressed: onBack),
+      _ReaderFloatingBackButton(palette: palette, visible: showBack, onPressed: onBack),
     ],
   );
 }
 
 class _ReaderFloatingBackButton extends StatelessWidget {
-  const _ReaderFloatingBackButton({required this.palette, required this.onPressed});
+  const _ReaderFloatingBackButton({required this.palette, required this.visible, required this.onPressed});
 
   final ReaderPalette palette;
+  final bool visible;
   final VoidCallback onPressed;
 
   @override
@@ -58,11 +59,17 @@ class _ReaderFloatingBackButton extends StatelessWidget {
     left: 8,
     child: SafeArea(
       bottom: false,
-      child: IconButton(
-        tooltip: hz(context, '返回'),
-        style: IconButton.styleFrom(backgroundColor: palette.fg.withValues(alpha: 0.08), foregroundColor: palette.fg),
-        icon: const Icon(Icons.arrow_back),
-        onPressed: onPressed,
+      child: AppReveal(
+        visible: visible,
+        offset: const Offset(-0.15, 0),
+        beginScale: 0.9,
+        duration: AppMotion.fast,
+        child: IconButton(
+          tooltip: hz(context, '返回'),
+          style: IconButton.styleFrom(backgroundColor: palette.fg.withValues(alpha: 0.08), foregroundColor: palette.fg),
+          icon: const Icon(Icons.arrow_back),
+          onPressed: onPressed,
+        ),
       ),
     ),
   );
@@ -71,6 +78,7 @@ class _ReaderFloatingBackButton extends StatelessWidget {
 /// 受限章节底部提示卡（未启用妙妙小工具或未取到正文时显示）。
 class _ReaderLockedBanner extends StatelessWidget {
   const _ReaderLockedBanner({
+    required this.visible,
     required this.palette,
     required this.accent,
     required this.bottomPad,
@@ -80,6 +88,7 @@ class _ReaderLockedBanner extends StatelessWidget {
     required this.onOpenUnlockSettings,
   });
 
+  final bool visible;
   final ReaderPalette palette;
   final Color accent;
   final double bottomPad;
@@ -93,41 +102,46 @@ class _ReaderLockedBanner extends StatelessWidget {
     left: 16,
     right: 16,
     bottom: bottomPad + 44,
-    child: Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 460),
-        child: Material(
-          color: Color.alphaBlend(palette.fg.withValues(alpha: 0.08), palette.bg),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: BorderSide(color: palette.fg.withValues(alpha: 0.16)),
-          ),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
-            child: Row(
-              children: [
-                Icon(Icons.lock_outline, size: 20, color: palette.fg.withValues(alpha: 0.7)),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    !hasAddon
-                        ? '本章受网站版权限制无法直接读取，可在设置中了解「妙妙小工具」'
-                        : (!unlockEnabled ? '「妙妙小工具」已关闭，开启后可尝试读取受限章节' : '扩展通道暂未取到本章（可能为纯插图章或接口不可用）'),
-                    style: TextStyle(fontSize: 13, height: 1.4, color: palette.fg.withValues(alpha: 0.85)),
+    child: AppReveal(
+      visible: visible,
+      offset: const Offset(0, 0.25),
+      beginScale: 0.96,
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Material(
+            color: Color.alphaBlend(palette.fg.withValues(alpha: 0.08), palette.bg),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: BorderSide(color: palette.fg.withValues(alpha: 0.16)),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+              child: Row(
+                children: [
+                  Icon(Icons.lock_outline, size: 20, color: palette.fg.withValues(alpha: 0.7)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      !hasAddon
+                          ? '本章受网站版权限制无法直接读取，可在设置中了解「妙妙小工具」'
+                          : (!unlockEnabled ? '「妙妙小工具」已关闭，开启后可尝试读取受限章节' : '扩展通道暂未取到本章（可能为纯插图章或接口不可用）'),
+                      style: TextStyle(fontSize: 13, height: 1.4, color: palette.fg.withValues(alpha: 0.85)),
+                    ),
                   ),
-                ),
-                if (hasAddon && unlockEnabled)
+                  if (hasAddon && unlockEnabled)
+                    TextButton(
+                      style: TextButton.styleFrom(foregroundColor: accent, visualDensity: VisualDensity.compact),
+                      onPressed: onRetry,
+                      child: const Text('重试'),
+                    ),
                   TextButton(
                     style: TextButton.styleFrom(foregroundColor: accent, visualDensity: VisualDensity.compact),
-                    onPressed: onRetry,
-                    child: const Text('重试'),
+                    onPressed: onOpenUnlockSettings,
+                    child: Text(!hasAddon ? '去了解' : '去设置'),
                   ),
-                TextButton(
-                  style: TextButton.styleFrom(foregroundColor: accent, visualDensity: VisualDensity.compact),
-                  onPressed: onOpenUnlockSettings,
-                  child: Text(!hasAddon ? '去了解' : '去设置'),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -140,6 +154,7 @@ class _ReaderLockedBanner extends StatelessWidget {
 class _ReaderUndoJumpBanner extends StatelessWidget {
   const _ReaderUndoJumpBanner({
     super.key,
+    required this.visible,
     required this.palette,
     required this.accent,
     required this.bottomPad,
@@ -148,6 +163,7 @@ class _ReaderUndoJumpBanner extends StatelessWidget {
     required this.onDismiss,
   });
 
+  final bool visible;
   final ReaderPalette palette;
   final Color accent;
   final double bottomPad;
@@ -160,35 +176,40 @@ class _ReaderUndoJumpBanner extends StatelessWidget {
     left: 16,
     right: 16,
     bottom: bottomPad + 42,
-    child: Center(
-      child: Material(
-        color: Color.alphaBlend(palette.fg.withValues(alpha: 0.1), palette.bg),
-        elevation: 2,
-        shadowColor: Colors.black26,
-        shape: StadiumBorder(side: BorderSide(color: palette.fg.withValues(alpha: 0.18))),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 4, 6, 4),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.undo_rounded, size: 16, color: accent),
-              const SizedBox(width: 6),
-              Flexible(
-                child: GestureDetector(
-                  onTap: onReturn,
-                  child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: palette.fg)),
+    child: AppReveal(
+      visible: visible,
+      offset: const Offset(0, 0.25),
+      beginScale: 0.94,
+      child: Center(
+        child: Material(
+          color: Color.alphaBlend(palette.fg.withValues(alpha: 0.1), palette.bg),
+          elevation: 2,
+          shadowColor: Colors.black26,
+          shape: StadiumBorder(side: BorderSide(color: palette.fg.withValues(alpha: 0.18))),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 6, 4),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.undo_rounded, size: 16, color: accent),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: GestureDetector(
+                    onTap: onReturn,
+                    child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: palette.fg)),
+                  ),
                 ),
-              ),
-              IconButton(
-                tooltip: hz(context, '关闭'),
-                visualDensity: VisualDensity.compact,
-                iconSize: 16,
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                icon: Icon(Icons.close, color: palette.fg.withValues(alpha: 0.65)),
-                onPressed: onDismiss,
-              ),
-            ],
+                IconButton(
+                  tooltip: hz(context, '关闭'),
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 16,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                  icon: Icon(Icons.close, color: palette.fg.withValues(alpha: 0.65)),
+                  onPressed: onDismiss,
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -286,7 +307,9 @@ Future<({String action, String note, int color})?> _showHighlightEditDialog(Buil
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
+              AnimatedContainer(
+                duration: AppMotion.dur(dialogCtx, AppMotion.fast),
+                curve: AppMotion.curve,
                 width: double.infinity,
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
                 decoration: BoxDecoration(
@@ -302,16 +325,30 @@ Future<({String action, String note, int color})?> _showHighlightEditDialog(Buil
                 children: [
                   for (var i = 0; i < kHighlightColors.length; i++)
                     GestureDetector(
-                      onTap: () => setLocal(() => colorIdx = i),
-                      child: Container(
-                        width: 28,
-                        height: 28,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Color(kHighlightColors[i]),
-                          border: Border.all(color: colorIdx == i ? Theme.of(dialogCtx).colorScheme.onSurface : Colors.transparent, width: 2.2),
+                      onTap: () {
+                        HapticFeedback.selectionClick();
+                        setLocal(() => colorIdx = i);
+                      },
+                      child: AnimatedScale(
+                        scale: colorIdx == i ? 1.12 : 1.0,
+                        duration: AppMotion.dur(dialogCtx, AppMotion.fast),
+                        curve: AppMotion.snappy,
+                        child: AnimatedContainer(
+                          duration: AppMotion.dur(dialogCtx, AppMotion.fast),
+                          curve: AppMotion.curve,
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Color(kHighlightColors[i]),
+                            border: Border.all(color: colorIdx == i ? Theme.of(dialogCtx).colorScheme.onSurface : Colors.transparent, width: 2.2),
+                          ),
+                          child: AppIconSwap(
+                            child: colorIdx == i
+                                ? const Icon(Icons.check, key: ValueKey('chk'), size: 15, color: Colors.white)
+                                : const SizedBox.shrink(key: ValueKey('none')),
+                          ),
                         ),
-                        child: colorIdx == i ? const Icon(Icons.check, size: 15, color: Colors.white) : null,
                       ),
                     ),
                 ],

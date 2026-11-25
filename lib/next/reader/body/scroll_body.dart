@@ -132,7 +132,12 @@ class _ScrollBodyState extends State<ScrollBody> {
     if (y == null) return;
     final view = _controller.position;
     if (y < view.pixels || y > view.pixels + view.viewportDimension - 120) {
-      _controller.animateTo((y - 80).clamp(0.0, view.maxScrollExtent), duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
+      final to = (y - 80).clamp(0.0, view.maxScrollExtent);
+      if (AppMotion.reduce(context)) {
+        _controller.jumpTo(to);
+      } else {
+        _controller.animateTo(to, duration: AppMotion.standard, curve: AppMotion.decelerate);
+      }
     }
   }
 
@@ -199,7 +204,12 @@ class _ScrollBodyState extends State<ScrollBody> {
   void _nudge(double dy) {
     if (!_controller.hasClients) return;
     final p = _controller.position;
-    _controller.animateTo((p.pixels + dy).clamp(0.0, p.maxScrollExtent), duration: const Duration(milliseconds: 160), curve: Curves.easeOut);
+    final to = (p.pixels + dy).clamp(0.0, p.maxScrollExtent);
+    if (AppMotion.reduce(context)) {
+      _controller.jumpTo(to);
+    } else {
+      _controller.animateTo(to, duration: AppMotion.fast, curve: AppMotion.decelerate);
+    }
   }
 
   /// 滚一屏（留一点重叠）；已经到底再往后就去下一章。
@@ -284,9 +294,13 @@ class _ScrollBodyState extends State<ScrollBody> {
     final c = widget.chapter;
     _syncParaKeys();
     final hasText = c.text.trim().isNotEmpty;
-    final width = MediaQuery.sizeOf(context).width - widget.margin * 2;
+    final mediaSize = MediaQuery.sizeOf(context);
+    final width = mediaSize.width - widget.margin * 2;
+    final imgDecodeSize = Size(math.max(1.0, width), math.max(1.0, mediaSize.height));
     final head = hasText ? headingHeight(widget.title, widget.style, width) : 0.0;
-    final padTop = MediaQuery.viewPaddingOf(context).top + (widget.showHeader ? 36 : 24);
+    final viewPadding = MediaQuery.viewPaddingOf(context);
+    final padTop = viewPadding.top + (widget.showHeader ? 36 : 24);
+    final bottomPad = viewPadding.bottom + 48; // 底部留出页脚的高度，别挡字
     _padTop = padTop + head;
     return NotificationListener<ScrollNotification>(
       onNotification: (n) {
@@ -335,28 +349,51 @@ class _ScrollBodyState extends State<ScrollBody> {
           onPull: widget.onPullDown,
           marked: widget.marked,
           color: widget.style.color ?? Colors.grey,
-          top: MediaQuery.viewPaddingOf(context).top,
+          top: viewPadding.top,
           child: widget.wrap(
-          SingleChildScrollView(
-            controller: _controller,
-            padding: EdgeInsets.fromLTRB(widget.margin, padTop, widget.margin, MediaQuery.viewPaddingOf(context).bottom + 48), // 底部留出页脚的高度，别挡字
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (head > 0) chapterHeading(widget.title, widget.style, width, height: head, accent: widget.headingAccent),
-                if (widget.highlight != null && widget.spanOfHighlight != null)
-                  ValueListenableBuilder<(int, int)?>(
-                    valueListenable: widget.highlight!,
-                    builder: (_, hl, _) => _buildBodyText(c, hl),
-                  )
-                else
-                  _buildBodyText(c, null),
-                for (var idx = 0; idx < c.images.length; idx++) Padding(padding: const EdgeInsets.only(top: 16), child: _readerImageWidget(c.images[idx], widget.style.color, gallery: c.images, index: idx)),
-                if (widget.onNext != null) Padding(padding: const EdgeInsets.only(top: 32), child: OutlinedButton(onPressed: widget.onNext, child: Text(widget.nextLabel))),
+            CustomScrollView(
+              controller: _controller,
+              slivers: [
+                SliverPadding(
+                  padding: EdgeInsets.fromLTRB(widget.margin, padTop, widget.margin, c.images.isEmpty && widget.onNext == null ? bottomPad : 0),
+                  sliver: SliverToBoxAdapter(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (head > 0) chapterHeading(widget.title, widget.style, width, height: head, accent: widget.headingAccent),
+                        if (widget.highlight != null && widget.spanOfHighlight != null)
+                          ValueListenableBuilder<(int, int)?>(
+                            valueListenable: widget.highlight!,
+                            builder: (_, hl, _) => _buildBodyText(c, hl),
+                          )
+                        else
+                          _buildBodyText(c, null),
+                      ],
+                    ),
+                  ),
+                ),
+                if (c.images.isNotEmpty)
+                  SliverPadding(
+                    padding: EdgeInsets.fromLTRB(widget.margin, 0, widget.margin, widget.onNext == null ? bottomPad : 0),
+                    sliver: SliverList.builder(
+                      itemCount: c.images.length,
+                      itemBuilder: (context, idx) => Padding(
+                        padding: const EdgeInsets.only(top: 16),
+                        child: _readerImageWidget(c.images[idx], widget.style.color, gallery: c.images, index: idx, decodeSize: imgDecodeSize),
+                      ),
+                    ),
+                  ),
+                if (widget.onNext != null)
+                  SliverPadding(
+                    padding: EdgeInsets.fromLTRB(widget.margin, 32, widget.margin, bottomPad),
+                    sliver: SliverToBoxAdapter(
+                      child: OutlinedButton(onPressed: widget.onNext, child: Text(widget.nextLabel)),
+                    ),
+                  ),
               ],
             ),
           ),
-        ),
         ),
       ),
     );
@@ -383,8 +420,8 @@ class PullBookmark extends StatefulWidget {
 class _PullBookmarkState extends State<PullBookmark> with SingleTickerProviderStateMixin {
   static const _threshold = 72.0, _max = 120.0;
   double _pull = 0; // 手指拉下的距离（原始值）
-  late final _back = AnimationController(vsync: this, duration: const Duration(milliseconds: 380))..addListener(() => setState(() {}));
-  double _from = 0; // 松手时露出的高度，回弹从这里开始
+  int _springGen = 0;
+  late final _back = AnimationController.unbounded(vsync: this)..addListener(() => setState(() {}));
 
   @override
   void dispose() {
@@ -392,13 +429,14 @@ class _PullBookmarkState extends State<PullBookmark> with SingleTickerProviderSt
     super.dispose();
   }
 
-  /// 页面实际下移的距离：越往下越拉不动
+  /// 页面实际下移的距离：越往下越拉不动；松手后由临界阻尼弹簧无过冲回位
   double get _shown {
-    if (_back.isAnimating) return _from * (1 - Curves.easeOutBack.transform(_back.value));
+    if (_back.isAnimating) return math.max(0.0, _back.value);
     return _pull <= 0 ? 0 : _max * (1 - math.exp(-_pull / _max));
   }
 
   void _update(double v) {
+    _springGen++;
     if (_back.isAnimating) _back.stop();
     final was = _pull >= _threshold;
     setState(() => _pull = v.clamp(0, _max * 3));
@@ -408,9 +446,17 @@ class _PullBookmarkState extends State<PullBookmark> with SingleTickerProviderSt
   void _release() {
     if (_pull <= 0) return;
     if (_pull >= _threshold) widget.onPull?.call();
-    _from = _shown;
+    final start = _shown;
     _pull = 0;
-    _back.forward(from: 0);
+    final gen = ++_springGen;
+    if (AppMotion.reduce(context) || start <= 0.5) {
+      _back.value = 0;
+      setState(() {});
+      return;
+    }
+    _back.animateWith(SpringSimulation(AppMotion.smoothSpring, start, 0, 0, tolerance: AppMotion.pixelTolerance)).then((_) {
+      if (mounted && gen == _springGen && _back.value != 0) _back.value = 0;
+    });
   }
 
   bool _onScroll(ScrollNotification n) {
@@ -462,16 +508,22 @@ class _PullBookmarkState extends State<PullBookmark> with SingleTickerProviderSt
                   children: [
                     Transform.scale(
                       scale: 0.8 + 0.25 * progress,
-                      child: Icon(
-                        ready ? (marked ? Icons.bookmark_remove : Icons.bookmark_added) : (marked ? Icons.bookmark : Icons.bookmark_add_outlined),
-                        size: 26,
-                        color: ready ? accent : widget.color.withValues(alpha: 0.55),
+                      child: AppIconSwap(
+                        duration: AppMotion.instant,
+                        child: Icon(
+                          ready ? (marked ? Icons.bookmark_remove : Icons.bookmark_added) : (marked ? Icons.bookmark : Icons.bookmark_add_outlined),
+                          key: ValueKey((ready, marked)),
+                          size: 26,
+                          color: ready ? accent : widget.color.withValues(alpha: 0.55),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 8),
-                    Text(
-                      ready ? (marked ? '松手取消书签' : '松手添加书签') : (marked ? '下拉取消书签' : '下拉添加书签'),
-                      style: TextStyle(fontSize: 13, color: ready ? accent : widget.color.withValues(alpha: 0.55), fontWeight: ready ? FontWeight.w600 : null),
+                    AnimatedDefaultTextStyle(
+                      duration: AppMotion.dur(context, AppMotion.instant),
+                      curve: AppMotion.curve,
+                      style: TextStyle(fontSize: 13, color: ready ? accent : widget.color.withValues(alpha: 0.55), fontWeight: ready ? FontWeight.w600 : FontWeight.w400),
+                      child: Text(ready ? (marked ? '松手取消书签' : '松手添加书签') : (marked ? '下拉取消书签' : '下拉添加书签')),
                     ),
                   ],
                 ),

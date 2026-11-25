@@ -701,7 +701,7 @@ class BookCharacters {
   static Future<int> normalizeExisting(String aid) async {
     final list = List<BookCharacter>.of(of(aid));
     if (list.isEmpty) return 0;
-    final bgmCached = BangumiCovers.savedCharacters(aid) ?? const <BgmCharacter>[];
+    final bgmCached = await BangumiCovers.loadSavedCharacters(aid) ?? const <BgmCharacter>[];
     final spacedByBgmId = {for (final b in bgmCached) if (b.spacedName.isNotEmpty) b.id: b.spacedName};
 
     final batch = [

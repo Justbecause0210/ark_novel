@@ -230,4 +230,68 @@ void main() {
       handle.dispose();
     }
   });
+
+  testWidgets('ShelfSpineView：仅 3 本书宽屏停在中间时点击左右两侧书脊均可准确切换，出血封面无浅白底衬', (tester) async {
+    tester.view.physicalSize = const Size(1080, 720);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final three = books.take(3).toList();
+    final log = <String>[];
+    String? focused;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 1080,
+              height: 720,
+              child: ShelfSpineView(
+                books: three,
+                initialAid: '2',
+                onFocusChanged: (aid) => focused = aid,
+                selected: const {},
+                heroEnabled: true,
+                coverOf: (b) => 'https://example.com/${b.aid}.jpg',
+                badgeOf: (_) => null,
+                subtitleOf: (b) => 'sub-${b.aid}',
+                actionOf: (_) => (label: '继续读', cid: '101'),
+                onOpen: (b) => log.add('open ${b.aid}'),
+                onRead: (_, _) {},
+                onToggleSelect: (b) => log.add('toggle ${b.aid}'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // 封面与书脊出血图的 CoverImage 均显式指定书脊底色，不再落回浅白 surfaceContainer
+    for (final c in tester.widgetList<CoverImage>(find.byType(CoverImage))) {
+      expect(c.backgroundColor, isNotNull);
+    }
+
+    final stage = tester.getRect(find.byKey(const ValueKey('shelf-spine-stage')));
+    final m = ShelfSpineLayout.metrics(1080, 720 - ShelfSpineLayout.infoHeight(1.0));
+
+    // 点左侧第 1 本书脊（位于 PageView 窄页范围之外的 padEnds 区）-> 切到第 1 本
+    final leftSpineX = stage.center.dx + ShelfSpineLayout.centerX(-1, m.ws, m.d, m.gap);
+    await tester.tapAt(Offset(leftSpineX, stage.center.dy));
+    await tester.pumpAndSettle();
+    expect(focused, '1');
+    expect(find.text('狼与香辛料'), findsOneWidget);
+
+    // 停在第 1 本时点封面左外侧边缘也能正常打开，不会落空
+    await tester.tapAt(Offset(stage.center.dx - m.d * 0.4, stage.center.dy));
+    expect(log, ['open 1']);
+
+    // 点右侧最外侧第 3 本书脊（r = +2）-> 直接切到第 3 本
+    final thirdSpineX = stage.center.dx + ShelfSpineLayout.centerX(2, m.ws, m.d, m.gap);
+    await tester.tapAt(Offset(thirdSpineX, stage.center.dy));
+    await tester.pumpAndSettle();
+    expect(focused, '3');
+  });
 }

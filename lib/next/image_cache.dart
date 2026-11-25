@@ -30,10 +30,10 @@ class ImageStore {
   }
 
   final Ref _ref;
-  // 按字节算：封面几十 KB、插图几百 KB；移动端留 48 MB 避免叠加解码缓存与超分缓冲吃紧，桌面留 64 MB
-  static final int _memBytes = (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) ? (48 << 20) : (64 << 20);
-  // 书架封面缩略图独立 16 MB 内存 LRU（单张 ~10-25 KB，足够常驻上千张封面，避免与阅读器大图互踢）
-  static const _thumbMemBytes = 16 << 20;
+  // 按字节算：磁盘已有 imgcache/ 秒读，移动端留 8 MB、桌面留 12 MB 避免叠加解码缓存吃紧
+  static final int _memBytes = (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) ? (8 << 20) : (12 << 20);
+  // 书架封面缩略图独立 6 MB 内存 LRU（单张 ~10-20 KB，足够常驻约 400 张封面，避免与阅读器大图互踢）
+  static const _thumbMemBytes = 6 << 20;
   static const _thumbMaxWidth = 360;
   static const _thumbMaxHeight = 640;
 
@@ -63,6 +63,7 @@ class ImageStore {
   final _highWaiting = <String, Completer<void>>{}; // Map 保持插入顺序，尾部为最新进入视口的等待者（LIFO）
   final _lowWaiting = <String, Completer<void>>{};
   final _pinned = <String>{}; // 预取的（[prefetch]），页面一闪而过时不因单控件 dispose 取消；可用 [cancelPrefetch] 批量取消
+  final _disallowChallenge = <String>{}; // 纯后台预取请求禁止拉起无头 WebView 过盾；一旦有前景订阅接入则解除限制
   Directory? _dir;
   Directory? _thumbDirCache;
 
@@ -242,11 +243,19 @@ class ImageStore {
     if (hit != null) return Future.value(hit);
     final running = _inflight[url];
     if (running != null) {
-      if (!fromPrefetch) _inflightRefs[url] = (_inflightRefs[url] ?? 0) + 1;
+      if (!fromPrefetch) {
+        _disallowChallenge.remove(url);
+        _inflightRefs[url] = (_inflightRefs[url] ?? 0) + 1;
+      }
       if (!lowPriority) _bump(url);
       return running;
     }
-    if (!fromPrefetch) _inflightRefs[url] = 1;
+    if (fromPrefetch) {
+      _disallowChallenge.add(url);
+    } else {
+      _disallowChallenge.remove(url);
+      _inflightRefs[url] = 1;
+    }
     late final Future<Uint8List> f;
     final token = CancelToken();
     _cancelTokens[url] = token;
@@ -256,6 +265,7 @@ class ImageStore {
         _inflight.remove(url);
         _inflightRefs.remove(url);
         _cancelTokens.remove(url);
+        _disallowChallenge.remove(url);
       }
     });
     return _inflight[url] = f;
@@ -480,7 +490,7 @@ class ImageStore {
         _release();
       }
       if (data == null) {
-        final challenge = _ref.read(imageChallengeProvider);
+        final challenge = _disallowChallenge.contains(url) ? null : _ref.read(imageChallengeProvider);
         if (challenge == null) throw (altErr ?? primaryErr)!;
         if (_isChallengeError(primaryErr!)) {
           try {
@@ -657,6 +667,7 @@ class ImageStore {
   }
 
   int _srPauseCount = 0;
+  int _readerModeCount = 0;
 
   /// 是否已暂停后台封面超分队列（如用户正在阅读页内阅读时）。
   bool get isSrPaused => _srPauseCount > 0;
@@ -670,6 +681,21 @@ class ImageStore {
   void resumeSr() {
     if (_srPauseCount > 0) _srPauseCount--;
     if (_srPauseCount == 0 && _srQueue.isNotEmpty) _pumpSr().ignore();
+  }
+
+  /// 进入阅读页时调用（引用计数）：暂停后台封面超分，并将原图与缩略图内存缓存收缩至各不超过 2 MB（保留最新封面与插图，清理旧积压）。
+  void enterReaderMode() {
+    if (++_readerModeCount == 1) {
+      pauseSr();
+      _trimMemTo(2 << 20, 2 << 20);
+    }
+  }
+
+  /// 退出阅读页时调用（引用计数）：全部阅读页退出后恢复后台封面超分队列。
+  void exitReaderMode() {
+    if (_readerModeCount > 0 && --_readerModeCount == 0) {
+      resumeSr();
+    }
   }
 
   /// 一次放大一张（手机上一张一两秒，几张一起跑会卡）
@@ -811,15 +837,27 @@ class ImageStore {
     _recentNetworkHits.clear();
   }
 
-  /// 响应系统内存压力告警：清空原图字节缓存并收缩缩略图缓存至上限的 1/4，快速降低常驻 RSS。
-  void onMemoryPressure() {
-    _mem.clear();
-    _memUsed = 0;
-    final targetThumb = _thumbMemBytes ~/ 4;
-    while (_thumbMemUsed > targetThumb && _thumbMem.isNotEmpty) {
-      _thumbMemUsed -= _thumbMem.remove(_thumbMem.keys.first)!.length;
+  void _trimMemTo(int maxMem, int maxThumb) {
+    if (maxMem <= 0) {
+      _mem.clear();
+      _memUsed = 0;
+    } else {
+      while (_memUsed > maxMem && _mem.isNotEmpty) {
+        _memUsed -= _mem.remove(_mem.keys.first)!.length;
+      }
+    }
+    if (maxThumb <= 0) {
+      _thumbMem.clear();
+      _thumbMemUsed = 0;
+    } else {
+      while (_thumbMemUsed > maxThumb && _thumbMem.isNotEmpty) {
+        _thumbMemUsed -= _thumbMem.remove(_thumbMem.keys.first)!.length;
+      }
     }
   }
+
+  /// 响应系统内存压力告警：清空原图字节缓存并收缩缩略图缓存至上限的 1/4，快速降低常驻 RSS。
+  void onMemoryPressure() => _trimMemTo(0, _thumbMemBytes ~/ 4);
 
   /// 磁盘缓存超过 [maxBytes] 时按修改时间（最近一次用到的时间，见 [_touch]）从旧到新删，删到上限的 80%。
   /// 不删：书架上显示的封面（网站小封面和第一卷的卷封面）、手动挑过的卷封面、离线缓存的插图，以及这些保留封面的缩略图与超分图。
