@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/services.dart' show HapticFeedback;
 
 import 'env.dart';
+import 'motion.dart';
 import 'theme_doodle.dart';
 import 'text.dart';
 
@@ -215,7 +217,10 @@ class XChoice<T> extends StatelessWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(options[value] ?? '', style: TextStyle(fontSize: 15, color: scheme.onSurfaceVariant)),
+          AppCrossfade(
+            alignment: Alignment.centerRight,
+            child: Text(options[value] ?? '', key: ValueKey(value), style: TextStyle(fontSize: 15, color: scheme.onSurfaceVariant)),
+          ),
           Icon(Icons.chevron_right, size: 20, color: scheme.onSurfaceVariant),
         ],
       ),
@@ -281,7 +286,10 @@ class XSlider extends StatelessWidget {
           children: [
             SizedBox(width: 72, child: Text(title, style: TextStyle(fontSize: 15.5, color: scheme.onSurface))),
             Expanded(child: SliderTheme(data: SliderTheme.of(context).copyWith(padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10), tickMarkShape: SliderTickMarkShape.noTickMark), child: slider)),
-            SizedBox(width: 44, child: Text(label, textAlign: TextAlign.end, style: TextStyle(fontSize: 15, color: scheme.onSurfaceVariant))),
+            SizedBox(
+              width: 44,
+              child: Text(label, textAlign: TextAlign.end, style: TextStyle(fontSize: 15, color: scheme.onSurfaceVariant, fontFeatures: const [FontFeature.tabularFigures()])),
+            ),
           ],
         ),
       );
@@ -290,7 +298,12 @@ class XSlider extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(20, 10, 20, 4),
       child: Column(
         children: [
-          Row(children: [Expanded(child: Text(title, style: TextStyle(fontSize: 15.5, color: scheme.onSurface))), Text(label, style: TextStyle(fontSize: 15, color: scheme.onSurfaceVariant))]),
+          Row(
+            children: [
+              Expanded(child: Text(title, style: TextStyle(fontSize: 15.5, color: scheme.onSurface))),
+              Text(label, style: TextStyle(fontSize: 15, color: scheme.onSurfaceVariant, fontFeatures: const [FontFeature.tabularFigures()])),
+            ],
+          ),
           // 左右只留出半个圆点的宽度（拖到两头时圆点不出界），去掉刻度点
           SliderTheme(
             data: SliderTheme.of(context).copyWith(padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 10), tickMarkShape: SliderTickMarkShape.noTickMark),
@@ -370,14 +383,20 @@ class XChips<T> extends StatelessWidget {
             runSpacing: 8,
             children: [
               for (final e in options.entries)
-                ChoiceChip(
-                  label: Text(e.value),
-                  selected: e.key == value,
-                  showCheckmark: false,
-                  selectedColor: scheme.primary.withValues(alpha: 0.14),
-                  labelStyle: TextStyle(color: e.key == value ? scheme.primary : scheme.onSurface, fontWeight: e.key == value ? FontWeight.w600 : null),
-                  side: BorderSide(color: e.key == value ? scheme.primary.withValues(alpha: 0.5) : scheme.outline),
-                  onSelected: (_) => onChanged(e.key),
+                AppPressScale(
+                  scale: 0.96,
+                  child: ChoiceChip(
+                    label: Text(e.value),
+                    selected: e.key == value,
+                    showCheckmark: false,
+                    selectedColor: scheme.primary.withValues(alpha: 0.14),
+                    labelStyle: TextStyle(color: e.key == value ? scheme.primary : scheme.onSurface, fontWeight: e.key == value ? FontWeight.w600 : null),
+                    side: BorderSide(color: e.key == value ? scheme.primary.withValues(alpha: 0.5) : scheme.outline),
+                    onSelected: (_) {
+                      if (e.key != value) HapticFeedback.selectionClick();
+                      onChanged(e.key);
+                    },
+                  ),
                 ),
               ...extra,
             ],

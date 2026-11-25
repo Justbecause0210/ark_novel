@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../avatar.dart';
 import '../env.dart';
 import '../incognito.dart';
+import '../motion.dart';
 import '../routes.dart';
 import '../session.dart';
 import '../settings.dart';
@@ -129,7 +130,10 @@ class ProfilePage extends ConsumerWidget {
         : Semantics(
             button: true,
             label: hz(context, user == null ? '去登录' : '更换头像'),
-            child: MouseRegion(cursor: SystemMouseCursors.click, child: GestureDetector(onTap: onAvatarTap, child: avatar)),
+            child: AppPressScale(
+              scale: 0.94,
+              child: MouseRegion(cursor: SystemMouseCursors.click, child: GestureDetector(onTap: onAvatarTap, child: avatar)),
+            ),
           );
     final info = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -248,7 +252,7 @@ class _StatsLine extends ConsumerWidget {
             onTap: () => openLibraryPage(context, Routes.stats),
             child: Text.rich(
               TextSpan(
-                style: const TextStyle(fontSize: 14),
+                style: const TextStyle(fontSize: 14, fontFeatures: [FontFeature.tabularFigures()]),
                 children: [
                   item(ReadingStats.formatDuration(today, compact: true), '今天'),
                   item(ReadingStats.formatDuration(total, compact: true), '累计'),

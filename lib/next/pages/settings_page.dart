@@ -19,6 +19,7 @@ import '../env.dart';
 import '../image_cache.dart';
 import '../incognito.dart';
 import '../library.dart';
+import '../motion.dart';
 import '../reader/reader_body.dart' show TapZoneDiagram;
 import '../reader/reader_chrome.dart' show ReaderChromeField;
 import '../routes.dart';
@@ -173,16 +174,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         decoration: InputDecoration(
           hint: Text('搜索设置', maxLines: 1, overflow: TextOverflow.ellipsis),
           prefixIcon: const Icon(Icons.search, size: 20),
-          suffixIcon: _q.isEmpty
-              ? null
-              : IconButton(
-                  tooltip: hz(context, '清空搜索'),
-                  icon: const Icon(Icons.clear, size: 18),
-                  onPressed: () {
-                    _search.clear();
-                    setState(() => _q = '');
-                  },
-                ),
+          suffixIcon: AppReveal(
+            visible: _q.isNotEmpty,
+            offset: Offset.zero,
+            beginScale: 0.72,
+            duration: AppMotion.fast,
+            reverseDuration: AppMotion.instant,
+            child: IconButton(
+              tooltip: hz(context, '清空搜索'),
+              icon: const Icon(Icons.clear, size: 18),
+              onPressed: () {
+                _search.clear();
+                setState(() => _q = '');
+              },
+            ),
+          ),
           filled: true,
           fillColor: scheme.onSurface.withValues(alpha: 0.055),
           isDense: true,
@@ -257,14 +263,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   children: [
                     Padding(
                       padding: const EdgeInsets.fromLTRB(28, 14, 24, 8),
-                      child: Text(_selected.title, style: theme.textTheme.titleLarge?.copyWith(fontSize: 18, fontWeight: FontWeight.w600)),
+                      child: AppCrossfade(
+                        alignment: Alignment.centerLeft,
+                        duration: AppMotion.fast,
+                        child: Text(_selected.title, key: ValueKey(_selected), style: theme.textTheme.titleLarge?.copyWith(fontSize: 18, fontWeight: FontWeight.w600)),
+                      ),
                     ),
                     Expanded(
-                      child: SettingsSectionPage(
-                        key: ValueKey('settings-pane-${_selected.name}-${_highlight ?? ''}-$_highlightSeq'),
-                        section: _selected,
-                        highlight: _highlight,
-                        embedded: true,
+                      child: AppCrossfade(
+                        fill: true,
+                        duration: AppMotion.fast,
+                        child: SettingsSectionPage(
+                          key: ValueKey('settings-pane-${_selected.name}-${_highlight ?? ''}-$_highlightSeq'),
+                          section: _selected,
+                          highlight: _highlight,
+                          embedded: true,
+                        ),
                       ),
                     ),
                   ],
@@ -316,7 +330,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   }
 }
 
-class _SettingsNavTile extends StatelessWidget {
+class _SettingsNavTile extends StatefulWidget {
   const _SettingsNavTile({required this.icon, required this.title, this.subtitle, required this.selected, required this.onTap});
 
   final IconData icon;
@@ -326,40 +340,58 @@ class _SettingsNavTile extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_SettingsNavTile> createState() => _SettingsNavTileState();
+}
+
+class _SettingsNavTileState extends State<_SettingsNavTile> {
+  bool _hovered = false;
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final dark = theme.brightness == Brightness.dark;
+    final bg = widget.selected
+        ? scheme.primary.withValues(alpha: dark ? 0.18 : 0.10)
+        : (_hovered ? scheme.onSurface.withValues(alpha: dark ? 0.06 : 0.045) : Colors.transparent);
+    final dur = AppMotion.dur(context, AppMotion.fast);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 1.5),
-      child: Material(
-        color: selected ? scheme.primary.withValues(alpha: dark ? 0.18 : 0.10) : Colors.transparent,
-        borderRadius: BorderRadius.circular(10),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: Row(
-              children: [
-                Icon(icon, size: 19, color: selected ? scheme.primary : scheme.onSurfaceVariant),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 14, fontWeight: selected ? FontWeight.w600 : FontWeight.w500, color: selected ? scheme.primary : scheme.onSurface),
-                      ),
-                      if (subtitle != null)
-                        Text(subtitle!, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant)),
-                    ],
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: AppPressScale(
+          scale: 0.975,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onTap,
+            child: AnimatedContainer(
+              duration: dur,
+              curve: AppMotion.curve,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(10)),
+              child: Row(
+                children: [
+                  Icon(widget.icon, size: 19, color: widget.selected ? scheme.primary : scheme.onSurfaceVariant),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AnimatedDefaultTextStyle(
+                          duration: dur,
+                          curve: AppMotion.curve,
+                          style: TextStyle(fontSize: 14, fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500, color: widget.selected ? scheme.primary : scheme.onSurface),
+                          child: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                        ),
+                        if (widget.subtitle != null)
+                          Text(widget.subtitle!, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: scheme.onSurfaceVariant)),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -398,7 +430,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
         if (!mounted) return;
         final ctx = _hlKey.currentContext;
         if (ctx != null) {
-          Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 300), curve: Curves.easeOutCubic, alignment: 0.25);
+          Scrollable.ensureVisible(ctx, duration: AppMotion.dur(context, AppMotion.standard), curve: AppMotion.curve, alignment: 0.25);
         }
         _hlTimer = Timer(const Duration(milliseconds: 1800), () {
           if (mounted) setState(() => _highlightOn = false);
@@ -418,8 +450,8 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
     final scheme = Theme.of(context).colorScheme;
     return AnimatedContainer(
       key: _hlKey,
-      duration: const Duration(milliseconds: 450),
-      curve: Curves.easeOut,
+      duration: AppMotion.dur(context, AppMotion.expressive),
+      curve: AppMotion.curve,
       decoration: BoxDecoration(
         color: _highlightOn ? scheme.primary.withValues(alpha: 0.14) : Colors.transparent,
         borderRadius: BorderRadius.circular(10),
@@ -555,21 +587,36 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
                   selected: palette == i,
                   label: p.name,
                   child: GestureDetector(
-                    onTap: () => ref.read(paletteProvider.notifier).set(i),
+                    onTap: () {
+                      HapticFeedback.selectionClick();
+                      ref.read(paletteProvider.notifier).set(i);
+                    },
                     child: SizedBox(
                       width: 60,
                       child: Column(
                         children: [
-                          Container(
-                            width: 40,
-                            height: 40,
-                            padding: const EdgeInsets.all(3),
-                            decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: palette == i ? scheme.onSurface : Colors.transparent, width: 2)),
-                            // 插画主题的色点直接是一小块插画
-                            child: p.scene ? const ClipOval(child: RuinsScene(animate: false, horizon: 0.8)) : DecoratedBox(decoration: BoxDecoration(shape: BoxShape.circle, color: p.accentLight)),
+                          AnimatedScale(
+                            scale: palette == i ? 1.08 : 1.0,
+                            duration: AppMotion.dur(context, AppMotion.fast),
+                            curve: AppMotion.snappy,
+                            child: AnimatedContainer(
+                              duration: AppMotion.dur(context, AppMotion.fast),
+                              curve: AppMotion.curve,
+                              width: 40,
+                              height: 40,
+                              padding: const EdgeInsets.all(3),
+                              decoration: BoxDecoration(shape: BoxShape.circle, border: Border.all(color: palette == i ? scheme.onSurface : Colors.transparent, width: 2)),
+                              // 插画主题的色点直接是一小块插画
+                              child: p.scene ? const ClipOval(child: RuinsScene(animate: false, horizon: 0.8)) : DecoratedBox(decoration: BoxDecoration(shape: BoxShape.circle, color: p.accentLight)),
+                            ),
                           ),
                           const SizedBox(height: 4),
-                          Text(p.name.split('·').first, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center, style: TextStyle(fontSize: 12, fontWeight: palette == i ? FontWeight.w700 : null, color: palette == i ? scheme.onSurface : scheme.onSurfaceVariant)),
+                          AnimatedDefaultTextStyle(
+                            duration: AppMotion.dur(context, AppMotion.fast),
+                            curve: AppMotion.curve,
+                            style: TextStyle(fontSize: 12, fontWeight: palette == i ? FontWeight.w700 : FontWeight.w400, color: palette == i ? scheme.onSurface : scheme.onSurfaceVariant),
+                            child: Text(p.name.split('·').first, maxLines: 1, overflow: TextOverflow.ellipsis, textAlign: TextAlign.center),
+                          ),
                         ],
                       ),
                     ),
@@ -579,7 +626,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
           ),
         ),
       ),
-      if (appPalettes[palette].scene) _hl('插画动效', _switch('插画动效', P.sceneMotion, true)),
+      AppCollapse(visible: appPalettes[palette].scene, child: _hl('插画动效', _switch('插画动效', P.sceneMotion, true))),
       const XDivider(),
       const XGroupTitle('语言'),
       _hl('界面繁体', XSwitch(title: '界面繁体', value: _prefs.get(P.uiHant, false), onChanged: (v) => _prefs.set(P.uiHant, v))),
@@ -611,22 +658,30 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
     return [
       const XGroupTitle('翻页'),
       _hl('翻页方式', XChoice<int>(title: '翻页方式', value: prefs.mode, options: const {0: '上下滚动', 1: '左右滑动', 2: '仿真翻页', 3: '覆盖翻页'}, onChanged: (v) => set(prefs.copyWith(mode: v)))),
-      if (prefs.mode == 1) XSwitch(title: '翻页动画', value: prefs.pageAnim, onChanged: (v) => set(prefs.copyWith(pageAnim: v))),
+      AppCollapse(visible: prefs.mode == 1, child: XSwitch(title: '翻页动画', value: prefs.pageAnim, onChanged: (v) => set(prefs.copyWith(pageAnim: v)))),
       XSwitch(title: '宽屏双页', subtitle: '宽屏时并排两页', value: prefs.dual, onChanged: (v) => set(prefs.copyWith(dual: v))),
       _hl('点击区域', XChoice<int>(title: '点击区域', value: prefs.tapZone, options: tapZones, onChanged: (v) => set(prefs.copyWith(tapZone: v)))),
-      if (prefs.tapZone != 4) XChoice<int>(title: '反转点击区域', value: prefs.tapInvert, options: const {0: '不反转', 1: '左右反转', 2: '上下反转', 3: '全部反转'}, onChanged: (v) => set(prefs.copyWith(tapInvert: v))),
-      if (prefs.mode != 0) TapZoneDiagram(zone: prefs.tapZone, invert: prefs.tapInvert),
+      AppCollapse(visible: prefs.tapZone != 4, child: XChoice<int>(title: '反转点击区域', value: prefs.tapInvert, options: const {0: '不反转', 1: '左右反转', 2: '上下反转', 3: '全部反转'}, onChanged: (v) => set(prefs.copyWith(tapInvert: v)))),
+      AppCollapse(visible: prefs.mode != 0, child: TapZoneDiagram(zone: prefs.tapZone, invert: prefs.tapInvert)),
       if (android) ...[
         _hl('音量键翻页', XSwitch(title: '音量键翻页', subtitle: prefs.volumeInvert ? '+ 下一页，− 上一页' : '− 下一页，+ 上一页', value: prefs.volumeKeys, onChanged: (v) => set(prefs.copyWith(volumeKeys: v)))),
-        if (prefs.volumeKeys) XSwitch(title: '反转音量键', value: prefs.volumeInvert, onChanged: (v) => set(prefs.copyWith(volumeInvert: v))),
+        AppCollapse(visible: prefs.volumeKeys, child: XSwitch(title: '反转音量键', value: prefs.volumeInvert, onChanged: (v) => set(prefs.copyWith(volumeInvert: v)))),
       ],
       const XDivider(),
       const XGroupTitle('章节'),
       _hl('自动跳过已读章节', XSwitch(title: '自动跳过已读章节', value: prefs.skipRead, onChanged: (v) => set(prefs.copyWith(skipRead: v)))),
       XSwitch(title: '切换章节时显示标题', value: prefs.chapterToast, onChanged: (v) => set(prefs.copyWith(chapterToast: v))),
       _hl('预加载章节', XChoice<int>(title: '预加载章节', value: prefs.prefetch, options: const {0: '关闭', 1: '后 1 章', 2: '后 2 章', 3: '后 3 章', 5: '后 5 章'}, onChanged: (v) => set(prefs.copyWith(prefetch: v)))),
-      if (prefs.prefetch > 0) XSwitch(title: '仅在 Wi-Fi 下预加载', value: prefs.prefetchWifi, onChanged: (v) => set(prefs.copyWith(prefetchWifi: v))),
-      if (prefs.prefetch > 0) XSwitch(title: '全本缓存正文', value: prefs.prefetchBook, onChanged: (v) => set(prefs.copyWith(prefetchBook: v))),
+      AppCollapse(
+        visible: prefs.prefetch > 0,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            XSwitch(title: '仅在 Wi-Fi 下预加载', value: prefs.prefetchWifi, onChanged: (v) => set(prefs.copyWith(prefetchWifi: v))),
+            XSwitch(title: '全本缓存正文', value: prefs.prefetchBook, onChanged: (v) => set(prefs.copyWith(prefetchBook: v))),
+          ],
+        ),
+      ),
       const XDivider(),
       const XGroupTitle('屏幕'),
       _hl('屏幕常亮', XSwitch(title: '屏幕常亮', value: prefs.keepScreenOn, onChanged: (v) => set(prefs.copyWith(keepScreenOn: v)))),

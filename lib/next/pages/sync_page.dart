@@ -10,6 +10,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../app_prefs.dart';
 import '../diag_log.dart';
+import '../motion.dart';
 import '../sync.dart';
 import '../widgets.dart';
 import '../x_list.dart';
@@ -177,7 +178,17 @@ class _SyncPageState extends ConsumerState<SyncPage> {
                 Text(Sync.configured ? '已配置 WebDAV 同步' : '未配置同步', style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600, color: scheme.onSurface)),
                 const SizedBox(height: 2),
                 Text(lastText, style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant)),
-                if (message != null) ...[const SizedBox(height: 6), Text(message, style: TextStyle(fontSize: 13, height: 1.4, color: message == '连接成功' ? scheme.primary : scheme.onSurface))],
+                AppCollapse(
+                  visible: message != null,
+                  duration: AppMotion.standard,
+                  reverseDuration: AppMotion.fast,
+                  child: message == null
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Text(message, style: TextStyle(fontSize: 13, height: 1.4, color: message == '连接成功' ? scheme.primary : scheme.onSurface)),
+                        ),
+                ),
               ],
             ),
           ),
@@ -217,7 +228,7 @@ class _SyncPageState extends ConsumerState<SyncPage> {
                     ),
                     IconButton(
                       tooltip: hz(context, _showPass ? '隐藏密码' : '显示密码'),
-                      icon: Icon(_showPass ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 19),
+                      icon: AppIconSwap(child: Icon(_showPass ? Icons.visibility_off_outlined : Icons.visibility_outlined, key: ValueKey(_showPass), size: 19)),
                       onPressed: () => setState(() => _showPass = !_showPass),
                     ),
                   ],
@@ -252,7 +263,12 @@ class _SyncPageState extends ConsumerState<SyncPage> {
                             await _save();
                             await ref.read(syncProvider.notifier).run();
                           },
-                    child: status.busy ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: scheme.onPrimary)) : const Text('立即同步'),
+                    child: AppCrossfade(
+                      duration: AppMotion.fast,
+                      child: status.busy
+                          ? SizedBox(key: const ValueKey('sync-spin'), width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: scheme.onPrimary))
+                          : const Text('立即同步', key: ValueKey('sync-lbl')),
+                    ),
                   ),
                 ),
               ],

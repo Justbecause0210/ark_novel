@@ -20,6 +20,7 @@ import '../characters.dart';
 import '../color_picker.dart';
 import '../image_cache.dart';
 import '../library.dart' show LibraryStore;
+import '../motion.dart';
 import '../reader/reader_body.dart' show readableHighlightColor;
 import '../reader/reader_sheets.dart';
 import '../routes.dart';
@@ -312,91 +313,107 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
             ),
         ],
       ),
-      body: allChars.isEmpty
-          ? contentWidth(
-              Center(
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(32),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 72,
-                        height: 72,
-                        decoration: BoxDecoration(color: scheme.primary.withValues(alpha: 0.1), shape: BoxShape.circle),
-                        child: Icon(Icons.people_outline, size: 34, color: scheme.primary),
-                      ),
-                      const SizedBox(height: 16),
-                      Text('还没有人物或设定词条', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
-                      const SizedBox(height: 6),
-                      Text(
-                        '可从 Bangumi 一键导入本作角色（自动匹配中文名、常用称呼与头像），或手动添加人物与世界观设定；开启高亮后在阅读器内点按人名即可查看档案与防剧透笔记。',
-                        textAlign: TextAlign.center,
-                        style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.6),
-                      ),
-                      const SizedBox(height: 20),
-                      Wrap(
-                        alignment: WrapAlignment.center,
-                        spacing: 12,
-                        runSpacing: 10,
+      body: AppCrossfade(
+        fill: true,
+        child: allChars.isEmpty
+            ? KeyedSubtree(
+                key: const ValueKey('empty'),
+                child: contentWidth(
+                  Center(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          FilledButton.icon(
-                            style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
-                            onPressed: _openBgmImport,
-                            icon: const Icon(Icons.cloud_download_outlined, size: 18),
-                            label: const Text('从 Bangumi 导入'),
+                          Container(
+                            width: 72,
+                            height: 72,
+                            decoration: BoxDecoration(color: scheme.primary.withValues(alpha: 0.1), shape: BoxShape.circle),
+                            child: Icon(Icons.people_outline, size: 34, color: scheme.primary),
                           ),
-                          OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
-                            onPressed: () => _openEditor(null),
-                            icon: const Icon(Icons.person_add_outlined, size: 18),
-                            label: const Text('手动添加人物/设定'),
+                          const SizedBox(height: 16),
+                          Text('还没有人物或设定词条', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
+                          const SizedBox(height: 6),
+                          Text(
+                            '可从 Bangumi 一键导入本作角色（自动匹配中文名、常用称呼与头像），或手动添加人物与世界观设定；开启高亮后在阅读器内点按人名即可查看档案与防剧透笔记。',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, height: 1.6),
                           ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            )
-          : contentWidth(
-              Column(
-                children: [
-                  if (_batchFetchingCn)
-                    Container(
-                      width: double.infinity,
-                      color: scheme.surfaceContainerLow,
-                      padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
-                      child: Row(
-                        children: [
-                          const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
-                          const SizedBox(width: 10),
-                          Expanded(child: Text('正在从萌娘百科补全中文简介（$_batchCnDone/$_batchCnTotal）…', style: theme.textTheme.bodySmall)),
-                          TextButton(
-                            style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
-                            onPressed: () => setState(() => _cancelBatchCn = true),
-                            child: const Text('停止'),
+                          const SizedBox(height: 20),
+                          Wrap(
+                            alignment: WrapAlignment.center,
+                            spacing: 12,
+                            runSpacing: 10,
+                            children: [
+                              FilledButton.icon(
+                                style: FilledButton.styleFrom(minimumSize: const Size(0, 44)),
+                                onPressed: _openBgmImport,
+                                icon: const Icon(Icons.cloud_download_outlined, size: 18),
+                                label: const Text('从 Bangumi 导入'),
+                              ),
+                              OutlinedButton.icon(
+                                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 44)),
+                                onPressed: () => _openEditor(null),
+                                icon: const Icon(Icons.person_add_outlined, size: 18),
+                                label: const Text('手动添加人物/设定'),
+                              ),
+                            ],
                           ),
                         ],
                       ),
                     ),
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (allChars.length >= 6 || _search.isNotEmpty) ...[
-                          TextField(
-                            controller: _searchCtrl,
-                            onChanged: (v) => setState(() => _search = v),
-                            decoration: InputDecoration(
-                              isDense: true,
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                              prefixIcon: const Icon(Icons.search, size: 18),
-                              hint: const Text('搜索人物名、称呼或简介', maxLines: 1, overflow: TextOverflow.ellipsis),
-                              suffixIcon: _search.isEmpty
-                                  ? null
-                                  : IconButton(
+                  ),
+                ),
+              )
+            : KeyedSubtree(
+                key: const ValueKey('list'),
+                child: contentWidth(
+                  Column(
+                    children: [
+                      AppCollapse(
+                        visible: _batchFetchingCn,
+                        child: Container(
+                          width: double.infinity,
+                          color: scheme.surfaceContainerLow,
+                          padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
+                          child: Row(
+                            children: [
+                              const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  '正在从萌娘百科补全中文简介（$_batchCnDone/$_batchCnTotal）…',
+                                  style: theme.textTheme.bodySmall?.copyWith(fontFeatures: const [FontFeature.tabularFigures()]),
+                                ),
+                              ),
+                              TextButton(
+                                style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
+                                onPressed: () => setState(() => _cancelBatchCn = true),
+                                child: const Text('停止'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (allChars.length >= 6 || _search.isNotEmpty) ...[
+                              TextField(
+                                controller: _searchCtrl,
+                                onChanged: (v) => setState(() => _search = v),
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  prefixIcon: const Icon(Icons.search, size: 18),
+                                  hint: const Text('搜索人物名、称呼或简介', maxLines: 1, overflow: TextOverflow.ellipsis),
+                                  suffixIconConstraints: const BoxConstraints(minWidth: 0, minHeight: 0),
+                                  suffixIcon: AppReveal(
+                                    visible: _search.isNotEmpty,
+                                    beginScale: 0.82,
+                                    child: IconButton(
                                       tooltip: hz(context, '清空'),
                                       icon: const Icon(Icons.close, size: 17),
                                       onPressed: () {
@@ -404,63 +421,71 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
                                         setState(() => _search = '');
                                       },
                                     ),
-                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                        ],
-                        SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: [
-                              if (rolesPresent.length > 1) ...[
-                                ChoiceChip(
-                                  label: Text('全部 (${allChars.length})'),
-                                  selected: _roleFilter.isEmpty,
-                                  showCheckmark: false,
-                                  onSelected: (_) => setState(() => _roleFilter = ''),
+                                  ),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                                 ),
-                                for (final r in CharacterRole.all)
-                                  if (rolesPresent.contains(r)) ...[
-                                    const SizedBox(width: 6),
+                              ),
+                              const SizedBox(height: 8),
+                            ],
+                            SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: [
+                                  if (rolesPresent.length > 1) ...[
                                     ChoiceChip(
-                                      label: Text('$r (${allChars.where((c) => c.role == r).length})'),
-                                      selected: _roleFilter == r,
+                                      label: Text('全部 (${allChars.length})'),
+                                      selected: _roleFilter.isEmpty,
                                       showCheckmark: false,
-                                      onSelected: (_) => setState(() => _roleFilter = r),
+                                      onSelected: (_) => setState(() => _roleFilter = ''),
+                                    ),
+                                    for (final r in CharacterRole.all)
+                                      if (rolesPresent.contains(r)) ...[
+                                        const SizedBox(width: 6),
+                                        ChoiceChip(
+                                          label: Text('$r (${allChars.where((c) => c.role == r).length})'),
+                                          selected: _roleFilter == r,
+                                          showCheckmark: false,
+                                          onSelected: (_) => setState(() => _roleFilter = r),
+                                        ),
+                                      ],
+                                  ] else
+                                    Text('共 ${allChars.length} 条记录', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+                                  if (hlIds.isNotEmpty && hlIds.length < allChars.length) ...[
+                                    const SizedBox(width: 8),
+                                    FilterChip(
+                                      label: Text('已高亮 (${hlIds.length})'),
+                                      selected: _onlyHighlighted,
+                                      showCheckmark: false,
+                                      onSelected: (v) => setState(() => _onlyHighlighted = v),
                                     ),
                                   ],
-                              ] else
-                                Text('共 ${allChars.length} 条记录', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
-                              if (hlIds.isNotEmpty && hlIds.length < allChars.length) ...[
-                                const SizedBox(width: 8),
-                                FilterChip(
-                                  label: Text('已高亮 (${hlIds.length})'),
-                                  selected: _onlyHighlighted,
-                                  showCheckmark: false,
-                                  onSelected: (v) => setState(() => _onlyHighlighted = v),
-                                ),
-                              ],
-                            ],
-                          ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
+                      ),
+                      Expanded(
+                        child: AppCrossfade(
+                          fill: true,
+                          child: chars.isEmpty
+                              ? Center(
+                                  key: const ValueKey('no-match'),
+                                  child: Text('没有匹配的人物词条', style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant)),
+                                )
+                              : ListView.builder(
+                                  key: ValueKey('chars-${_roleFilter}_$_onlyHighlighted'),
+                                  padding: const EdgeInsets.fromLTRB(16, 6, 16, 32),
+                                  itemCount: chars.length,
+                                  itemBuilder: (context, i) => _buildCard(chars[i], currentVol, hlIds.contains(chars[i].id)),
+                                ),
+                        ),
+                      ),
+                    ],
                   ),
-                  Expanded(
-                    child: chars.isEmpty
-                        ? Center(
-                            child: Text('没有匹配的人物词条', style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant)),
-                          )
-                        : ListView.builder(
-                            padding: const EdgeInsets.fromLTRB(16, 6, 16, 32),
-                            itemCount: chars.length,
-                            itemBuilder: (context, i) => _buildCard(chars[i], currentVol, hlIds.contains(chars[i].id)),
-                          ),
-                  ),
-                ],
+                ),
               ),
-            ),
+      ),
     );
   }
 
@@ -605,11 +630,24 @@ class _CharacterAvatar extends StatelessWidget {
   final Uint8List? previewBytes;
 
   void _showFullPortrait(BuildContext context, File? localFile) {
-    showDialog<void>(
+    final reduce = AppMotion.reduce(context);
+    showGeneralDialog<void>(
       context: context,
+      barrierDismissible: true,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
       barrierColor: Colors.black.withValues(alpha: 0.85),
-      builder: (ctx) => Dialog.fullscreen(
-        backgroundColor: Colors.transparent,
+      transitionDuration: reduce ? AppMotion.instant : AppMotion.standard,
+      transitionBuilder: (ctx, animation, _, child) {
+        final fade = CurvedAnimation(parent: animation, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit);
+        if (reduce) return FadeTransition(opacity: fade, child: child);
+        final scale = Tween<double>(begin: 0.92, end: 1.0).animate(CurvedAnimation(parent: animation, curve: AppMotion.curve, reverseCurve: AppMotion.exit));
+        return FadeTransition(
+          opacity: fade,
+          child: ScaleTransition(scale: scale, child: child),
+        );
+      },
+      pageBuilder: (ctx, _, _) => Material(
+        type: MaterialType.transparency,
         child: Stack(
           children: [
             Positioned.fill(
@@ -729,9 +767,12 @@ class _CharacterAvatar extends StatelessWidget {
     }
 
     if (!allowPreview) return box;
-    return GestureDetector(
-      onTap: () => _showFullPortrait(context, localFile),
-      child: box,
+    return AppPressScale(
+      scale: 0.94,
+      child: GestureDetector(
+        onTap: () => _showFullPortrait(context, localFile),
+        child: box,
+      ),
     );
   }
 }

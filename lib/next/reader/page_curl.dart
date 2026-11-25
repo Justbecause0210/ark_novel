@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 
+import '../motion.dart';
+
 /// 外部（点击翻页、朗读等）驱动翻页用。
 class PageCurlController {
   VoidCallback? _next;
@@ -80,7 +82,7 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
   /// 翻页进度：0 平放，1 整页翻走。往回翻时从 1 减到 0。
   double _t = 0;
   double _from = 0, _to = 0;
-  Curve _curve = Curves.easeOutCubic;
+  Curve _curve = AppMotion.decelerate;
   Size _size = Size.zero;
 
   // 翻页动画期间（_dir != 0）按 (index, sig) 缓存 RepaintBoundary 子树，避免每帧重复构建 2~3 份完整页面
@@ -171,11 +173,16 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
   }
 
   void _animateTo(double target, {double velocity = 0}) {
+    if (AppMotion.reduce(context)) {
+      _t = target;
+      _settle();
+      return;
+    }
     _from = _t;
     _to = target;
     final distance = (target - _t).abs();
-    _curve = Curves.easeOutCubic;
-    _anim.duration = Duration(milliseconds: (180 + distance * 380 / (1 + velocity.abs() / 3000)).round().clamp(140, 560));
+    _curve = AppMotion.decelerate;
+    _anim.duration = Duration(milliseconds: (180 + distance * 360 / (1 + velocity.abs() / 3000)).round().clamp(140, 520));
     _anim.forward(from: 0);
   }
 
@@ -184,6 +191,11 @@ class _PageCurlState extends State<PageCurl> with SingleTickerProviderStateMixin
     _finishNow();
     if (dir == 1 && !_canNext) return widget.onReachEnd?.call();
     if (dir == -1 && !_canPrev) return widget.onReachStart?.call();
+    if (AppMotion.reduce(context)) {
+      setState(() => _index += dir);
+      widget.onIndexChanged?.call(_index);
+      return;
+    }
     setState(() {
       _dir = dir;
       _cornerY = _size.height;
