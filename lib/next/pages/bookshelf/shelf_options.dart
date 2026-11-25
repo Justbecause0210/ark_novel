@@ -209,15 +209,23 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
       _ => (Icons.check_box_outline_blank, scheme.onSurfaceVariant),
     };
     return InkWell(
-      onTap: () => _set(apply((v + 1) % 3)),
+      onTap: () {
+        HapticFeedback.selectionClick();
+        _set(apply((v + 1) % 3));
+      },
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
         child: Row(
           children: [
-            Icon(icon, color: color),
+            AppIconSwap(child: Icon(icon, key: ValueKey(v), color: color)),
             const SizedBox(width: 16),
             Expanded(child: Text(label, style: TextStyle(fontSize: 15.5, color: scheme.onSurface))),
-            if (v == 2) Text('不满足', style: TextStyle(fontSize: 13, color: scheme.error)),
+            AppCollapse(
+              visible: v == 2,
+              axis: Axis.horizontal,
+              duration: AppMotion.fast,
+              child: Text('不满足', style: TextStyle(fontSize: 13, color: scheme.error)),
+            ),
           ],
         ),
       ),
@@ -239,7 +247,12 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
           child: Row(
             children: [
               Expanded(child: Text('点一下切换：满足 → 不满足 → 不限', style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant))),
-              if (o.filtering) TextButton(onPressed: () => _set(o.copyWith(unread: 0, started: 0, cached: 0, bookmarked: 0, completed: 0)), child: const Text('清除筛选')),
+              AppCollapse(
+                visible: o.filtering,
+                axis: Axis.horizontal,
+                duration: AppMotion.fast,
+                child: TextButton(onPressed: () => _set(o.copyWith(unread: 0, started: 0, cached: 0, bookmarked: 0, completed: 0)), child: const Text('清除筛选')),
+              ),
             ],
           ),
         ),
@@ -256,6 +269,7 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
           InkWell(
             // 再点一次当前的排序：方向反过来；随机再点一次换一批
             onTap: () {
+              HapticFeedback.selectionClick();
               if (s == ShelfSort.random) ref.read(appPrefsProvider.notifier).set('shelf.seed', DateTime.now().millisecondsSinceEpoch & 0xFFFF);
               final switchingToCustom = s == ShelfSort.custom && o.sort != ShelfSort.custom && o.display != 2;
               _set(o.sort == s ? o.copyWith(reverse: !o.reverse) : o.copyWith(sort: s, reverse: false));
@@ -274,25 +288,37 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          s.label,
-                          style: TextStyle(fontSize: 15.5, color: o.sort == s ? scheme.primary : scheme.onSurface, fontWeight: o.sort == s ? FontWeight.w600 : null),
+                        AnimatedDefaultTextStyle(
+                          duration: AppMotion.dur(context, AppMotion.fast),
+                          curve: AppMotion.curve,
+                          style: TextStyle(
+                            fontSize: 15.5,
+                            color: o.sort == s ? scheme.primary : scheme.onSurface,
+                            fontWeight: o.sort == s ? FontWeight.w600 : FontWeight.w400,
+                          ),
+                          child: Text(s.label),
                         ),
                         if (s == ShelfSort.custom)
                           Text('自动切换为列表以便拖动排序', style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
                       ],
                     ),
                   ),
-                  if (o.sort == s)
-                    Icon(
-                      switch (s) {
-                        ShelfSort.random => Icons.shuffle,
-                        ShelfSort.custom => Icons.check,
-                        _ => o.reverse ? Icons.arrow_upward : Icons.arrow_downward,
-                      },
-                      size: 20,
-                      color: scheme.primary,
-                    ),
+                  AppReveal(
+                    visible: o.sort == s,
+                    offset: Offset.zero,
+                    beginScale: 0.72,
+                    duration: AppMotion.fast,
+                    child: switch (s) {
+                      ShelfSort.random => Icon(Icons.shuffle, size: 20, color: scheme.primary),
+                      ShelfSort.custom => Icon(Icons.check, size: 20, color: scheme.primary),
+                      _ => AnimatedRotation(
+                          turns: o.reverse ? 0.5 : 0.0,
+                          duration: AppMotion.dur(context, AppMotion.fast),
+                          curve: AppMotion.snappy,
+                          child: Icon(Icons.arrow_downward, size: 20, color: scheme.primary),
+                        ),
+                    },
+                  ),
                 ],
               ),
             ),
@@ -308,13 +334,15 @@ class _OptionsSheetState extends ConsumerState<_OptionsSheet> with SingleTickerP
       children: [
         XChips<int>(title: '显示方式', value: o.display, options: const {0: '网格', 1: '紧凑', 2: '列表', 3: '卷册', 4: '立体', 5: '书脊'}, onChanged: (v) => _set(o.copyWith(display: v))),
         // 就是设置里的书架列数（竖屏、横屏分开记），这里放常用的几种；设置里选了别的也列出来
-        if (o.display != 2 && o.display != 4 && o.display != 5)
-          XSegments<int>(
+        AppCollapse(
+          visible: o.display != 2 && o.display != 4 && o.display != 5,
+          child: XSegments<int>(
             title: '每行几本',
             value: cols,
             options: {0: '自动', 3: '3 本', 4: '4 本', if (cols != 0 && cols != 3 && cols != 4) cols: '$cols 本'},
             onChanged: (v) => prefs.set(colsKey, v),
           ),
+        ),
         const SizedBox(height: 4),
         XSwitch(title: '未读章数角标', value: unreadBadge, onChanged: (v) => prefs.set(P.unreadBadge, v)),
         XSwitch(title: '已缓存章数角标', value: cacheBadge, onChanged: (v) => prefs.set(P.cacheBadge, v)),

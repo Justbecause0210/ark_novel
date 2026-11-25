@@ -205,6 +205,27 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 20));
     expect(apiExpired.novelCalls, 1);
     expect(c2.read(novelProvider(aid)).value?.detail.title, '新标题');
+
+    // 阅读器专用 readerNovelProvider：即使已过 45s TTL，只要本地有缓存就秒回旧缓存、0 次联网请求
+    final apiReaderCached = _FakeApi(savedPage: saved, freshPage: fresh);
+    final c3 = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(store), apiProvider.overrideWithValue(apiReaderCached)]);
+    addTearDown(c3.dispose);
+    final sub3 = c3.listen(readerNovelProvider(aid), (_, _) {});
+    addTearDown(sub3.close);
+    final readerCached = await c3.read(readerNovelProvider(aid).future);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(apiReaderCached.novelCalls, 0);
+    expect(readerCached.detail.title, '旧标题');
+
+    // 本地无缓存时 readerNovelProvider 自动回退拉取最新数据
+    final apiReaderCold = _FakeApi(savedPage: null, freshPage: fresh);
+    final c4 = ProviderContainer(overrides: [sessionStoreProvider.overrideWithValue(store), apiProvider.overrideWithValue(apiReaderCold)]);
+    addTearDown(c4.dispose);
+    final sub4 = c4.listen(readerNovelProvider(aid), (_, _) {});
+    addTearDown(sub4.close);
+    final readerCold = await c4.read(readerNovelProvider(aid).future);
+    expect(apiReaderCold.novelCalls, 1);
+    expect(readerCold.detail.title, '新标题');
   });
 
   testWidgets('详情页：360px 窄屏四按钮不溢出、推荐防连点、按卷懒构建、吸顶书名与 Esc 退出多选', (tester) async {

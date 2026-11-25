@@ -13,6 +13,7 @@ import '../cache.dart';
 import '../cover_color.dart';
 import '../image_cache.dart';
 import '../library.dart';
+import '../motion.dart';
 import '../progress.dart';
 import '../read_state.dart';
 import '../routes.dart';
@@ -61,7 +62,7 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
     final size = _carouselCoverSize;
     if (!mounted || size == null || vols.isEmpty) return;
     _lastPrecachedCur = center;
-    for (var d = 1; d <= 3; d++) {
+    for (var d = 1; d <= 2; d++) {
       for (final idx in [center + d, center - d]) {
         if (idx < 0 || idx >= vols.length) continue;
         final url = coverOf(vols[idx]);
@@ -140,11 +141,19 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
   }
 
   /// 抽出来以后快速滑到正在读的那卷：卷数差得多也在 0.9 秒内滑到
-  void _startIntro() => _intro.forward().whenComplete(() {
-    final target = readingVolume(widget.aid);
-    if (!mounted || target <= 0 || !_pc.hasClients) return;
-    _pc.animateToPage(target, duration: Duration(milliseconds: math.min(250 + 80 * target, 900)), curve: Curves.easeInOutCubic);
-  });
+  void _startIntro() {
+    if (AppMotion.reduce(context)) {
+      _intro.value = 1.0;
+      final target = readingVolume(widget.aid);
+      if (mounted && target > 0 && _pc.hasClients) _pc.jumpToPage(target);
+      return;
+    }
+    _intro.forward().whenComplete(() {
+      final target = readingVolume(widget.aid);
+      if (!mounted || target <= 0 || !_pc.hasClients) return;
+      _pc.animateToPage(target, duration: Duration(milliseconds: math.min(250 + 80 * target, 900)), curve: AppMotion.curve);
+    });
+  }
 
   @override
   void dispose() {
@@ -159,7 +168,11 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
 
   void _tap(int i, Vol v, String url) {
     if (i != _cur) {
-      _pc.animateToPage(i, duration: const Duration(milliseconds: 300), curve: Curves.easeOutCubic);
+      if (AppMotion.reduce(context)) {
+        _pc.jumpToPage(i);
+      } else {
+        _pc.animateToPage(i, duration: AppMotion.standard, curve: AppMotion.curve);
+      }
     } else {
       _openBook(v, url);
     }
@@ -169,7 +182,11 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
     if (!_pc.hasClients || count <= 0) return;
     final target = (_cur + delta).clamp(0, count - 1);
     if (target == _cur) return;
-    _pc.animateToPage(target, duration: const Duration(milliseconds: 280), curve: Curves.easeOutCubic);
+    if (AppMotion.reduce(context)) {
+      _pc.jumpToPage(target);
+    } else {
+      _pc.animateToPage(target, duration: AppMotion.standard, curve: AppMotion.curve);
+    }
   }
 
   DateTime _lastScrollEvent = DateTime(0);
@@ -342,7 +359,11 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
         onClose: () => setState(() => _list = false),
         onPick: (i) {
           setState(() => _list = false);
-          _pc.animateToPage(i, duration: Duration(milliseconds: math.min(250 + 40 * (i - cur).abs(), 700)), curve: Curves.easeInOutCubic);
+          if (AppMotion.reduce(context)) {
+            _pc.jumpToPage(i);
+          } else {
+            _pc.animateToPage(i, duration: Duration(milliseconds: math.min(250 + 40 * (i - cur).abs(), 700)), curve: AppMotion.curve);
+          }
         },
       );
       final scrubber = vols.length > 6
@@ -371,7 +392,9 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
             )
           : const SizedBox(height: 16);
       // 卷名和进度在打开动画的后半段浮上来
-      final shown = CurveTween(curve: const Interval(0.5, 1, curve: Curves.easeOut)).animate(ModalRoute.of(context)?.animation ?? kAlwaysCompleteAnimation);
+      final shown = AppMotion.reduce(context)
+          ? kAlwaysCompleteAnimation
+          : CurveTween(curve: const Interval(0.5, 1, curve: AppMotion.decelerate)).animate(ModalRoute.of(context)?.animation ?? kAlwaysCompleteAnimation);
       final summary = FadeTransition(
         opacity: shown,
         child: SlideTransition(
@@ -437,7 +460,8 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
                   ),
                 ),
                 AnimatedSize(
-                  duration: const Duration(milliseconds: 250),
+                  duration: AppMotion.dur(context, AppMotion.standard),
+                  curve: AppMotion.curve,
                   child: panel != null ? SizedBox(width: 400, child: panel) : const SizedBox(height: double.infinity),
                 ),
               ],
@@ -447,15 +471,20 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
                 children: [
                   // 展开后封面缩小、拖动条收起，把地方让给目录
                   AnimatedContainer(
-                    duration: const Duration(milliseconds: 280),
-                    curve: Curves.easeOutCubic,
+                    duration: AppMotion.dur(context, AppMotion.standard),
+                    curve: AppMotion.curve,
                     height: c.maxHeight * (panel != null ? 0.26 : 0.68),
                     child: swipe(carousel),
                   ),
                   swipe(toggle),
-                  if (panel == null) scrubber,
+                  AppCollapse(visible: panel == null, duration: AppMotion.standard, reverseDuration: AppMotion.fast, child: scrubber),
                   Expanded(
-                    child: AnimatedSwitcher(duration: const Duration(milliseconds: 200), layoutBuilder: (current, previous) => Stack(alignment: Alignment.topCenter, children: [...previous, ?current]), child: panel ?? swipe(summary)),
+                    child: AppCrossfade(
+                      fill: true,
+                      alignment: Alignment.topCenter,
+                      duration: AppMotion.fast,
+                      child: panel ?? KeyedSubtree(key: const ValueKey('vol-summary'), child: swipe(summary)),
+                    ),
                   ),
                 ],
               ),
@@ -478,7 +507,8 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
           onKeyEvent: (node, e) => _onKey(node, vols, cur, cover, e),
           child: TweenAnimationBuilder<Color?>(
             tween: ColorTween(end: base),
-            duration: const Duration(milliseconds: 400),
+            duration: AppMotion.dur(context, AppMotion.ambient),
+            curve: AppMotion.curve,
             builder: (context, color, child) => Scaffold(backgroundColor: color, body: child),
             child: SafeArea(
               child: Column(

@@ -36,8 +36,8 @@ class _ResumeBar extends ConsumerWidget {
         valueListenable: hidden,
         builder: (context, isHidden, _) => TweenAnimationBuilder<double>(
           tween: Tween<double>(end: isHidden ? 0.0 : 1.0),
-          duration: const Duration(milliseconds: 260),
-          curve: Curves.easeInOutCubic,
+          duration: AppMotion.dur(context, AppMotion.standard),
+          curve: isHidden ? AppMotion.exit : AppMotion.decelerate,
           child: card,
           builder: (context, t, child) => ClipRect(
             child: IgnorePointer(
@@ -62,15 +62,18 @@ class _ResumeBar extends ConsumerWidget {
     void open() => context.push(Routes.reader(h.aid, h.cid));
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
-      child: TweenAnimationBuilder<Color?>(
-        tween: ColorTween(end: tint),
-        duration: const Duration(milliseconds: 400),
-        builder: (context, color, child) => Material(
-          color: color,
-          borderRadius: BorderRadius.circular(radius),
-          clipBehavior: Clip.antiAlias,
-          child: child,
-        ),
+      child: AppPressScale(
+        scale: 0.98,
+        child: TweenAnimationBuilder<Color?>(
+          tween: ColorTween(end: tint),
+          duration: AppMotion.dur(context, AppMotion.ambient),
+          curve: AppMotion.curve,
+          builder: (context, color, child) => Material(
+            color: color,
+            borderRadius: BorderRadius.circular(radius),
+            clipBehavior: Clip.antiAlias,
+            child: child,
+          ),
         child: InkWell(
           onTap: open,
           onLongPress: () => context.push(Routes.novel(h.aid)),
@@ -126,6 +129,7 @@ class _ResumeBar extends ConsumerWidget {
             ],
           ),
         ),
+      ),
       ),
     );
   }

@@ -153,14 +153,22 @@ class Wenku8Client {
   /// [referer] 给目录、正文请求带上来源页，和浏览器行为一致。
   /// [cancelToken] 支持在排队或传输阶段取消请求，释放节流槽位。
   /// [retryTransient] 为 true 时对幂等 GET 的瞬态连接错误/502/504 最多重试 1 次（绝不重试 403/CF/4xx），并发相同 `(url, referer)` 自动去重合并。
-  Future<String> getPage(String url, {bool charsetParam = true, String? referer, CancelToken? cancelToken, bool retryTransient = true}) async {
+  /// [allowChallengeFallback] 为 false（如阅读器后台章节预加载）时遇到 403/CF 直接快速失败，绝不静默拉起无头 WebView。
+  Future<String> getPage(
+    String url, {
+    bool charsetParam = true,
+    String? referer,
+    CancelToken? cancelToken,
+    bool retryTransient = true,
+    bool allowChallengeFallback = true,
+  }) async {
     if (cancelToken?.isCancelled == true) {
       throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: url), reason: 'cancelled');
     }
     final currentCharset = charset();
     final target = charsetParam || currentCharset != CharsetType.gbk ? Wenku8Charset.withCharsetParam(url, currentCharset) : url;
     if (!retryTransient) {
-      return _fetchPage(target, currentCharset, referer, cancelToken, retryTransient: false);
+      return _fetchPage(target, currentCharset, referer, cancelToken, retryTransient: false, allowChallengeFallback: allowChallengeFallback);
     }
 
     final key = (target, referer);
@@ -168,6 +176,9 @@ class Wenku8Client {
     if (entry != null && entry.internalCancel.isCancelled) {
       _inflight.remove(key);
       entry = null;
+    }
+    if (entry == null && !allowChallengeFallback) {
+      return _fetchPage(target, currentCharset, referer, cancelToken, retryTransient: true, allowChallengeFallback: false);
     }
     if (entry == null) {
       final internalCancel = CancelToken();
@@ -215,14 +226,29 @@ class Wenku8Client {
     return done.future;
   }
 
-  Future<String> _fetchPage(String target, CharsetType currentCharset, String? referer, CancelToken? cancelToken, {required bool retryTransient}) async {
+  Future<String> _fetchPage(
+    String target,
+    CharsetType currentCharset,
+    String? referer,
+    CancelToken? cancelToken, {
+    required bool retryTransient,
+    bool allowChallengeFallback = true,
+  }) async {
     final targetHost = Uri.tryParse(target)?.host.toLowerCase() ?? '';
     final requestStarted = DateTime.now();
     final gateBox = <Completer<void>?>[null];
     final gateHostBox = <String?>[null];
     final Uint8List bytes;
     try {
-      bytes = await _getRetrying(target, referer, cancelToken, retryTransient: retryTransient, gateBox: gateBox, gateHostBox: gateHostBox);
+      bytes = await _getRetrying(
+        target,
+        referer,
+        cancelToken,
+        retryTransient: retryTransient,
+        allowChallengeFallback: allowChallengeFallback,
+        gateBox: gateBox,
+        gateHostBox: gateHostBox,
+      );
     } on DioException catch (e) {
       final ownedGate = gateBox[0];
       // 若经过 301/302 跳转（例如 wenku8.cc -> wenku8.net），实际触发 CF 的是跳转后的域名，门控与冷却必须按该域名一致维护
@@ -234,7 +260,7 @@ class Wenku8Client {
         _releaseGate(cfHost, ownedGate);
         rethrow;
       }
-      final fallback = challengeFallback;
+      final fallback = allowChallengeFallback ? challengeFallback : null;
       if (fallback == null || e.requestOptions.extra['cfCooldownHit'] == true) {
         _releaseGate(cfHost, ownedGate);
         rethrow;
@@ -320,6 +346,7 @@ class Wenku8Client {
     String? referer,
     CancelToken? cancelToken, {
     required bool retryTransient,
+    bool allowChallengeFallback = true,
     List<Completer<void>?>? gateBox,
     List<String?>? gateHostBox,
   }) async {
@@ -329,7 +356,7 @@ class Wenku8Client {
       if (cancelToken?.isCancelled == true) {
         throw cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: target), reason: 'cancelled');
       }
-      final extra = <String, dynamic>{'cfFallback': challengeFallback != null};
+      final extra = <String, dynamic>{'cfFallback': allowChallengeFallback && challengeFallback != null};
       try {
         final response = await dio.get(
           target,

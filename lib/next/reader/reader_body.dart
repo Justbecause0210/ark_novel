@@ -5,6 +5,7 @@ import 'package:flutter/material.dart' as material show Text;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/physics.dart' show SpringSimulation;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../env.dart';
 import '../highlights.dart';
 import '../image_cache.dart';
+import '../motion.dart';
 import '../rules.dart';
 import '../settings.dart';
 import '../text.dart';
@@ -531,16 +533,17 @@ HighlightEntry? highlightAt(List<HighlightEntry> highlights, GlobalKey key, int 
   return idx == null ? null : _highlightAtOffset(highlights, idx);
 }
 
-Widget _readerImageWidget(String url, Color? color, {List<String>? gallery, int index = 0}) =>
-    _ReaderIllustration(url: url, color: color, gallery: gallery, index: index);
+Widget _readerImageWidget(String url, Color? color, {List<String>? gallery, int index = 0, Size? decodeSize}) =>
+    _ReaderIllustration(url: url, color: color, gallery: gallery, index: index, decodeSize: decodeSize);
 
 class _ReaderIllustration extends ConsumerWidget {
-  const _ReaderIllustration({required this.url, this.color, this.gallery, this.index = 0});
+  const _ReaderIllustration({required this.url, this.color, this.gallery, this.index = 0, this.decodeSize});
 
   final String url;
   final Color? color;
   final List<String>? gallery;
   final int index;
+  final Size? decodeSize;
 
   void _openViewer(BuildContext context) {
     final urls = (gallery != null && gallery!.isNotEmpty) ? gallery! : [url];
@@ -554,6 +557,7 @@ class _ReaderIllustration extends ConsumerWidget {
     final img = NetImage(
       url,
       fit: BoxFit.contain,
+      decodeSize: decodeSize,
       loading: SizedBox(
         height: 220,
         child: Center(
