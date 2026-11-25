@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'cover_color.dart';
 import 'library.dart';
+import 'motion.dart';
 import 'pages/cover_picker_page.dart' show kCoverAspect;
 import 'pages/volumes_page.dart' show volumeHeroShuttle;
 import 'shelf_3d.dart';
@@ -229,17 +230,23 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
     final p = _page;
     final settled = (p - _cur).abs() < 0.3;
     final onCover = settled && hit == _cur && dx.abs() <= _d * 0.56 && dy.abs() <= _h * 0.55;
+    final nextHover = (!onCover && hit != null && (hit - p).abs() > 0.5) ? hit : null;
     if (onCover) {
       _targetTiltY = -(dx / (_d * 0.55)).clamp(-1.0, 1.0) * 0.11;
       _targetTiltX = (dy / (_h * 0.55)).clamp(-1.0, 1.0) * 0.08;
       _hoveredIndex = null;
+      _ensureTicking();
     } else {
-      _targetTiltY = -(dx / math.max(stageW, 1.0)).clamp(-0.5, 0.5) * 0.045;
+      _targetTiltY = 0;
       _targetTiltX = 0;
-      _hoveredIndex = (hit != null && (hit - p).abs() > 0.5) ? hit : null;
-      if (_hoveredIndex != null) _lifts.putIfAbsent(_hoveredIndex!, () => 0);
+      if (nextHover != _hoveredIndex) {
+        _hoveredIndex = nextHover;
+        if (nextHover != null) _lifts.putIfAbsent(nextHover, () => 0);
+      }
+      if (_hoveredIndex != null || _tiltX != 0 || _tiltY != 0 || _lifts.isNotEmpty) {
+        _ensureTicking();
+      }
     }
-    _ensureTicking();
   }
 
   void _onTick(Duration elapsed) {
@@ -295,8 +302,8 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
     if (!mounted || widget.books.isEmpty || _lastCoverWidth <= 0) return;
     _lastPrecachedCur = center;
     final size = Size(_lastCoverWidth, _lastCoverWidth / kCoverAspect);
-    // 提前预解码前后 5 本封面，避免旋转翻出时首帧空白或闪黑
-    for (var d = 0; d <= 5; d++) {
+    // 提前预解码前后 2 本封面，兼顾旋转翻出流畅度与显存占用
+    for (var d = 0; d <= 2; d++) {
       for (final idx in d == 0 ? [center] : [center + d, center - d]) {
         if (idx < 0 || idx >= widget.books.length) continue;
         final url = widget.coverOf(widget.books[idx]);
@@ -542,47 +549,47 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
           child: ClipRect(
             key: _stageKey,
             clipper: const ShelfSidesClipper(),
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                IgnorePointer(
-                  child: AnimatedBuilder(
-                    animation: Listenable.merge([pc, _motion]),
-                    builder: (context, _) {
-                      final p = _page;
-                      final shown = ShelfSpineLayout.visibleIndices(p, books.length, stageW, _ws, _d, _gap);
-                      return Stack(
-                        alignment: Alignment.center,
-                        clipBehavior: Clip.none,
-                        children: [for (final i in shown) _cuboidBook(i, i - p, persp)],
-                      );
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTapUp: (d) => _onTapGlobal(d.globalPosition),
+              onLongPressStart: (d) => _onSelectGlobal(d.globalPosition),
+              onSecondaryTapUp: (d) => _onSelectGlobal(d.globalPosition),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  IgnorePointer(
+                    child: AnimatedBuilder(
+                      animation: Listenable.merge([pc, _motion]),
+                      builder: (context, _) {
+                        final p = _page;
+                        final shown = ShelfSpineLayout.visibleIndices(p, books.length, stageW, _ws, _d, _gap);
+                        return Stack(
+                          alignment: Alignment.center,
+                          clipBehavior: Clip.none,
+                          children: [for (final i in shown) _cuboidBook(i, i - p, persp)],
+                        );
+                      },
+                    ),
+                  ),
+                  PageView.builder(
+                    controller: pc,
+                    itemCount: books.length,
+                    pageSnapping: false,
+                    physics: const ShelfFlingSnapPhysics(),
+                    onPageChanged: (i) {
+                      HapticFeedback.selectionClick();
+                      setState(() {
+                        if (i != _cur) _dir = i > _cur ? 1 : -1;
+                        _cur = i;
+                      });
+                      if (_lifts.isNotEmpty || _tiltX != 0 || _tiltY != 0) _ensureTicking();
+                      widget.onFocusChanged?.call(books[i].aid);
+                      _precacheAround(i);
                     },
+                    itemBuilder: (context, i) => SizedBox.expand(key: ValueKey('shelf-spine-hit-${books[i].aid}')),
                   ),
-                ),
-                PageView.builder(
-                  controller: pc,
-                  itemCount: books.length,
-                  pageSnapping: false,
-                  physics: const ShelfFlingSnapPhysics(),
-                  onPageChanged: (i) {
-                    HapticFeedback.selectionClick();
-                    setState(() {
-                      if (i != _cur) _dir = i > _cur ? 1 : -1;
-                      _cur = i;
-                    });
-                    if (_lifts.isNotEmpty || _tiltX != 0 || _tiltY != 0) _ensureTicking();
-                    widget.onFocusChanged?.call(books[i].aid);
-                    _precacheAround(i);
-                  },
-                  itemBuilder: (context, i) => GestureDetector(
-                    key: ValueKey('shelf-spine-hit-${books[i].aid}'),
-                    behavior: HitTestBehavior.opaque,
-                    onTapUp: (d) => _onTapGlobal(d.globalPosition),
-                    onLongPressStart: (d) => _onSelectGlobal(d.globalPosition),
-                    onSecondaryTapUp: (d) => _onSelectGlobal(d.globalPosition),
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -627,6 +634,7 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
             coverOf: widget.coverOf,
             unreadCount: widget.unreadOf?.call(book) ?? 0,
             volumeCount: widget.volumeCountOf?.call(book) ?? 0,
+            spineWidth: _ws,
             shade: pose.spineShade,
             selected: selected,
             lifted: lift > 0.05,
@@ -844,9 +852,9 @@ class _SpineCoverFace extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // 不透明背板放在 ClipRRect 内且 CoverImage 关掉内部 10px 圆角，彻底消除四角漏底黑点
+            // 不透明背板放在 ClipRRect 内且 CoverImage 关掉内部圆角与浅白底衬，彻底消除四角漏黑点与裁剪底边漏白
             ColoredBox(color: backing),
-            CoverImage(url, decodeSize: decodeSize, borderRadius: 0),
+            CoverImage(url, decodeSize: decodeSize, borderRadius: 0, backgroundColor: backing),
             // 封面左侧极淡的书脊装订压痕，和转过去的书脊自然衔接
             Positioned(
               left: 0,
@@ -863,13 +871,19 @@ class _SpineCoverFace extends StatelessWidget {
               ),
             ),
             if (shade > 0.005) ColoredBox(color: Colors.black.withValues(alpha: shade)),
-            if (selected)
-              DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: radius,
-                  border: Border.all(color: Theme.of(context).colorScheme.primary, width: 3),
+            IgnorePointer(
+              child: AnimatedOpacity(
+                opacity: selected ? 1.0 : 0.0,
+                duration: AppMotion.dur(context, AppMotion.fast),
+                curve: AppMotion.curve,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    borderRadius: radius,
+                    border: Border.all(color: Theme.of(context).colorScheme.primary, width: 3),
+                  ),
                 ),
               ),
+            ),
           ],
         ),
       ),
@@ -922,6 +936,7 @@ class _BookSpine extends ConsumerWidget {
     required this.coverOf,
     required this.unreadCount,
     required this.volumeCount,
+    this.spineWidth,
     required this.shade,
     required this.selected,
     required this.lifted,
@@ -932,6 +947,7 @@ class _BookSpine extends ConsumerWidget {
   final String Function(LibBook) coverOf;
   final int unreadCount;
   final int volumeCount;
+  final double? spineWidth;
   final double shade;
   final bool selected;
   final bool lifted;
@@ -949,150 +965,183 @@ class _BookSpine extends ConsumerWidget {
     final tag = book.done ? '完' : (volumeCount > 0 ? '$volumeCount卷' : '文库');
     final titleFamily = Theme.of(context).textTheme.titleLarge?.fontFamily;
     final titleFallback = Theme.of(context).textTheme.titleLarge?.fontFamilyFallback;
+    final bleedDecodeSize = spineWidth != null ? Size(spineWidth!, spineWidth! / 0.78) : null;
     const radius = BorderRadius.all(Radius.circular(2.5));
 
-    return RepaintBoundary(
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: pal.bg,
-          borderRadius: radius,
-          boxShadow: standingFactor > 0.2
-              ? [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: (dark ? 0.34 : 0.16) * standingFactor * (lifted ? 1.4 : 1.0)),
-                    blurRadius: lifted ? 12 : 4,
-                    offset: Offset(2, lifted ? 8 : 3),
-                  ),
-                ]
-              : null,
-        ),
-        child: ClipRRect(
-          borderRadius: radius,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              // 1. 书脊真实底色（不能和 gradient 写在同一个 BoxDecoration 里，否则 gradient 会盖掉 color）
-              ColoredBox(color: pal.bg),
-              // 2. 顶部满宽出血封面插图，底部通过羽化渐变无缝融进书脊底色
-              Positioned(
-                top: 0,
-                left: 0,
-                right: 0,
-                child: AspectRatio(
-                  aspectRatio: 0.78,
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      if (url.isNotEmpty)
-                        CoverImage(url, thumbnail: true, lowPriority: true, maxDecodeWidth: 160, borderRadius: 0)
-                      else
-                        ColoredBox(color: pal.ink.withValues(alpha: 0.10)),
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [
-                              Colors.transparent,
-                              pal.bg.withValues(alpha: 0.18),
-                              pal.bg.withValues(alpha: 0.85),
-                              pal.bg,
-                            ],
-                            stops: const [0.0, 0.52, 0.86, 1.0],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              // 3. 实体纸盒曲面高光 + 左右折痕阴影 + 右侧微厚度暗边，赋予成排书脊立体感
-              IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.centerLeft,
-                      end: Alignment.centerRight,
-                      colors: [
-                        Colors.white.withValues(alpha: pal.isPaper ? 0.35 : 0.18),
-                        Colors.white.withValues(alpha: 0.04),
-                        Colors.transparent,
-                        Colors.black.withValues(alpha: pal.isPaper ? 0.08 : 0.10),
-                        Colors.black.withValues(alpha: pal.isPaper ? 0.24 : 0.38),
-                      ],
-                      stops: const [0.0, 0.09, 0.55, 0.88, 1.0],
-                    ),
-                  ),
-                ),
-              ),
-              // 4. 顶部和底部的轻微纸边做旧暗角
-              IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.black.withValues(alpha: pal.isPaper ? 0.14 : 0.22), width: 0.6),
-                    borderRadius: radius,
-                  ),
-                ),
-              ),
-              // 5. 书脊文字与底部印章布局
-              Padding(
-                padding: const EdgeInsets.fromLTRB(4, 0, 5, 8),
-                child: Column(
+    // 静态印刷内容单独包进 RepaintBoundary；动态阴影、压暗层与选中框放在外层，避免滑动/悬停每帧重绘离屏纹理
+    final staticBody = RepaintBoundary(
+      child: ClipRRect(
+        borderRadius: radius,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // 1. 书脊真实底色
+            ColoredBox(color: pal.bg),
+            // 2. 顶部满宽出血封面插图：封面底边内收 2px 并改用 pal.bg 底衬，渐变在 0.88 处即达纯色 pal.bg，根除 3D 透视下同边亚像素漏白闪烁
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: AspectRatio(
+                aspectRatio: 0.78,
+                child: Stack(
+                  fit: StackFit.expand,
                   children: [
-                    // 为顶部出血插图留出安全高度，同时允许标题从插图羽化边缘自然接续
-                    const AspectRatio(aspectRatio: 0.86, child: SizedBox.shrink()),
-                    Expanded(
-                      child: Center(
-                        child: _VerticalSpineTitle(
-                          title: book.shown,
-                          color: pal.ink,
-                          fontFamily: titleFamily,
-                          fontFamilyFallback: titleFallback,
+                    if (url.isNotEmpty)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 2,
+                        child: CoverImage(
+                          url,
+                          thumbnail: true,
+                          lowPriority: true,
+                          maxDecodeWidth: 160,
+                          decodeSize: bleedDecodeSize,
+                          borderRadius: 0,
+                          backgroundColor: pal.bg,
                         ),
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    if (unreadCount > 0)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: scheme.primary,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: pal.ink.withValues(alpha: 0.8), width: 0.8),
-                          ),
-                        ),
-                      ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2.5),
+                      )
+                    else
+                      ColoredBox(color: pal.ink.withValues(alpha: 0.10)),
+                    DecoratedBox(
                       decoration: BoxDecoration(
-                        border: Border.all(color: pal.ink.withValues(alpha: 0.72), width: 0.9),
-                        borderRadius: BorderRadius.circular(1.5),
-                      ),
-                      child: Text(
-                        tag,
-                        maxLines: 1,
-                        softWrap: false,
-                        overflow: TextOverflow.clip,
-                        style: TextStyle(color: pal.ink, fontSize: 9.5, fontWeight: FontWeight.w700, height: 1.0, letterSpacing: 0.4),
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.transparent,
+                            pal.bg.withValues(alpha: 0.20),
+                            pal.bg.withValues(alpha: 0.88),
+                            pal.bg,
+                            pal.bg,
+                          ],
+                          stops: const [0.0, 0.48, 0.78, 0.88, 1.0],
+                        ),
                       ),
                     ),
                   ],
                 ),
               ),
-              if (shade > 0.005) ColoredBox(color: Colors.black.withValues(alpha: shade)),
-              if (selected)
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    borderRadius: radius,
-                    border: Border.all(color: scheme.primary, width: 2.5),
+            ),
+            // 3. 实体纸盒曲面高光 + 左右折痕阴影 + 右侧微厚度暗边，赋予成排书脊立体感
+            IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                    colors: [
+                      Colors.white.withValues(alpha: pal.isPaper ? 0.35 : 0.18),
+                      Colors.white.withValues(alpha: 0.04),
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: pal.isPaper ? 0.08 : 0.10),
+                      Colors.black.withValues(alpha: pal.isPaper ? 0.24 : 0.38),
+                    ],
+                    stops: const [0.0, 0.09, 0.55, 0.88, 1.0],
                   ),
                 ),
-            ],
-          ),
+              ),
+            ),
+            // 4. 顶部和底部的轻微纸边做旧暗角
+            IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.black.withValues(alpha: pal.isPaper ? 0.14 : 0.22), width: 0.6),
+                  borderRadius: radius,
+                ),
+              ),
+            ),
+            // 5. 书脊文字与底部印章布局
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 0, 5, 8),
+              child: Column(
+                children: [
+                  // 为顶部出血插图留出安全高度，同时允许标题从插图羽化边缘自然接续
+                  const AspectRatio(aspectRatio: 0.86, child: SizedBox.shrink()),
+                  Expanded(
+                    child: Center(
+                      child: _VerticalSpineTitle(
+                        title: book.shown,
+                        color: pal.ink,
+                        fontFamily: titleFamily,
+                        fontFamilyFallback: titleFallback,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  if (unreadCount > 0)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Container(
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          color: scheme.primary,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: pal.ink.withValues(alpha: 0.8), width: 0.8),
+                        ),
+                      ),
+                    ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2.5),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: pal.ink.withValues(alpha: 0.72), width: 0.9),
+                      borderRadius: BorderRadius.circular(1.5),
+                    ),
+                    child: Text(
+                      tag,
+                      maxLines: 1,
+                      softWrap: false,
+                      overflow: TextOverflow.clip,
+                      style: TextStyle(color: pal.ink, fontSize: 9.5, fontWeight: FontWeight.w700, height: 1.0, letterSpacing: 0.4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
+      ),
+    );
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: pal.bg,
+        borderRadius: radius,
+        boxShadow: standingFactor > 0.2
+            ? [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: (dark ? 0.34 : 0.16) * standingFactor * (lifted ? 1.4 : 1.0)),
+                  blurRadius: lifted ? 12 : 4,
+                  offset: Offset(2, lifted ? 8 : 3),
+                ),
+              ]
+            : null,
+      ),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          staticBody,
+          if (shade > 0.005)
+            DecoratedBox(
+              decoration: BoxDecoration(borderRadius: radius, color: Colors.black.withValues(alpha: shade)),
+            ),
+          IgnorePointer(
+            child: AnimatedOpacity(
+              opacity: selected ? 1.0 : 0.0,
+              duration: AppMotion.dur(context, AppMotion.fast),
+              curve: AppMotion.curve,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: radius,
+                  border: Border.all(color: scheme.primary, width: 2.5),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

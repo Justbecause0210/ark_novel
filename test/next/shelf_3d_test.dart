@@ -287,4 +287,55 @@ void main() {
     expect(find.text('狼与香辛料'), findsNothing);
     expect(find.descendant(of: find.byKey(const ValueKey('shelf-3d-info')), matching: find.byType(SlideTransition)), findsNothing);
   });
+
+  testWidgets('Shelf3DView：宽屏 3 本书在中央或首本位置点击左右任意可见封面均精准切换', (tester) async {
+    tester.view.physicalSize = const Size(1280, 760);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    String? focused;
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 1280,
+              height: 760,
+              child: Shelf3DView(
+                books: books,
+                initialAid: '2',
+                onFocusChanged: (aid) => focused = aid,
+                selected: const {},
+                heroEnabled: true,
+                coverOf: (_) => '',
+                badgeOf: (_) => null,
+                subtitleOf: (b) => 'sub-${b.aid}',
+                actionOf: (_) => (label: '继续读', cid: '101'),
+                onOpen: (_) {},
+                onRead: (_, _) {},
+                onToggleSelect: (_) {},
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final stage = tester.getRect(find.byKey(const ValueKey('shelf-3d-stage')));
+    final w = Shelf3DLayout.coverWidth(1280, 760 - Shelf3DLayout.infoHeight(1.0));
+
+    // 点左侧第 1 本封面 -> 切换到 1
+    await tester.tapAt(Offset(stage.center.dx + Shelf3DLayout.pose(-1, w).dx, stage.center.dy));
+    await tester.pumpAndSettle();
+    expect(focused, '1');
+
+    // 停在第 1 本时点右侧第 3 本（d = +2 紧缩错位处）露出部分 -> 直接切换到 3，不误触第 2 本
+    final pose2 = Shelf3DLayout.pose(2, w);
+    await tester.tapAt(Offset(stage.center.dx + pose2.dx + w * pose2.scale * 0.35, stage.center.dy));
+    await tester.pumpAndSettle();
+    expect(focused, '3');
+  });
 }
