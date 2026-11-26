@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/physics.dart' show SpringSimulation;
 import 'package:flutter/services.dart' show SystemUiOverlayStyle;
@@ -8,9 +6,25 @@ import 'package:share_plus/share_plus.dart';
 
 import '../env.dart';
 import '../image_cache.dart';
+import '../main.dart' show evictInactiveImageCache;
 import '../motion.dart';
 import '../text.dart';
 import '../widgets.dart';
+
+class _ViewerCurveAnimatable extends Animatable<double> {
+  const _ViewerCurveAnimatable(this.animation, {required this.curve, required this.reverseCurve});
+
+  final Animation<double> animation;
+  final Curve curve;
+  final Curve reverseCurve;
+
+  @override
+  double transform(double t) {
+    if (t == 0.0 || t == 1.0) return t;
+    final reversing = animation.status == AnimationStatus.reverse || animation.status == AnimationStatus.dismissed;
+    return reversing ? reverseCurve.flipped.transform(t) : curve.transform(t);
+  }
+}
 
 /// 打开阅读器插图全屏查看器：支持多图左右切换、双击定点缩放、双指缩放、单击显隐工具栏、未放大时下滑关闭。
 Future<void> showReaderImageViewer(BuildContext context, {required List<String> urls, int initialIndex = 0}) {
@@ -26,10 +40,10 @@ Future<void> showReaderImageViewer(BuildContext context, {required List<String> 
     pageBuilder: (ctx, _, _) => _ReaderImageViewer(urls: urls, initialIndex: safeIndex),
     transitionBuilder: (_, anim, _, child) {
       if (reduce) return FadeTransition(opacity: anim, child: child);
-      final curved = CurvedAnimation(parent: anim, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit);
+      final curved = anim.drive(_ViewerCurveAnimatable(anim, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit));
       return FadeTransition(
         opacity: curved,
-        child: ScaleTransition(scale: Tween<double>(begin: 0.95, end: 1.0).animate(curved), child: child),
+        child: ScaleTransition(scale: curved.drive(Tween<double>(begin: 0.95, end: 1.0)), child: child),
       );
     },
   );
@@ -66,15 +80,7 @@ class _ReaderImageViewerState extends ConsumerState<_ReaderImageViewer> with Sin
   void dispose() {
     _pageController.dispose();
     _dismissAnim.dispose();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final cache = PaintingBinding.instance.imageCache;
-      final maxBytes = cache.maximumSizeBytes;
-      const postViewerTarget = 16 << 20;
-      if (maxBytes > 0 && cache.currentSizeBytes > postViewerTarget) {
-        cache.maximumSizeBytes = math.min(maxBytes, postViewerTarget);
-        cache.maximumSizeBytes = maxBytes;
-      }
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => evictInactiveImageCache());
     super.dispose();
   }
 
@@ -233,18 +239,26 @@ class _ZoomableImagePage extends StatefulWidget {
 class _ZoomableImagePageState extends State<_ZoomableImagePage> with SingleTickerProviderStateMixin {
   final _transform = TransformationController();
   late final AnimationController _zoomAnim = AnimationController(vsync: this, duration: AppMotion.standard);
-  Animation<Matrix4>? _matrixAnim;
+  late final CurvedAnimation _zoomCurve = CurvedAnimation(parent: _zoomAnim, curve: AppMotion.curve);
+  final _matrixTween = Matrix4Tween();
   Offset _doubleTapPos = Offset.zero;
   bool _zoomed = false;
+
+  void _onZoomTick() {
+    _transform.value = _matrixTween.evaluate(_zoomCurve);
+  }
 
   @override
   void initState() {
     super.initState();
     _transform.addListener(_syncZoom);
+    _zoomAnim.addListener(_onZoomTick);
   }
 
   @override
   void dispose() {
+    _zoomAnim.removeListener(_onZoomTick);
+    _zoomCurve.dispose();
     _transform.removeListener(_syncZoom);
     _transform.dispose();
     _zoomAnim.dispose();
@@ -274,8 +288,9 @@ class _ZoomableImagePageState extends State<_ZoomableImagePage> with SingleTicke
       _transform.value = target;
       return;
     }
-    _matrixAnim = Matrix4Tween(begin: _transform.value.clone(), end: target).animate(CurvedAnimation(parent: _zoomAnim, curve: AppMotion.curve))
-      ..addListener(() => _transform.value = _matrixAnim!.value);
+    _matrixTween
+      ..begin = _transform.value.clone()
+      ..end = target;
     _zoomAnim.forward(from: 0);
   }
 

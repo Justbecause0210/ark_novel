@@ -21,6 +21,7 @@ import '../widgets.dart';
 import 'page_curl.dart';
 import 'page_physics.dart';
 import 'paginator.dart';
+import 'reader_bg.dart';
 import 'reader_chrome.dart';
 import 'reader_image_viewer.dart';
 
@@ -533,60 +534,188 @@ HighlightEntry? highlightAt(List<HighlightEntry> highlights, GlobalKey key, int 
   return idx == null ? null : _highlightAtOffset(highlights, idx);
 }
 
-Widget _readerImageWidget(String url, Color? color, {List<String>? gallery, int index = 0, Size? decodeSize}) =>
-    _ReaderIllustration(url: url, color: color, gallery: gallery, index: index, decodeSize: decodeSize);
+/// 按 `[start, end)` 区间过滤朗读高亮通知：仅当高亮切入、移动于本区间内或切出时才重建子组件，
+/// 避免双页另一页或滚屏其余段落块随逐句朗读无效重建。
+class _ScopedHighlightBuilder extends StatefulWidget {
+  const _ScopedHighlightBuilder({
+    required this.highlight,
+    required this.start,
+    required this.end,
+    required this.builder,
+  });
 
-class _ReaderIllustration extends ConsumerWidget {
-  const _ReaderIllustration({required this.url, this.color, this.gallery, this.index = 0, this.decodeSize});
+  final ValueListenable<(int, int)?> highlight;
+  final int start;
+  final int end;
+  final Widget Function(BuildContext context, (int, int)? hl) builder;
+
+  @override
+  State<_ScopedHighlightBuilder> createState() => _ScopedHighlightBuilderState();
+}
+
+class _ScopedHighlightBuilderState extends State<_ScopedHighlightBuilder> {
+  (int, int)? _active;
+
+  (int, int)? _clipped((int, int)? hl) => (hl != null && hl.$2 > widget.start && hl.$1 < widget.end) ? hl : null;
+
+  void _onHighlight() {
+    final next = _clipped(widget.highlight.value);
+    if (next != _active) setState(() => _active = next);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _active = _clipped(widget.highlight.value);
+    widget.highlight.addListener(_onHighlight);
+  }
+
+  @override
+  void didUpdateWidget(_ScopedHighlightBuilder old) {
+    super.didUpdateWidget(old);
+    if (widget.highlight != old.highlight) {
+      old.highlight.removeListener(_onHighlight);
+      widget.highlight.addListener(_onHighlight);
+    }
+    _active = _clipped(widget.highlight.value);
+  }
+
+  @override
+  void dispose() {
+    widget.highlight.removeListener(_onHighlight);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, _active);
+}
+
+Widget _readerImageWidget(
+  String url,
+  Color? color, {
+  List<String>? gallery,
+  int index = 0,
+  Size? decodeSize,
+  ColorFilter? colorFilter,
+}) => _ReaderIllustration(url: url, color: color, gallery: gallery, index: index, decodeSize: decodeSize, colorFilter: colorFilter);
+
+class _ReaderIllustration extends ConsumerStatefulWidget {
+  const _ReaderIllustration({
+    required this.url,
+    this.color,
+    this.gallery,
+    this.index = 0,
+    this.decodeSize,
+    this.colorFilter,
+  });
 
   final String url;
   final Color? color;
   final List<String>? gallery;
   final int index;
   final Size? decodeSize;
+  final ColorFilter? colorFilter;
 
-  void _openViewer(BuildContext context) {
-    final urls = (gallery != null && gallery!.isNotEmpty) ? gallery! : [url];
-    showReaderImageViewer(context, urls: urls, initialIndex: index);
+  @override
+  ConsumerState<_ReaderIllustration> createState() => _ReaderIllustrationState();
+}
+
+class _ReaderIllustrationState extends ConsumerState<_ReaderIllustration> {
+  late final ValueNotifier<bool> _ready;
+  int _activePlaceholders = 0;
+  bool _syncScheduled = false;
+
+  bool _peekReady(String url) {
+    if (isWebPreview) return true;
+    try {
+      return ref.read(imageStoreProvider).peek(url) != null;
+    } catch (_) {
+      return false;
+    }
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final muted = (color ?? Colors.grey).withValues(alpha: 0.55);
-    final loaded = isWebPreview || (!isWebPreview && (ref.read(imageStoreProvider).peek(url) != null || ref.watch(imageBytesProvider(url)).hasValue));
-    final img = NetImage(
-      url,
+  void initState() {
+    super.initState();
+    _ready = ValueNotifier<bool>(_peekReady(widget.url));
+  }
+
+  @override
+  void didUpdateWidget(_ReaderIllustration old) {
+    super.didUpdateWidget(old);
+    if (widget.url != old.url) {
+      _ready.value = _peekReady(widget.url);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ready.dispose();
+    super.dispose();
+  }
+
+  void _onPlaceholderDelta(int delta) {
+    _activePlaceholders = math.max(0, _activePlaceholders + delta);
+    if (_syncScheduled) return;
+    _syncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _syncScheduled = false;
+      if (!mounted) return;
+      final next = _activePlaceholders == 0;
+      if (_ready.value != next) _ready.value = next;
+    });
+  }
+
+  void _openViewer(BuildContext context) {
+    if (!_ready.value) return;
+    final urls = (widget.gallery != null && widget.gallery!.isNotEmpty) ? widget.gallery! : [widget.url];
+    showReaderImageViewer(context, urls: urls, initialIndex: widget.index);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = (widget.color ?? Colors.grey).withValues(alpha: 0.55);
+    Widget img = NetImage(
+      widget.url,
       fit: BoxFit.contain,
-      decodeSize: decodeSize,
-      loading: SizedBox(
-        height: 220,
-        child: Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: muted)),
-              const SizedBox(height: 12),
-              Text('图片加载中…', style: TextStyle(fontSize: 13, color: muted)),
-            ],
+      decodeSize: widget.decodeSize,
+      loading: _IllustrationPlaceholderTrack(
+        onDelta: _onPlaceholderDelta,
+        child: SizedBox(
+          height: 220,
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: muted)),
+                const SizedBox(height: 12),
+                Text('图片加载中…', style: TextStyle(fontSize: 13, color: muted)),
+              ],
+            ),
           ),
         ),
       ),
-      errorBuilder: (retry) => SizedBox(
-        height: 220,
-        child: Center(
-          child: Listener(
-            onPointerUp: (_) => _retryTap = true,
-            child: TextButton.icon(
-              onPressed: retry,
-              style: TextButton.styleFrom(foregroundColor: muted),
-              icon: const Icon(Icons.broken_image_outlined, size: 22),
-              label: const Text('图片加载失败，点击重试'),
+      errorBuilder: (retry) => _IllustrationPlaceholderTrack(
+        onDelta: _onPlaceholderDelta,
+        child: SizedBox(
+          height: 220,
+          child: Center(
+            child: Listener(
+              onPointerUp: (_) => _retryTap = true,
+              child: TextButton.icon(
+                onPressed: retry,
+                style: TextButton.styleFrom(foregroundColor: muted),
+                icon: const Icon(Icons.broken_image_outlined, size: 22),
+                label: const Text('图片加载失败，点击重试'),
+              ),
             ),
           ),
         ),
       ),
     );
-    if (!loaded) return img;
+    if (widget.colorFilter != null) {
+      img = ColorFiltered(colorFilter: widget.colorFilter!, child: img);
+    }
     return GestureDetector(
       onLongPress: () => _openViewer(context),
       child: Stack(
@@ -596,36 +725,69 @@ class _ReaderIllustration extends ConsumerWidget {
           Positioned(
             right: 4,
             bottom: 4,
-            child: Listener(
-              onPointerUp: (_) => _retryTap = true,
-              child: Tooltip(
-                message: hz(context, '全屏查看插图'),
-                child: Material(
-                  type: MaterialType.transparency,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(22),
-                    onTap: () => _openViewer(context),
-                    child: SizedBox(
-                      width: 44,
-                      height: 44,
-                      child: Center(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(16)),
-                          child: const Padding(
-                            padding: EdgeInsets.all(6),
-                            child: Icon(Icons.zoom_out_map_rounded, size: 16, color: Colors.white70),
+            child: ValueListenableBuilder<bool>(
+              valueListenable: _ready,
+              builder: (context, ready, _) {
+                if (!ready) return const SizedBox.shrink();
+                return Listener(
+                  onPointerUp: (_) => _retryTap = true,
+                  child: Tooltip(
+                    message: hz(context, '全屏查看插图'),
+                    child: Material(
+                      type: MaterialType.transparency,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(22),
+                        onTap: () => _openViewer(context),
+                        child: SizedBox(
+                          width: 44,
+                          height: 44,
+                          child: Center(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(color: Colors.black45, borderRadius: BorderRadius.circular(16)),
+                              child: const Padding(
+                                padding: EdgeInsets.all(6),
+                                child: Icon(Icons.zoom_out_map_rounded, size: 16, color: Colors.white70),
+                              ),
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
-                ),
-              ),
+                );
+              },
             ),
           ),
         ],
       ),
     );
   }
+}
+
+class _IllustrationPlaceholderTrack extends StatefulWidget {
+  const _IllustrationPlaceholderTrack({required this.onDelta, required this.child});
+
+  final ValueChanged<int> onDelta;
+  final Widget child;
+
+  @override
+  State<_IllustrationPlaceholderTrack> createState() => _IllustrationPlaceholderTrackState();
+}
+
+class _IllustrationPlaceholderTrackState extends State<_IllustrationPlaceholderTrack> {
+  @override
+  void initState() {
+    super.initState();
+    widget.onDelta(1);
+  }
+
+  @override
+  void dispose() {
+    widget.onDelta(-1);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 

@@ -48,6 +48,7 @@ class PagedBody extends StatefulWidget {
     this.onTurn,
     this.pageBackground,
     this.backgroundKey,
+    this.imageColorFilter,
     this.chromeConfig,
     this.onUserInteract,
   });
@@ -58,6 +59,9 @@ class PagedBody extends StatefulWidget {
 
   final Widget? pageBackground;
   final Object? backgroundKey;
+
+  /// 可选的局部插图/卷封面色彩滤镜（仅开暖色护眼时用于避免全屏 `ColorFiltered` `saveLayer`）。
+  final ColorFilter? imageColorFilter;
   final ReaderChromeConfig? chromeConfig;
   final VoidCallback? onUserInteract;
 
@@ -129,10 +133,11 @@ class PagedBody extends StatefulWidget {
   final ReaderNav? nav;
   final bool Function() hasSelection;
 
-  /// 内存压力告警时清空分页结果与配色缓存，释放非活跃章节排版数据。
+  /// 内存压力告警时清空分页结果、配色与烘焙纸张纹理缓存，释放非活跃章节排版数据。
   static void clearPageCache() {
-    _PagedBodyState._pageCache.clear();
+    PaginateCache.clear();
     _hlColorCache.clear();
+    ReaderBackground.evictTextureCache();
   }
 
   @override
@@ -140,9 +145,6 @@ class PagedBody extends StatefulWidget {
 }
 
 class _PagedBodyState extends State<PagedBody> {
-  // 分页结果留几章：翻过去时刚排过的相邻章不用再排一遍（键用文本长度与哈希，避免静态缓存强引用整章字符串）
-  static final _pageCache = <(Size, TextStyle, double, int, int, String), List<int>>{};
-
   final _curl = PageCurlController();
   final _keys = <int, GlobalKey>{};
   final _pageParaKeys = <int, List<(int, GlobalKey)>>{};
@@ -289,7 +291,7 @@ class _PagedBodyState extends State<PagedBody> {
     if (layout == null) {
       if (_peekLayout.length >= 4) _peekLayout.remove(_peekLayout.keys.first);
       final has = p.chapter.text.trim().isNotEmpty;
-      final h = has ? headingHeight(p.title, widget.style, size.width) : 0.0;
+      final h = has ? PaginateCache.headingHeightCached(p.title, widget.style, size.width) : 0.0;
       layout = _peekLayout[key] = (h, has ? _paged(p.chapter, p.title, size, h) : const [0]);
     }
     final (head, starts) = layout;
@@ -319,16 +321,17 @@ class _PagedBodyState extends State<PagedBody> {
     });
   }
 
-  static TextStyle _layoutStyleOf(TextStyle s) => s.copyWith(color: const Color(0xFF000000));
-
   List<int> _paged(Chapter c, String title, Size size, double head) {
-    final layoutStyle = _layoutStyleOf(widget.style);
-    final key = (size, layoutStyle, widget.paragraphSpacing, c.text.length, c.text.hashCode, title);
-    // 用过的挪到最后（LRU）：满了删最久没用的，正在读的这章不会被相邻章节挤掉
-    final hit = _pageCache.remove(key);
-    if (hit != null) return _pageCache[key] = hit;
-    if (_pageCache.length >= 4) _pageCache.remove(_pageCache.keys.first);
-    return _pageCache[key] = paginate(c.text, layoutStyle, size, strut: readerStrut(layoutStyle), firstTop: head, paragraphSpacing: widget.paragraphSpacing);
+    final layoutStyle = PaginateCache.normalizeStyle(widget.style);
+    return PaginateCache.paginateCached(
+      text: c.text,
+      style: layoutStyle,
+      size: size,
+      title: title,
+      firstTop: head,
+      paragraphSpacing: widget.paragraphSpacing,
+      strut: readerStrut(layoutStyle),
+    );
   }
 
   /// 字符偏移所在的那一屏。
@@ -449,8 +452,14 @@ class _PagedBodyState extends State<PagedBody> {
     return i >= f.covers && i - f.covers < f.textPages;
   }
 
-  Widget _readerImage(String url, {List<String>? gallery, int index = 0}) =>
-      _readerImageWidget(url, widget.style.color, gallery: gallery, index: index, decodeSize: _imgBox.isEmpty ? null : _imgBox);
+  Widget _readerImage(String url, {List<String>? gallery, int index = 0}) => _readerImageWidget(
+    url,
+    widget.style.color,
+    gallery: gallery,
+    index: index,
+    decodeSize: _imgBox.isEmpty ? null : _imgBox,
+    colorFilter: widget.imageColorFilter,
+  );
 
   /// 排在第 [slot] 个位置的页：前面、后面排不下的是相邻章节的页，还没加载好就空着。
   Widget _slot(BuildContext context, int slot, bool live, EdgeInsets pad, {_Chrome chrome = _Chrome.full}) {
@@ -529,9 +538,11 @@ class _PagedBodyState extends State<PagedBody> {
         Padding(
           padding: i == 0 ? pad.copyWith(top: pad.top + f.head) : pad,
           child: useLiveHighlight
-              ? ValueListenableBuilder<(int, int)?>(
-                  valueListenable: widget.highlight!,
-                  builder: (_, hl, _) => buildPageText((a, b) => widget.spanOfHighlight!(a, b, hl)),
+              ? _ScopedHighlightBuilder(
+                  highlight: widget.highlight!,
+                  start: f.starts[i],
+                  end: end,
+                  builder: (_, hl) => buildPageText((a, b) => widget.spanOfHighlight!(a, b, hl)),
                 )
               : buildPageText(f.spanOf),
         ),
@@ -641,14 +652,14 @@ class _PagedBodyState extends State<PagedBody> {
         _layoutSize = size;
         PagedBody.lastLayout = (size, cols);
         // 同样的版面（大小、排版样式、段间距、正文）不重复分页；开关菜单栏、拖滑块、换主题/暖色这类不改字形宽高的重建不会触发全文排版
-        final layoutStyle = _layoutStyleOf(widget.style);
+        final layoutStyle = PaginateCache.normalizeStyle(widget.style);
         final sig = Object.hash(size, cols, layoutStyle, widget.paragraphSpacing, _c.text.length, _c.text.hashCode, widget.title, widget.volumeCover != null);
         if (sig != _sig) {
           final keep = _anchor;
           _sig = sig;
           _cols = cols;
           _width = size.width;
-          _head = _hasText ? headingHeight(widget.title, widget.style, size.width) : 0;
+          _head = _hasText ? PaginateCache.headingHeightCached(widget.title, widget.style, size.width) : 0;
           _starts = _hasText ? _paged(_c, widget.title, size, _head) : const [0];
           _meCache = null;
           _peekLayout.clear();
@@ -699,6 +710,7 @@ class _PagedBodyState extends State<PagedBody> {
               sig,
               widget.background,
               widget.backgroundKey,
+              widget.imageColorFilter,
               widget.chromeConfig?.layoutSignature,
               widget.color,
               widget.showFooter,

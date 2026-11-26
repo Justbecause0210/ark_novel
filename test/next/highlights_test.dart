@@ -131,4 +131,21 @@ void main() {
     final snap = SyncMerge.snapshot('local-dev');
     expect((snap['highlights'] as List).length, 2);
   });
+
+  test('HighlightStore.forChapter 返回缓存不可变列表并在变更时失效刷新', () async {
+    await HighlightStore.add(aid: '200', cid: 'c1', chapter: '第一章', start: 10, end: 20, quote: '第二句');
+    await HighlightStore.add(aid: '200', cid: 'c1', chapter: '第一章', start: 2, end: 8, quote: '第一句');
+
+    final l1 = HighlightStore.forChapter('200', 'c1');
+    final l2 = HighlightStore.forChapter('200', 'c1');
+    expect(identical(l1, l2), isTrue);
+    expect(l1.map((e) => e.start).toList(), [2, 10]);
+    expect(() => l1.add(l1.first), throwsUnsupportedError);
+
+    final added = await HighlightStore.add(aid: '200', cid: 'c1', chapter: '第一章', start: 5, end: 9, quote: '中间句');
+    final l3 = HighlightStore.forChapter('200', 'c1');
+    expect(identical(l1, l3), isFalse);
+    expect(l3.map((e) => e.start).toList(), [2, 5, 10]);
+    expect(HighlightStore.byId(added.id)?.quote, '中间句');
+  });
 }

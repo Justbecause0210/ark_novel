@@ -1,5 +1,113 @@
 part of '../reader_page.dart';
 
+/// 独立亮度压暗遮罩：只订阅 `prefs.dim`，拖亮度滑块不重建整页阅读器。
+class _ReaderDimOverlay extends ConsumerWidget {
+  const _ReaderDimOverlay();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final dim = ref.watch(readerPrefsProvider.select((p) => p.dim));
+    if (dim <= 0) return const SizedBox.shrink();
+    return IgnorePointer(child: ColoredBox(color: Colors.black.withValues(alpha: dim)));
+  }
+}
+
+/// 顶栏 / 底栏统一滑入滑出容器：退场动画完成后彻底卸载子节点（返回 `SizedBox.shrink()`），
+/// 消除日常阅读翻页时屏幕外 `Slider` 与监听器的无效重建。
+class _ReaderSlideBar extends StatefulWidget {
+  const _ReaderSlideBar({
+    required this.visible,
+    required this.hiddenOffset,
+    required this.builder,
+  });
+
+  final bool visible;
+  final Offset hiddenOffset;
+  final WidgetBuilder builder;
+
+  @override
+  State<_ReaderSlideBar> createState() => _ReaderSlideBarState();
+}
+
+class _ReaderSlideBarState extends State<_ReaderSlideBar> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    value: widget.visible ? 1.0 : 0.0,
+    duration: AppMotion.standard,
+    reverseDuration: AppMotion.fast,
+  );
+  late final CurvedAnimation _slideCurve = CurvedAnimation(
+    parent: _controller,
+    curve: AppMotion.decelerate,
+    reverseCurve: AppMotion.exit,
+  );
+  late final CurvedAnimation _fadeCurve = CurvedAnimation(
+    parent: _controller,
+    curve: AppMotion.curve,
+    reverseCurve: AppMotion.curve,
+  );
+  bool _mountedChild = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _mountedChild = widget.visible;
+    _controller.addStatusListener(_onStatus);
+  }
+
+  void _onStatus(AnimationStatus status) {
+    if (status == AnimationStatus.dismissed && !widget.visible && _mountedChild && mounted) {
+      setState(() => _mountedChild = false);
+    }
+  }
+
+  @override
+  void didUpdateWidget(_ReaderSlideBar old) {
+    super.didUpdateWidget(old);
+    if (widget.visible != old.visible) {
+      if (AppMotion.reduce(context)) {
+        _controller.value = widget.visible ? 1.0 : 0.0;
+        _mountedChild = widget.visible;
+      } else if (widget.visible) {
+        _mountedChild = true;
+        _controller.forward();
+      } else {
+        _controller.reverse();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.removeStatusListener(_onStatus);
+    _slideCurve.dispose();
+    _fadeCurve.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_mountedChild) return const SizedBox.shrink();
+    if (AppMotion.reduce(context)) {
+      return widget.visible ? widget.builder(context) : const SizedBox.shrink();
+    }
+    return ExcludeSemantics(
+      excluding: !widget.visible,
+      child: IgnorePointer(
+        ignoring: !widget.visible,
+        child: SlideTransition(
+          position: Tween<Offset>(begin: widget.hiddenOffset, end: Offset.zero).animate(_slideCurve),
+          child: FadeTransition(
+            opacity: _fadeCurve,
+            child: widget.builder(context),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// 加载态：允许轻触唤出顶栏，同时左上角常驻半透明返回键 + 中央章节名提示，避免慢网或无侧滑平台被困在转圈屏。
 class _ReaderLoadingView extends StatelessWidget {
   const _ReaderLoadingView({

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/scheduler.dart';
 
@@ -429,7 +430,8 @@ class ReaderAutoScrollBar extends StatelessWidget {
   }
 }
 
-/// 翻页模式自动翻页时贴在底部的极细柔和倒计时进度条。
+/// 翻页模式自动翻页时贴在底部的极细柔和倒计时进度条：
+/// 使用独立 [RepaintBoundary] + `CustomPaint(repaint: progress)` 直画，每帧零 Layout 与零 Widget 重建。
 class ReaderAutoTurnProgressBar extends StatelessWidget {
   const ReaderAutoTurnProgressBar({
     super.key,
@@ -456,21 +458,15 @@ class ReaderAutoTurnProgressBar extends StatelessWidget {
           beginScale: 1.0,
           duration: AppMotion.fast,
           child: IgnorePointer(
-            child: ValueListenableBuilder<double>(
-              valueListenable: controller.progress,
-              builder: (_, v, _) => SizedBox(
+            child: RepaintBoundary(
+              child: SizedBox(
                 height: 2.5,
                 width: double.infinity,
-                child: ColoredBox(
-                  color: trackColor,
-                  child: FractionallySizedBox(
-                    alignment: Alignment.centerLeft,
-                    widthFactor: v.clamp(0.0, 1.0),
-                    child: AnimatedContainer(
-                      duration: AppMotion.dur(context, AppMotion.fast),
-                      curve: AppMotion.curve,
-                      color: barColor,
-                    ),
+                child: CustomPaint(
+                  painter: _AutoTurnBarPainter(
+                    progress: controller.progress,
+                    barColor: barColor,
+                    trackColor: trackColor,
                   ),
                 ),
               ),
@@ -480,4 +476,29 @@ class ReaderAutoTurnProgressBar extends StatelessWidget {
       },
     );
   }
+}
+
+class _AutoTurnBarPainter extends CustomPainter {
+  _AutoTurnBarPainter({
+    required this.progress,
+    required this.barColor,
+    required this.trackColor,
+  }) : super(repaint: progress);
+
+  final ValueListenable<double> progress;
+  final Color barColor;
+  final Color trackColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) return;
+    canvas.drawRect(Offset.zero & size, Paint()..color = trackColor);
+    final factor = progress.value.clamp(0.0, 1.0);
+    if (factor > 0) {
+      canvas.drawRect(Rect.fromLTWH(0, 0, size.width * factor, size.height), Paint()..color = barColor);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_AutoTurnBarPainter old) => old.progress != progress || old.barColor != barColor || old.trackColor != trackColor;
 }
