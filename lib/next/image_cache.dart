@@ -19,6 +19,7 @@ import 'app_prefs.dart';
 import 'cache.dart';
 import 'files.dart';
 import 'library.dart';
+import 'meta_cache.dart';
 import 'session.dart';
 import 'volumes.dart';
 
@@ -55,6 +56,30 @@ class ImageStore {
   final _hostClearedAt = <String, DateTime>{};
   final _hostFailedAt = <String, DateTime>{};
   static const _challengeCooldown = Duration(seconds: 60);
+
+  // 15 分钟 TTL 内存负缓存：确定性 404/410/无效图短期不再反复回源，显式重试可绕过
+  static const _negCacheTtl = Duration(minutes: 15);
+  static const _negCacheCap = 512;
+  final _negCache = <String, (DateTime at, Object error)>{};
+
+  // 缩略图构建并发信号量（最多同时 2 张解码/裁切/压缩）
+  static const _maxThumbBuild = 2;
+  int _thumbBuildRunning = 0;
+  final _thumbBuildWaiting = <Completer<void>>[];
+
+  // imgthumb/ 目录按 baseName 索引的内存缓存，避免 remove() 每次全扫目录
+  Map<String, Set<String>>? _thumbIndex;
+  Future<Map<String, Set<String>>>? _thumbIndexFuture;
+
+  // 本次运行已触碰过的文件路径集合，避免反复触发 File.lastModified() syscall
+  final _touchedSession = <String>{};
+  static const _touchedSessionCap = 4096;
+
+  // trim() 冷却控制：24h 内且新增写入不足 50 MB 时跳过（force: true 可强制执行）
+  static const _trimCooldown = Duration(hours: 24);
+  static const _trimWriteThreshold = 50 << 20;
+  DateTime? _lastTrimAt;
+  int _bytesWrittenSinceTrim = 0;
 
   // 网络下载排队：同时最多 [maxNet] 张。可见图排 [_highWaiting]（LIFO，优先唤醒最新进入视口），预取/后置露边排 [_lowWaiting]（FIFO）。
   // 滑出屏幕的会被 [cancel] 从队里拿掉，已无订阅者时取消在途 CancelToken 立即归还槽位；退出阅读器可调 [cancelPrefetch] 取消预取。
@@ -130,9 +155,11 @@ class ImageStore {
   Uint8List? peekThumb(String rawUrl) => rawUrl.isEmpty ? null : _hitThumb(thumbKey(rawUrl));
 
   /// 异步加载书架缩略图（内存 → `imgthumb/` 磁盘 → 原图烘焙裁剪并压缩落盘；headless 或不支持压缩插件时优雅回退）。
-  Future<Uint8List> loadThumb(String rawUrl, {bool lowPriority = false}) {
-    final key = thumbKey(rawUrl);
+  /// [forceRetry] 可绕过负缓存；[skipSr] 为 true 时跳过超分链路（如提取封面主色）。
+  Future<Uint8List> loadThumb(String rawUrl, {bool lowPriority = false, bool forceRetry = false, bool skipSr = false}) {
+    final key = thumbKey(rawUrl, sr: skipSr ? false : null);
     _thumbCancelled.remove(key);
+    if (forceRetry) clearNegativeCache(rawUrl);
     final hit = _hitThumb(key);
     if (hit != null) return Future.value(hit);
     final running = _thumbInflight[key];
@@ -143,15 +170,22 @@ class ImageStore {
     }
     _thumbInflightRefs[key] = 1;
     late final Future<Uint8List> f;
-    f = _fetchThumb(rawUrl, key, lowPriority: lowPriority).whenComplete(() {
+    f = _fetchThumb(rawUrl, key, lowPriority: lowPriority, forceRetry: forceRetry, skipSr: skipSr).whenComplete(() {
       if (identical(_thumbInflight[key], f)) {
         _thumbInflight.remove(key);
         _thumbInflightRefs.remove(key);
         _thumbCalledLoad.remove(key);
+        _thumbCancelled.remove(key);
+      } else if (!_thumbInflight.containsKey(key)) {
+        _thumbCancelled.remove(key);
       }
     });
     return _thumbInflight[key] = f;
   }
+
+  /// [loadThumb] 的可读别名。
+  Future<Uint8List> loadThumbnail(String rawUrl, {bool lowPriority = false, bool forceRetry = false, bool skipSr = false}) =>
+      loadThumb(rawUrl, lowPriority: lowPriority, forceRetry: forceRetry, skipSr: skipSr);
 
   /// 取消一次缩略图订阅；仅当该缩略图无其他订阅者时释放底层网络请求。
   void cancelThumb(String rawUrl) {
@@ -170,7 +204,49 @@ class ImageStore {
     }
   }
 
-  Future<Uint8List> _fetchThumb(String rawUrl, String key, {required bool lowPriority}) async {
+  Future<T> _runThumbBuild<T>(Future<T> Function() fn) async {
+    if (_thumbBuildRunning >= _maxThumbBuild) {
+      final c = Completer<void>();
+      _thumbBuildWaiting.add(c);
+      await c.future;
+    } else {
+      _thumbBuildRunning++;
+    }
+    try {
+      return await fn();
+    } finally {
+      if (_thumbBuildWaiting.isNotEmpty) {
+        _thumbBuildWaiting.removeAt(0).complete();
+      } else {
+        _thumbBuildRunning--;
+      }
+    }
+  }
+
+  Future<Map<String, Set<String>>> _ensureThumbIndex(Directory thumbDir) {
+    if (_thumbIndex case final idx?) return Future.value(idx);
+    return _thumbIndexFuture ??= () async {
+      final map = <String, Set<String>>{};
+      if (await thumbDir.exists()) {
+        await for (final f in thumbDir.list()) {
+          if (f is! File || _isTemp(f)) continue;
+          final name = p.basename(f.path);
+          final sep = name.indexOf('_');
+          final base = sep > 0 ? name.substring(0, sep) : name;
+          (map[base] ??= <String>{}).add(name);
+        }
+      }
+      return _thumbIndex ??= map;
+    }().whenComplete(() => _thumbIndexFuture = null);
+  }
+
+  void _indexThumbFile(String normUrl, String fileName) {
+    final idx = _thumbIndex;
+    if (idx == null) return;
+    (idx[_name(normUrl)] ??= <String>{}).add(fileName);
+  }
+
+  Future<Uint8List> _fetchThumb(String rawUrl, String key, {required bool lowPriority, bool forceRetry = false, bool skipSr = false}) async {
     final (:url, :crop) = splitCrop(rawUrl);
     final normUrl = url.replaceFirst('http://', 'https://');
     final dir = await _thumbDir();
@@ -182,17 +258,22 @@ class ImageStore {
         _unbakedThumbs.remove(key);
         _putThumb(key, bytes);
         _touch(file).ignore();
-        if (srSupported && (_autoSr(normUrl) || wantsSr(rawUrl)) && _srDone == null) {
+        if (!skipSr && srSupported && (_autoSr(normUrl) || wantsSr(rawUrl)) && _srDone == null) {
           warmSrIndex().ignore();
         }
         return bytes;
       }
+      try {
+        await file.delete();
+      } catch (_) {}
     }
     if (_thumbCancelled.remove(key)) throw const ImageCancelled();
     _thumbCalledLoad.add(key);
-    final orig = await _load(normUrl, lowPriority: lowPriority);
-    final source = srSupported ? await _srOr(rawUrl, orig) : orig;
-    final effectiveKey = thumbKey(rawUrl);
+    final orig = await _load(normUrl, lowPriority: lowPriority, forceRetry: forceRetry);
+    if (_thumbCancelled.remove(key)) throw const ImageCancelled();
+    final source = (!skipSr && srSupported) ? await _srOr(rawUrl, orig) : orig;
+    if (_thumbCancelled.remove(key)) throw const ImageCancelled();
+    final effectiveKey = skipSr ? key : thumbKey(rawUrl);
     if (effectiveKey != key) {
       final hit = _hitThumb(effectiveKey);
       if (hit != null) return hit;
@@ -205,14 +286,24 @@ class ImageStore {
           _touch(ef).ignore();
           return eb;
         }
+        try {
+          await ef.delete();
+        } catch (_) {}
       }
     }
-    final result = await _buildThumbnail(source, crop);
+    if (_thumbCancelled.remove(key)) throw const ImageCancelled();
+    final result = await _runThumbBuild(() async {
+      if (_thumbCancelled.remove(key)) throw const ImageCancelled();
+      return _buildThumbnail(source, crop);
+    });
     if (result.baked || crop == null) {
       _unbakedThumbs.remove(effectiveKey);
       await dir.create(recursive: true);
-      final outFile = File(p.join(dir.path, _thumbFileName(normUrl, effectiveKey)));
+      final outName = _thumbFileName(normUrl, effectiveKey);
+      final outFile = File(p.join(dir.path, outName));
       await writeFileAtomic(outFile, result.bytes);
+      _bytesWrittenSinceTrim += result.bytes.length;
+      _indexThumbFile(normUrl, outName);
       _putThumb(effectiveKey, result.bytes);
     } else {
       _unbakedThumbs.add(effectiveKey);
@@ -230,15 +321,53 @@ class ImageStore {
   Future<Uint8List> load(String rawUrl) => loadWithPriority(rawUrl);
 
   /// 按优先级加载原图字节（保持 [load] 签名不变以兼容现有测试桩）。
-  Future<Uint8List> loadWithPriority(String rawUrl, {bool lowPriority = false}) async {
-    final bytes = await _load(rawUrl, lowPriority: lowPriority);
-    return srSupported ? _srOr(rawUrl, bytes) : bytes;
+  /// [forceRetry] 绕过内存负缓存；[skipSr] 为 true 时直接返回原图且不触发超分。
+  Future<Uint8List> loadWithPriority(String rawUrl, {bool lowPriority = false, bool forceRetry = false, bool skipSr = false}) async {
+    final bytes = await _load(rawUrl, lowPriority: lowPriority, forceRetry: forceRetry);
+    return (!skipSr && srSupported) ? _srOr(rawUrl, bytes) : bytes;
+  }
+
+  /// 清除指定图片（或全部图片）的确定性失败负缓存，用于显式重试。
+  void clearNegativeCache([String? rawUrl]) {
+    if (rawUrl == null || rawUrl.isEmpty) {
+      _negCache.clear();
+    } else {
+      _negCache.remove(_norm(rawUrl));
+    }
+  }
+
+  static bool _isDeterministicFailure(Object e) {
+    if (e is DioException) {
+      final status = e.response?.statusCode;
+      return status == 404 || status == 410;
+    }
+    if (e is StateError) {
+      return e.message == 'invalid image response' || e.message == 'empty image response';
+    }
+    return false;
+  }
+
+  void _recordNegativeCache(String url, Object error) {
+    if (!_isDeterministicFailure(error)) return;
+    _negCache.remove(url);
+    _negCache[url] = (DateTime.now(), error);
+    while (_negCache.length > _negCacheCap) {
+      _negCache.remove(_negCache.keys.first);
+    }
   }
 
   /// 原图字节（不管清晰度）
-  Future<Uint8List> _load(String rawUrl, {bool lowPriority = false, bool fromPrefetch = false}) {
+  Future<Uint8List> _load(String rawUrl, {bool lowPriority = false, bool fromPrefetch = false, bool forceRetry = false}) {
     final url = _norm(rawUrl);
     _cancelled.remove(url);
+    if (forceRetry) {
+      _negCache.remove(url);
+    } else if (_negCache[url] case final neg?) {
+      if (DateTime.now().difference(neg.$1) < _negCacheTtl) {
+        return Future.error(neg.$2);
+      }
+      _negCache.remove(url);
+    }
     final hit = _hit(url);
     if (hit != null) return Future.value(hit);
     final running = _inflight[url];
@@ -266,6 +395,9 @@ class ImageStore {
         _inflightRefs.remove(url);
         _cancelTokens.remove(url);
         _disallowChallenge.remove(url);
+        _cancelled.remove(url);
+      } else if (!_inflight.containsKey(url)) {
+        _cancelled.remove(url);
       }
     });
     return _inflight[url] = f;
@@ -447,9 +579,20 @@ class ImageStore {
 
   Future<Uint8List> _fetch(String url, {bool lowPriority = false, required CancelToken cancelToken}) async {
     final file = File(p.join((await _cacheDir()).path, _name(url)));
-    Uint8List bytes;
+    Uint8List? cachedBytes;
     if (await file.exists()) {
-      bytes = await file.readAsBytes();
+      final read = await file.readAsBytes();
+      if (isValidImageBytes(read)) {
+        cachedBytes = read;
+      } else {
+        try {
+          await file.delete();
+        } catch (_) {}
+      }
+    }
+    final Uint8List bytes;
+    if (cachedBytes != null) {
+      bytes = cachedBytes;
       _recentNetworkHits.remove(url);
       _touch(file).ignore();
     } else {
@@ -491,7 +634,13 @@ class ImageStore {
       }
       if (data == null) {
         final challenge = _disallowChallenge.contains(url) ? null : _ref.read(imageChallengeProvider);
-        if (challenge == null) throw (altErr ?? primaryErr)!;
+        if (challenge == null) {
+          final err = (altErr ?? primaryErr)!;
+          if (!hasAlt || (_isDeterministicFailure(primaryErr!) && altErr != null && _isDeterministicFailure(altErr))) {
+            _recordNegativeCache(url, err);
+          }
+          throw err;
+        }
         if (_isChallengeError(primaryErr!)) {
           try {
             data = await _downloadViaChallenge(url, challenge, started, cancelToken: cancelToken);
@@ -503,14 +652,24 @@ class ImageStore {
         } else if (altErr != null && _isChallengeError(altErr)) {
           data = await _downloadViaChallenge(alt, challenge, altStarted!, cancelToken: cancelToken);
         } else {
-          throw altErr ?? primaryErr;
+          final err = altErr ?? primaryErr;
+          if (!hasAlt || (_isDeterministicFailure(primaryErr) && altErr != null && _isDeterministicFailure(altErr))) {
+            _recordNegativeCache(url, err);
+          }
+          throw err;
         }
       }
       final rawBytes = data is Uint8List ? data : Uint8List.fromList(data);
-      if (!isValidImageBytes(rawBytes)) throw StateError('invalid image response');
+      if (!isValidImageBytes(rawBytes)) {
+        final err = StateError('invalid image response');
+        _recordNegativeCache(url, err);
+        throw err;
+      }
+      _negCache.remove(url);
       bytes = await shrinkImage(rawBytes);
       await file.parent.create(recursive: true); // 下载期间可能清空了缓存目录
       await writeFileAtomic(file, bytes);
+      _bytesWrittenSinceTrim += bytes.length;
       _recentNetworkHits.remove(url);
       _recentNetworkHits.add(url);
       if (_recentNetworkHits.length > 256) _recentNetworkHits.remove(_recentNetworkHits.first);
@@ -604,8 +763,18 @@ class ImageStore {
     _srUrlNotifiers.clear();
   }
 
+  static const _srSetCap = 1024;
+
+  static void _addBounded(Set<String> set, String value) {
+    set.remove(value);
+    set.add(value);
+    while (set.length > _srSetCap) {
+      set.remove(set.first);
+    }
+  }
+
   /// 书架上的书的封面，自动模式可以放大（发现、排行、搜索里别的书的封面不放大）。
-  void allowAutoSr(String rawUrl) => _srAllowed.add(_norm(rawUrl));
+  void allowAutoSr(String rawUrl) => _addBounded(_srAllowed, _norm(rawUrl));
 
   bool _autoSr(String url) => _srAuto && _srAllowed.contains(url);
 
@@ -658,7 +827,7 @@ class ImageStore {
     }
     if (_srSkip.contains(url) || _srQueue.contains(url)) return orig;
     if (!manual && (await imageSize(orig)).longestSide >= 600) {
-      _srSkip.add(url);
+      _addBounded(_srSkip, url);
       return orig;
     }
     _srQueue.add(url);
@@ -714,7 +883,7 @@ class ImageStore {
           _notifySingleSr(url);
         } catch (e) {
           debugPrint('upscale $url: $e');
-          _srSkip.add(url);
+          _addBounded(_srSkip, url);
         }
       }
     } finally {
@@ -753,7 +922,7 @@ class ImageStore {
       final f = sr ? File(p.join((srDir ??= await _srDir()).path, _name(url))) : File(p.join(dir.path, _name(url)));
       if (!await f.exists()) continue;
       final bytes = await f.readAsBytes();
-      if (_mem.containsKey(memKey)) continue;
+      if (!isValidImageBytes(bytes) || _mem.containsKey(memKey)) continue;
       _put(memKey, bytes);
     }
   }
@@ -774,9 +943,13 @@ class ImageStore {
       _memUsed -= _mem.remove(url)?.length ?? 0;
       _memUsed -= _mem.remove('$url#sr')?.length ?? 0;
       _recentNetworkHits.remove(url);
+      _negCache.remove(url);
       _srDone?.remove(name);
       final f = File(p.join(dir.path, name));
-      if (await f.exists()) await f.delete();
+      if (await f.exists()) {
+        _touchedSession.remove(f.path);
+        await f.delete();
+      }
       if (srDir != null) {
         final sf = File(p.join(srDir.path, name));
         if (await sf.exists()) await sf.delete();
@@ -788,10 +961,15 @@ class ImageStore {
     }
     _unbakedThumbs.removeWhere((k) => normSet.contains(_norm(k)));
     if (await thumbDir.exists()) {
-      await for (final f in thumbDir.list()) {
-        if (f is! File || _isTemp(f)) continue;
-        final base = p.basename(f.path).split('_').first;
-        if (baseNames.contains(base)) await f.delete();
+      final index = await _ensureThumbIndex(thumbDir);
+      for (final base in baseNames) {
+        final names = index.remove(base);
+        if (names == null || names.isEmpty) continue;
+        for (final name in names) {
+          final tf = File(p.join(thumbDir.path, name));
+          _touchedSession.remove(tf.path);
+          if (await tf.exists()) await tf.delete();
+        }
       }
     }
   }
@@ -829,6 +1007,15 @@ class ImageStore {
     }
     _dir = null;
     _thumbDirCache = null;
+    _thumbIndex = null;
+    _thumbIndexFuture = null;
+    _touchedSession.clear();
+    _negCache.clear();
+    _srSkip.clear();
+    _srAllowed.clear();
+    _lastTrimAt = null;
+    _bytesWrittenSinceTrim = 0;
+    await MetaCache.deleteMetaOnly('img:trim');
     _mem.clear();
     _memUsed = 0;
     _thumbMem.clear();
@@ -861,16 +1048,41 @@ class ImageStore {
 
   /// 磁盘缓存超过 [maxBytes] 时按修改时间（最近一次用到的时间，见 [_touch]）从旧到新删，删到上限的 80%。
   /// 不删：书架上显示的封面（网站小封面和第一卷的卷封面）、手动挑过的卷封面、离线缓存的插图，以及这些保留封面的缩略图与超分图。
-  Future<void> trim({int maxBytes = 500 << 20, int? maxThumbBytes, int? maxSrBytes}) async {
+  /// [force] 为 false 时若距上次清理不足 24h 且新增写入不足 50 MB 则跳过，避免冷启动反复扫描磁盘。
+  Future<void> trim({int maxBytes = 500 << 20, int? maxThumbBytes, int? maxSrBytes, bool force = false}) async {
+    if (!force) {
+      var last = _lastTrimAt;
+      if (last == null) {
+        final saved = await MetaCache.getMetaOnlyMap('img:trim');
+        final ts = saved?['at'] as int?;
+        if (ts != null && ts > 0) {
+          last = _lastTrimAt = DateTime.fromMillisecondsSinceEpoch(ts);
+        }
+      }
+      if (last != null && DateTime.now().difference(last) < _trimCooldown && _bytesWrittenSinceTrim < _trimWriteThreshold) {
+        return;
+      }
+    }
     final keep = {
       for (final url in [...LibraryStore.covers(), ...Volumes.keptCovers(LibraryStore.aids()), ...ChapterCache.offlineImages()]) _name(_norm(url)),
     };
     await trimDir(await _cacheDir(), maxBytes, keep: keep);
-    await trimDir(
+    final removedThumbs = await trimDir(
       await _thumbDir(),
       maxThumbBytes ?? math.min(64 << 20, maxBytes),
       shouldKeep: (name) => keep.contains(name.split('_').first),
     );
+    if (removedThumbs.isNotEmpty && _thumbIndex != null) {
+      for (final name in removedThumbs) {
+        final sep = name.indexOf('_');
+        final base = sep > 0 ? name.substring(0, sep) : name;
+        final set = _thumbIndex![base];
+        if (set != null) {
+          set.remove(name);
+          if (set.isEmpty) _thumbIndex!.remove(base);
+        }
+      }
+    }
     if (srSupported) {
       final removed = await trimDir(await _srDir(), maxSrBytes ?? math.min(128 << 20, maxBytes), keep: keep);
       if (removed.isNotEmpty) {
@@ -883,12 +1095,23 @@ class ImageStore {
         }
       }
     }
+    final now = DateTime.now();
+    _lastTrimAt = now;
+    _bytesWrittenSinceTrim = 0;
+    await MetaCache.putMetaOnlyMap('img:trim', {'at': now.millisecondsSinceEpoch});
   }
 
-  /// 从磁盘读到时把修改时间改成现在，清理时常看的排在后面；一天内用过的不重复改
+  /// 从磁盘读到时把修改时间改成现在，清理时常看的排在后面；单次运行已触碰或一天内用过的不重复改
   Future<void> _touch(File f) async {
-    final now = DateTime.now();
-    if (now.difference(await f.lastModified()) > const Duration(days: 1)) await f.setLastModified(now);
+    if (!_touchedSession.add(f.path)) return;
+    if (_touchedSession.length > _touchedSessionCap) {
+      _touchedSession.clear();
+      _touchedSession.add(f.path);
+    }
+    try {
+      final now = DateTime.now();
+      if (now.difference(await f.lastModified()) > const Duration(days: 1)) await f.setLastModified(now);
+    } catch (_) {}
   }
 
   /// 以前按长边 1600、质量 75 压过的图清掉一次（压过的回不去了），用到时按现在的标准重新下载；离线缓存的插图留着，没网时还要看
@@ -907,6 +1130,8 @@ class ImageStore {
           if (f is File) await f.delete();
         }
       }
+      _thumbIndex = null;
+      _thumbIndexFuture = null;
       _mem.clear();
       _memUsed = 0;
       _thumbMem.clear();

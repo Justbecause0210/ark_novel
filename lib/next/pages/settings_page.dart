@@ -412,6 +412,8 @@ class SettingsSectionPage extends ConsumerStatefulWidget {
 }
 
 class _SectionState extends ConsumerState<SettingsSectionPage> {
+  static final _schemeRe = RegExp(r'^https?://', caseSensitive: false);
+
   final _hlKey = GlobalKey();
   bool _highlightOn = false;
   Timer? _hlTimer;
@@ -419,6 +421,14 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   bool _importingBackup = false;
   bool _testingApi = false;
   String? _proxyDraft;
+  Future<int>? _imgBytesFuture;
+  Future<PackageInfo>? _pkgInfoFuture;
+  double? _fontSizeDraft;
+  double? _ttsRateDraft;
+
+  Future<int> _imgBytes() => _imgBytesFuture ??= ref.read(imageStoreProvider).diskBytes();
+  Future<PackageInfo> _pkgInfo() => _pkgInfoFuture ??= PackageInfo.fromPlatform();
+  void _refreshImgBytes() => _imgBytesFuture = ref.read(imageStoreProvider).diskBytes();
 
   @override
   void initState() {
@@ -436,6 +446,16 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
           if (mounted) setState(() => _highlightOn = false);
         });
       });
+    }
+  }
+
+  @override
+  void didUpdateWidget(SettingsSectionPage old) {
+    super.didUpdateWidget(old);
+    if (old.section != widget.section) {
+      _fontSizeDraft = null;
+      _ttsRateDraft = null;
+      if (widget.section == SettingsSection.data && !isWebPreview) _refreshImgBytes();
     }
   }
 
@@ -462,7 +482,6 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
 
   @override
   Widget build(BuildContext context) {
-    ref.watch(appPrefsProvider);
     final scheme = Theme.of(context).colorScheme;
     final children = switch (widget.section) {
       SettingsSection.appearance => _appearance(),
@@ -515,7 +534,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
 
   AppPrefs get _prefs => ref.read(appPrefsProvider.notifier);
 
-  Widget _switch(String title, String key, bool fallback, {String? subtitle, String? help}) => XSwitch(title: title, subtitle: subtitle, help: help, value: _prefs.get(key, fallback), onChanged: (v) => _prefs.set(key, v));
+  Widget _switch(String title, String key, bool fallback, {String? subtitle, String? help}) => XSwitch(title: title, subtitle: subtitle, help: help, value: ref.watch(appPref(key, fallback)), onChanged: (v) => _prefs.set(key, v));
 
   /// 能点进下一页的：右边一个箭头
   Widget _link(String title, String? subtitle, VoidCallback onTap) => XTile(
@@ -554,9 +573,9 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   }
 
   String _catNames(String key) {
-    final ids = AppPrefs.readList(key);
+    final ids = ref.watch(appPrefList(key));
     if (ids.isEmpty) return '不限';
-    final cats = ref.read(libraryProvider).cats;
+    final cats = ref.watch(libraryProvider.select((s) => s.cats));
     return ids.map((id) => cats.where((c) => c.id == id).firstOrNull?.name).whereType<String>().join('、');
   }
 
@@ -629,7 +648,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
       AppCollapse(visible: appPalettes[palette].scene, child: _hl('插画动效', _switch('插画动效', P.sceneMotion, true))),
       const XDivider(),
       const XGroupTitle('语言'),
-      _hl('界面繁体', XSwitch(title: '界面繁体', value: _prefs.get(P.uiHant, false), onChanged: (v) => _prefs.set(P.uiHant, v))),
+      _hl('界面繁体', XSwitch(title: '界面繁体', value: ref.watch(appPref(P.uiHant, false)), onChanged: (v) => _prefs.set(P.uiHant, v))),
       _hl(
         '正文繁体',
         XSwitch(
@@ -704,8 +723,18 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
         '字号',
         XSlider(
           title: '字号',
-          label: '${prefs.fontSize.round()}',
-          slider: Slider(min: 14, max: 32, divisions: 18, value: prefs.fontSize, onChanged: (v) => set(prefs.copyWith(fontSize: v))),
+          label: '${(_fontSizeDraft ?? prefs.fontSize).round()}',
+          slider: Slider(
+            min: 14,
+            max: 32,
+            divisions: 18,
+            value: (_fontSizeDraft ?? prefs.fontSize).clamp(14.0, 32.0),
+            onChanged: (v) => setState(() => _fontSizeDraft = v),
+            onChangeEnd: (v) {
+              setState(() => _fontSizeDraft = null);
+              set(prefs.copyWith(fontSize: v));
+            },
+          ),
         ),
       ),
       _link('正则规则', '用正则替换正文（去广告、统一用字），或给人名等关键词着色、添加备注', () => context.push(Routes.rules)),
@@ -715,8 +744,18 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
         '朗读语速',
         XSlider(
           title: '语速',
-          label: prefs.ttsRate.toStringAsFixed(1),
-          slider: Slider(min: 0.1, max: 1.5, divisions: 14, value: prefs.ttsRate.clamp(0.1, 1.5), onChanged: (v) => set(prefs.copyWith(ttsRate: v))),
+          label: (_ttsRateDraft ?? prefs.ttsRate).toStringAsFixed(1),
+          slider: Slider(
+            min: 0.1,
+            max: 1.5,
+            divisions: 14,
+            value: (_ttsRateDraft ?? prefs.ttsRate).clamp(0.1, 1.5),
+            onChanged: (v) => setState(() => _ttsRateDraft = v),
+            onChangeEnd: (v) {
+              setState(() => _ttsRateDraft = null);
+              set(prefs.copyWith(ttsRate: v));
+            },
+          ),
         ),
       ),
       const XDivider(),
@@ -732,8 +771,11 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   // ---- 书架 ----
 
   List<Widget> _shelf() {
-    final cats = ref.watch(libraryProvider).cats;
-    final def = _prefs.get(P.defaultCat, 'ask');
+    final cats = ref.watch(libraryProvider.select((s) => s.cats));
+    final def = ref.watch(appPref(P.defaultCat, 'ask'));
+    final coverSr = ImageStore.srSupported ? ref.watch(appPref(P.coverSr, 1)) : 1;
+    final colsPortrait = ref.watch(appPref(P.colsPortrait, 0));
+    final colsLandscape = ref.watch(appPref(P.colsLandscape, 0));
     return [
       const XGroupTitle('封面'),
       _hl('继续阅读按钮', _switch('继续阅读按钮', P.resumeButton, true)),
@@ -742,8 +784,8 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
       if (ImageStore.srSupported)
         XChoice<int>(
           title: '提升清晰度',
-          subtitle: _prefs.get(P.coverSr, 1) == 0 ? '小于 600 像素的图自动放大' : '框封面时自己选',
-          value: _prefs.get(P.coverSr, 1),
+          subtitle: coverSr == 0 ? '小于 600 像素的图自动放大' : '框封面时自己选',
+          value: coverSr,
           options: const {0: '自动', 1: '手动'},
           onChanged: (v) {
             _prefs.set(P.coverSr, v);
@@ -759,8 +801,8 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
       _hl('按分类分别设置', _switch('按分类分别设置', P.perCat, false, help: '筛选、排序和显示方式按分类分别保存；关闭后所有分类共用一套。')),
       const XDivider(),
       const XGroupTitle('列数'),
-      _hl('书架列数', XChoice<int>(title: '竖屏', value: _prefs.get(P.colsPortrait, 0), options: {0: '自动', for (var i = 2; i <= 8; i++) i: '$i 列'}, onChanged: (v) => _prefs.set(P.colsPortrait, v))),
-      XChoice<int>(title: '横屏', value: _prefs.get(P.colsLandscape, 0), options: {0: '自动', for (var i = 2; i <= 10; i++) i: '$i 列'}, onChanged: (v) => _prefs.set(P.colsLandscape, v)),
+      _hl('书架列数', XChoice<int>(title: '竖屏', value: colsPortrait, options: {0: '自动', for (var i = 2; i <= 8; i++) i: '$i 列'}, onChanged: (v) => _prefs.set(P.colsPortrait, v))),
+      XChoice<int>(title: '横屏', value: colsLandscape, options: {0: '自动', for (var i = 2; i <= 10; i++) i: '$i 列'}, onChanged: (v) => _prefs.set(P.colsLandscape, v)),
       const XDivider(),
       const XGroupTitle('分类'),
       _hl(
@@ -782,7 +824,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   List<Widget> _update() {
     return [
       const XGroupTitle('自动检查'),
-      _hl('自动检查更新', XChoice<int>(title: '检查间隔', value: _prefs.get(P.updInterval, 1), options: const {0: '不自动检查', 1: '每小时', 6: '每 6 小时', 12: '每 12 小时', 24: '每天', 48: '每 2 天', 168: '每周'}, onChanged: (v) => _prefs.set(P.updInterval, v))),
+      _hl('自动检查更新', XChoice<int>(title: '检查间隔', value: ref.watch(appPref(P.updInterval, 1)), options: const {0: '不自动检查', 1: '每小时', 6: '每 6 小时', 12: '每 12 小时', 24: '每天', 48: '每 2 天', 168: '每周'}, onChanged: (v) => _prefs.set(P.updInterval, v))),
       _hl('仅在 Wi-Fi 下检查', _switch('仅在 Wi-Fi 下检查', P.updWifi, false)),
       _hl('仅在充电时检查', _switch('仅在充电时检查', P.updCharging, false)),
       const XDivider(),
@@ -855,16 +897,22 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   List<Widget> _data() {
     return [
       const XGroupTitle('存储'),
-      if (!isWebPreview) _link('存储空间', '各部分占用、按书清理', () => context.push(Routes.storage).then((_) => mounted ? setState(() {}) : null)),
+      if (!isWebPreview)
+        _link('存储空间', '各部分占用、按书清理', () => context.push(Routes.storage).then((_) {
+          if (mounted) setState(_refreshImgBytes);
+        })),
       if (!isWebPreview)
         _hl(
           '图片缓存',
           FutureBuilder<int>(
-            future: ref.read(imageStoreProvider).diskBytes(),
+            future: _imgBytes(),
             builder: (context, snap) => XTile(
               title: '清除图片缓存',
               subtitle: snap.hasData ? '封面与插图，共 ${(snap.data! / (1 << 20)).toStringAsFixed(1)} MB' : '正在计算…',
-              onTap: () => _confirm('清除图片缓存？', '离线缓存中的插图也会被清除，联网后会重新下载。', '清除', () => ref.read(imageStoreProvider).clearDisk()),
+              onTap: () => _confirm('清除图片缓存？', '离线缓存中的插图也会被清除，联网后会重新下载。', '清除', () async {
+                await ref.read(imageStoreProvider).clearDisk();
+                _refreshImgBytes();
+              }),
             ),
           ),
         ),
@@ -1031,7 +1079,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
         ),
       ];
     }
-    final on = _prefs.get(P.unlock, true);
+    final on = ref.watch(appPref(P.unlock, true));
     final apiRule = addon.api;
     return [
       XTile(
@@ -1053,7 +1101,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
           '备用接口',
           XSwitch(
             title: apiRule.label ?? '优先使用备用接口',
-            value: _prefs.get(P.unlockApi, true),
+            value: ref.watch(appPref(P.unlockApi, true)),
             onChanged: (v) => _prefs.set(P.unlockApi, v),
             help: apiRule.description ?? '接口能用时正文可带插图；失效时自动回退到整本文本通道。',
           ),
@@ -1091,6 +1139,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
 
   List<Widget> _security() {
     final incognito = ref.watch(incognitoProvider);
+    final lockOn = lockSupported ? ref.watch(appPref(P.lock, false)) : false;
     return [
       const XGroupTitle('应用锁'),
       if (lockSupported) ...[
@@ -1099,7 +1148,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
           XSwitch(
             title: '生物识别锁',
             subtitle: '指纹、面容或锁屏密码',
-            value: _prefs.get(P.lock, false),
+            value: lockOn,
             onChanged: (v) async {
               if (!await authenticate(v ? '确认开启 Ark Novel 的锁' : '确认关闭 Ark Novel 的锁')) {
                 if (mounted) _snack('验证未通过，或此设备未设置锁屏密码 / 生物识别');
@@ -1109,13 +1158,13 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
             },
           ),
         ),
-        if (_prefs.get(P.lock, false)) XChoice<int>(title: '离开多久后锁定', value: _prefs.get(P.lockAfter, 0), options: const {0: '立即', 1: '1 分钟', 5: '5 分钟', 15: '15 分钟', 30: '30 分钟'}, onChanged: (v) => _prefs.set(P.lockAfter, v)),
+        if (lockOn) XChoice<int>(title: '离开多久后锁定', value: ref.watch(appPref(P.lockAfter, 0)), options: const {0: '立即', 1: '1 分钟', 5: '5 分钟', 15: '15 分钟', 30: '30 分钟'}, onChanged: (v) => _prefs.set(P.lockAfter, v)),
       ] else
         _hl('生物识别锁', const XNote('当前平台不支持生物识别锁')),
       if (secureScreenSupported) ...[
         const XDivider(),
         const XGroupTitle('防截屏'),
-        _hl('防截屏', XSegments<int>(value: _prefs.get(P.secure, 0), options: const {0: '关', 1: '始终', 2: '仅无痕时'}, onChanged: (v) => _prefs.set(P.secure, v))),
+        _hl('防截屏', XSegments<int>(value: ref.watch(appPref(P.secure, 0)), options: const {0: '关', 1: '始终', 2: '仅无痕时'}, onChanged: (v) => _prefs.set(P.secure, v))),
       ],
       const XDivider(),
       const XGroupTitle('无痕'),
@@ -1145,7 +1194,7 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
             initialValue: store.proxy,
             decoration: const InputDecoration(label: Text('HTTP 代理'), hint: Text('127.0.0.1:7890（无需填写 http://）', maxLines: 1, overflow: TextOverflow.ellipsis)),
             onChanged: (v) {
-              final clean = v.replaceFirst(RegExp(r'^https?://', caseSensitive: false), '').trim();
+              final clean = v.replaceFirst(_schemeRe, '').trim();
               if (_proxyDraft != clean) setState(() => _proxyDraft = clean);
               ref.read(proxyProvider.notifier).setLater(clean);
             },
@@ -1191,8 +1240,8 @@ class _SectionState extends ConsumerState<SettingsSectionPage> {
   List<Widget> _about() => [
     _hl(
       '版本',
-      FutureBuilder(
-        future: PackageInfo.fromPlatform(),
+      FutureBuilder<PackageInfo>(
+        future: _pkgInfo(),
         builder: (context, snap) => XTile(
           title: 'Ark Novel',
           subtitle: '轻小说文库第三方客户端 · MIT${snap.hasData ? ' · v${snap.data!.version}+${snap.data!.buildNumber}' : ''}',

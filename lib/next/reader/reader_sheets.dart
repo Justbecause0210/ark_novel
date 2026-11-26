@@ -776,6 +776,10 @@ Future<void> showReaderSettingsSheet(
   required Future<void> Function() onOpenMoreSettings,
 }) {
   var currentTab = initialTab;
+  ProviderContainer? hostContainer;
+  try {
+    hostContainer = ProviderScope.containerOf(hostContext, listen: false);
+  } catch (_) {}
   return showModalBottomSheet<void>(
     context: hostContext,
     isScrollControlled: true,
@@ -785,6 +789,7 @@ Future<void> showReaderSettingsSheet(
         builder: (context, ref, _) {
           final prefs = ref.watch(readerPrefsProvider);
           void set(ReaderPrefs p) => ref.read(readerPrefsProvider.notifier).update(p);
+          void preview(ReaderPrefs p) => ref.read(readerPrefsProvider.notifier).preview(p);
           final android = !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
           final app = Theme.of(context);
           final pal = readerPaletteOf(prefs, app.colorScheme);
@@ -818,6 +823,7 @@ Future<void> showReaderSettingsSheet(
                         ),
                         Expanded(
                           child: _ScrollFade(
+                            color: pal.bg,
                             child: AppCrossfade(
                               fill: true,
                               duration: AppMotion.fast,
@@ -879,15 +885,15 @@ Future<void> showReaderSettingsSheet(
                                         ),
                                       ),
                                       // 越往左越暗：滑块值是亮度，存的是遮罩不透明度
-                                      XSlider(compact: true, title: '页面亮度', label: '${((1 - prefs.dim) * 100).round()}%', slider: Slider(min: 0.3, max: 1.0, divisions: 14, value: (1 - prefs.dim).clamp(0.3, 1.0), onChanged: (v) => set(prefs.copyWith(dim: 1 - v)))),
+                                      XSlider(compact: true, title: '页面亮度', label: '${((1 - prefs.dim) * 100).round()}%', slider: Slider(min: 0.3, max: 1.0, divisions: 14, value: (1 - prefs.dim).clamp(0.3, 1.0), onChanged: (v) => preview(prefs.copyWith(dim: 1 - v)), onChangeEnd: (v) => set(prefs.copyWith(dim: 1 - v)))),
                                       if (android) ...[
                                         XSwitch(title: '独立屏幕亮度', help: '不跟随系统亮度，最高能调得比系统更亮；退出阅读后恢复。', value: prefs.customBrightness, onChanged: (v) => set(prefs.copyWith(customBrightness: v))),
                                         AppCollapse(
                                           visible: prefs.customBrightness,
-                                          child: XSlider(compact: true, title: '屏幕亮度', label: '${(prefs.brightness * 100).round()}%', slider: Slider(min: 0.02, max: 1.0, value: prefs.brightness.clamp(0.02, 1.0), onChanged: (v) => set(prefs.copyWith(brightness: v)))),
+                                          child: XSlider(compact: true, title: '屏幕亮度', label: '${(prefs.brightness * 100).round()}%', slider: Slider(min: 0.02, max: 1.0, value: prefs.brightness.clamp(0.02, 1.0), onChanged: (v) => preview(prefs.copyWith(brightness: v)), onChangeEnd: (v) => set(prefs.copyWith(brightness: v)))),
                                         ),
                                       ],
-                                      XSlider(compact: true, title: '暖色滤镜', label: prefs.warm == 0 ? '关闭' : '${(prefs.warm * 200).round()}%', slider: Slider(min: 0, max: 0.5, divisions: 10, value: prefs.warm, onChanged: (v) => set(prefs.copyWith(warm: v)))),
+                                      XSlider(compact: true, title: '暖色滤镜', label: prefs.warm == 0 ? '关闭' : '${(prefs.warm * 200).round()}%', slider: Slider(min: 0, max: 0.5, divisions: 10, value: prefs.warm, onChanged: (v) => preview(prefs.copyWith(warm: v)), onChangeEnd: (v) => set(prefs.copyWith(warm: v)))),
                                       XTile(
                                         title: '色彩',
                                         trailing: Row(
@@ -947,7 +953,8 @@ Future<void> showReaderSettingsSheet(
                                                     max: 0.85,
                                                     divisions: 16,
                                                     value: prefs.bgImageOpacity.clamp(0.05, 0.85),
-                                                    onChanged: (v) => set(prefs.copyWith(bgImageOpacity: v)),
+                                                    onChanged: (v) => preview(prefs.copyWith(bgImageOpacity: v)),
+                                                    onChangeEnd: (v) => set(prefs.copyWith(bgImageOpacity: v)),
                                                   ),
                                                 ),
                                               ),
@@ -966,7 +973,10 @@ Future<void> showReaderSettingsSheet(
                                         value: prefs.font,
                                         options: FontStore.names,
                                         onChanged: (k) async {
-                                          if (k == 2 && FontStore.customFamily == null && !await FontStore.pick()) return;
+                                          if (k == 2) {
+                                            if (FontStore.customFamily == null && !await FontStore.pick()) return;
+                                            FontStore.ensureLoaded().ignore();
+                                          }
                                           set(prefs.copyWith(font: k));
                                         },
                                         extra: [
@@ -1042,7 +1052,11 @@ Future<void> showReaderSettingsSheet(
         },
       ),
     ),
-  );
+  ).whenComplete(() {
+    try {
+      hostContainer?.read(readerPrefsProvider.notifier).flush();
+    } catch (_) {}
+  });
 }
 
 /// 页眉 / 页脚字段配置弹窗（沿用当前阅读器主题，一键挑选各位置显示项）。
@@ -1158,11 +1172,12 @@ Widget _toggleChip(ColorScheme scheme, String label, bool on, ValueChanged<bool>
   onSelected: onChanged,
 );
 
-/// 下面还有内容没露出来时，底边渐隐，提示可以往下滑
+/// 下面还有内容没露出来时，底边用轻量线性渐变遮罩提示可往下滑（仅在 `_more` 时叠放，消除常驻 `ShaderMask` `saveLayer`）。
 class _ScrollFade extends StatefulWidget {
-  const _ScrollFade({required this.child});
+  const _ScrollFade({required this.child, this.color});
 
   final Widget child;
+  final Color? color;
 
   @override
   State<_ScrollFade> createState() => _ScrollFadeState();
@@ -1178,22 +1193,37 @@ class _ScrollFadeState extends State<_ScrollFade> {
   }
 
   @override
-  Widget build(BuildContext context) => NotificationListener<ScrollMetricsNotification>(
-    onNotification: (n) => _onMetrics(n.metrics),
-    child: NotificationListener<ScrollNotification>(
+  Widget build(BuildContext context) {
+    final bg = widget.color ?? Theme.of(context).scaffoldBackgroundColor;
+    return NotificationListener<ScrollMetricsNotification>(
       onNotification: (n) => _onMetrics(n.metrics),
-      child: Scrollbar(
-        child: ShaderMask(
-          blendMode: BlendMode.dstIn,
-          shaderCallback: (r) => LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Colors.black, Colors.black, if (_more) Colors.transparent else Colors.black],
-            stops: [0, r.height <= 48 ? 0 : 1 - 48 / r.height, 1],
-          ).createShader(r),
-          child: widget.child,
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (n) => _onMetrics(n.metrics),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            Scrollbar(child: widget.child),
+            if (_more)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 44,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [bg.withValues(alpha: 0), bg],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
-    ),
-  );
+    );
+  }
 }

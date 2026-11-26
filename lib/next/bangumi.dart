@@ -502,9 +502,10 @@ class BangumiCovers {
 
   final Dio _dio;
   final Duration rateLimitBase;
-  final _running = <String, _InflightSeries>{};
-  final _runningInfo = <String, Future<BgmSubjectInfo?>>{};
-  final _runningChars = <String, Future<List<BgmCharacter>>>{};
+  final _running = <String, _InflightCall<BgmSeries?>>{};
+  final _runningInfo = <String, _InflightCall<BgmSubjectInfo?>>{};
+  final _runningChars = <String, _InflightCall<List<BgmCharacter>>>{};
+  final _revalidatingSeries = <String>{};
   // 短期复用同一次会话里刚拉取过的 /subjects/{id}/subjects，避免 series() 与 subjectInfo() 连续重复请求
   final _recentRelations = <int, (DateTime at, List<Map> data)>{};
   static const _relationsCacheTtl = Duration(minutes: 5);
@@ -520,10 +521,13 @@ class BangumiCovers {
   /// 条目详情与角色列表缓存有效期（7 天）
   static const infoCacheTtl = Duration(days: 7);
 
+  /// 系列封面缓存 stale-while-revalidate 有效期（30 天）
+  static const seriesCacheTtl = Duration(days: 30);
+
   /// 网站上的原书名（不是自己改的显示名）：书架、统计、离线缓存里有哪个用哪个
   static String? bookTitle(String aid) =>
       (Hive.isBoxOpen('session') ? (LibraryStore.get(aid)?['title'] as String?) ?? ReadingStats.meta(aid)?.title : null) ??
-      (Hive.isBoxOpen('chapter_index') ? ChapterCache.books()[aid]?.$1 : null);
+      (Hive.isBoxOpen('chapter_index') ? ChapterCache.metaOf(aid)?.$1 : null);
 
   static BgmSeries? _parseSeries(Map? m) {
     if (m == null || (m['id'] as num?)?.toInt() == 0) return null;
@@ -578,53 +582,59 @@ class BangumiCovers {
   /// 同一本书同时要几次（几卷一起补、信息卡与封面队列并发）只查一次；全局最多同时查 2 本书。
   Future<BgmSeries?> series(String aid) => _seriesSingleFlight(aid);
 
-  /// 在已有单飞任务时直接复用；统一在单飞层获取 `_bookSem`，避免外层持锁等待内部信号量产生 AB-BA 死锁。
-  /// 若已有无标题任务正在执行、而本次携带了 `fallbackTitle` 且本地无书名缓存，不复用必然未命中的旧任务。
-  Future<BgmSeries?> _seriesSingleFlight(
-    String aid, {
-    String? fallbackTitle,
+  /// 通用引用计数单飞合并：多调用方并发共享同一在途任务，全部取消时才取消底层 `internalCancel`。
+  /// 若已有无标题任务正在执行而本次携带标题，或本次 `forceRefresh == true` 而旧任务非强刷，均不复用旧任务。
+  Future<T> _runSingleFlight<T>(
+    Map<String, _InflightCall<T>> inflight,
+    String key,
+    Future<T> Function(CancelToken internalCancel) start, {
+    bool hasTitle = true,
+    bool forceRefresh = false,
     CancelToken? cancelToken,
+    String cancelPath = '',
   }) {
     if (cancelToken?.isCancelled == true) {
-      return Future.error(cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: 'bgm:$aid'), reason: 'cancelled'));
+      return Future.error(cancelToken!.cancelError ?? DioException.requestCancelled(requestOptions: RequestOptions(path: cancelPath), reason: 'cancelled'));
     }
-    final hasFallback = fallbackTitle != null && fallbackTitle.trim().isNotEmpty;
-    final hasTitle = hasFallback || (bookTitle(aid)?.trim().isNotEmpty ?? false);
-    var entry = _running[aid];
+    var entry = inflight[key];
     if (entry != null && entry.internalCancel.isCancelled) {
-      _running.remove(aid);
+      inflight.remove(key);
       entry = null;
     }
     if (entry != null && !entry.hasTitle && hasTitle) {
       entry = null;
     }
+    if (entry != null && forceRefresh && !entry.forceRefresh) {
+      entry = null;
+    }
     if (entry == null) {
       final internalCancel = CancelToken();
-      entry = _InflightSeries(internalCancel, hasTitle: hasTitle);
-      _running[aid] = entry;
-      Future<BgmSeries?> work() => _series(aid, fallbackTitle: fallbackTitle, cancelToken: internalCancel);
-      entry.future = _bookSem.run(work).whenComplete(() {
-        if (identical(_running[aid], entry)) _running.remove(aid);
+      entry = _InflightCall<T>(internalCancel, hasTitle: hasTitle, forceRefresh: forceRefresh);
+      inflight[key] = entry;
+      final current = entry;
+      current.future = start(internalCancel).whenComplete(() {
+        if (identical(inflight[key], current)) inflight.remove(key);
       });
     }
-    entry.waiters++;
+    final active = entry;
+    active.waiters++;
     if (cancelToken == null) {
-      return entry.future.whenComplete(() => entry!.waiters--);
+      return active.future.whenComplete(() => active.waiters--);
     }
-    final done = Completer<BgmSeries?>();
+    final done = Completer<T>();
     var released = false;
     void release({required bool cancelled}) {
       if (released) return;
       released = true;
-      entry!.waiters--;
-      if (cancelled && entry.waiters <= 0 && !entry.internalCancel.isCancelled) {
-        if (identical(_running[aid], entry)) _running.remove(aid);
-        entry.internalCancel.cancel(cancelToken.cancelError?.error ?? 'cancelled');
+      active.waiters--;
+      if (cancelled && active.waiters <= 0 && !active.internalCancel.isCancelled) {
+        if (identical(inflight[key], active)) inflight.remove(key);
+        active.internalCancel.cancel(cancelToken.cancelError?.error ?? 'cancelled');
       }
     }
 
     unawaited(
-      entry.future.then(
+      active.future.then(
         (v) {
           release(cancelled: false);
           if (!done.isCompleted) done.complete(v);
@@ -644,6 +654,24 @@ class BangumiCovers {
     return done.future;
   }
 
+  /// 在已有单飞任务时直接复用；统一在单飞层获取 `_bookSem`，避免外层持锁等待内部信号量产生 AB-BA 死锁。
+  Future<BgmSeries?> _seriesSingleFlight(
+    String aid, {
+    String? fallbackTitle,
+    CancelToken? cancelToken,
+  }) {
+    final hasFallback = fallbackTitle != null && fallbackTitle.trim().isNotEmpty;
+    final hasTitle = hasFallback || (bookTitle(aid)?.trim().isNotEmpty ?? false);
+    return _runSingleFlight<BgmSeries?>(
+      _running,
+      aid,
+      (internalCancel) => _bookSem.run(() => _series(aid, fallbackTitle: fallbackTitle, cancelToken: internalCancel)),
+      hasTitle: hasTitle,
+      cancelToken: cancelToken,
+      cancelPath: 'bgm:$aid',
+    );
+  }
+
   /// 拉取并缓存 Bangumi 条目详情（`bgm_info:$aid`，7 天内直接复用缓存；网络失败时回退旧缓存）。
   Future<BgmSubjectInfo?> subjectInfo(String aid, {String? fallbackTitle, CancelToken? cancelToken}) {
     final hotMap = _boxOpen ? MetaCache.peekMap('bgm_info:$aid') : null;
@@ -654,9 +682,16 @@ class BangumiCovers {
         return Future.value(_parseInfo(hotMap));
       }
     }
-    return _runningInfo[aid] ??= _subjectInfo(aid, fallbackTitle: fallbackTitle, cancelToken: cancelToken).whenComplete(() {
-      _runningInfo.remove(aid);
-    });
+    final hasFallback = fallbackTitle != null && fallbackTitle.trim().isNotEmpty;
+    final hasTitle = hasFallback || (bookTitle(aid)?.trim().isNotEmpty ?? false);
+    return _runSingleFlight<BgmSubjectInfo?>(
+      _runningInfo,
+      aid,
+      (internalCancel) => _subjectInfo(aid, fallbackTitle: fallbackTitle, cancelToken: internalCancel),
+      hasTitle: hasTitle,
+      cancelToken: cancelToken,
+      cancelPath: 'bgm_info:$aid',
+    );
   }
 
   Future<BgmSubjectInfo?> _subjectInfo(String aid, {String? fallbackTitle, CancelToken? cancelToken}) async {
@@ -705,9 +740,17 @@ class BangumiCovers {
         }
       }
     }
-    return _runningChars[aid] ??= _characters(aid, fallbackTitle: fallbackTitle, forceRefresh: forceRefresh, cancelToken: cancelToken).whenComplete(() {
-      _runningChars.remove(aid);
-    });
+    final hasFallback = fallbackTitle != null && fallbackTitle.trim().isNotEmpty;
+    final hasTitle = hasFallback || (bookTitle(aid)?.trim().isNotEmpty ?? false);
+    return _runSingleFlight<List<BgmCharacter>>(
+      _runningChars,
+      aid,
+      (internalCancel) => _characters(aid, fallbackTitle: fallbackTitle, forceRefresh: forceRefresh, cancelToken: internalCancel),
+      hasTitle: hasTitle,
+      forceRefresh: forceRefresh,
+      cancelToken: cancelToken,
+      cancelPath: 'bgm_chars:$aid',
+    );
   }
 
   Future<List<BgmCharacter>> _characters(String aid, {String? fallbackTitle, bool forceRefresh = false, CancelToken? cancelToken}) async {
@@ -823,17 +866,46 @@ class BangumiCovers {
     }
   }
 
+  Future<void> _revalidateSeries(String aid, int subjectId, Map baseRecord) async {
+    if (!_revalidatingSeries.add(aid)) return;
+    try {
+      await _bookSem.run(() async {
+        final rel = await _relations(subjectId);
+        final vols = _vols(rel);
+        final extras = await _extras(rel);
+        final updated = <String, Object?>{
+          ...baseRecord.map((k, v) => MapEntry('$k', v)),
+          if (vols.isNotEmpty) 'vols': vols,
+          'x': extras,
+          't': DateTime.now().millisecondsSinceEpoch,
+        };
+        if (_boxOpen) await MetaCache.putMap('bgm:$aid', updated);
+      });
+    } catch (_) {
+      // 后台 stale-while-revalidate 静默失败，保留旧缓存
+    } finally {
+      _revalidatingSeries.remove(aid);
+    }
+  }
+
   Future<BgmSeries?> _series(String aid, {String? fallbackTitle, CancelToken? cancelToken}) async {
     var m = _boxOpen ? await MetaCache.getMap('bgm:$aid') : null;
     if (m != null && (m['id'] as num?)?.toInt() != 0) {
+      final id = (m['id'] as num).toInt();
       // 加外传之前存的只有主系列：补查一次外传
       if (m['x'] == null) {
-        m = {...m, 'x': await _extras(await _relations((m['id'] as num).toInt(), cancelToken: cancelToken), cancelToken: cancelToken)};
+        m = {...m, 'x': await _extras(await _relations(id, cancelToken: cancelToken), cancelToken: cancelToken), 't': DateTime.now().millisecondsSinceEpoch};
         if (_boxOpen) await MetaCache.putMap('bgm:$aid', m);
+      } else {
+        final t = (m['t'] as num?)?.toInt() ?? 0;
+        final elapsed = DateTime.now().millisecondsSinceEpoch - t;
+        if (t <= 0 || elapsed < 0 || elapsed >= seriesCacheTtl.inMilliseconds) {
+          unawaited(_revalidateSeries(aid, id, m));
+        }
       }
       return _parseSeries(m);
     }
-    if (m != null && DateTime.now().millisecondsSinceEpoch - ((m['t'] as num?)?.toInt() ?? 0) < const Duration(days: 30).inMilliseconds) return null;
+    if (m != null && DateTime.now().millisecondsSinceEpoch - ((m['t'] as num?)?.toInt() ?? 0) < seriesCacheTtl.inMilliseconds) return null;
     final title = bookTitle(aid) ?? fallbackTitle;
     if (title == null || title.trim().isEmpty) return null;
     // 有两个译名时先用拆开的（Bangumi 上的中文名多是其中一个），再用整个书名；
@@ -913,22 +985,21 @@ class BangumiCovers {
   }
 }
 
-class _InflightSeries {
-  _InflightSeries(this.internalCancel, {required this.hasTitle});
+class _InflightCall<T> {
+  _InflightCall(this.internalCancel, {required this.hasTitle, this.forceRefresh = false});
 
   final CancelToken internalCancel;
   final bool hasTitle;
-  late final Future<BgmSeries?> future;
+  final bool forceRefresh;
+  late final Future<T> future;
   int waiters = 0;
 }
 
 final bangumiProvider = Provider<BangumiCovers>((ref) {
-  final store = ref.watch(sessionStoreProvider);
-  ref.watch(proxyProvider);
-  ref.watch(nativeNetProvider);
+  final adapter = ref.watch(sharedHttpAdapterProvider);
   // Bangumi 要求带上说明是哪个程序的 User-Agent
   final dio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 10), receiveTimeout: const Duration(seconds: 20), headers: {'User-Agent': 'ark_novel (https://github.com/chenshi221/ark_novel)'}))
-    ..httpClientAdapter = store.adapter();
+    ..httpClientAdapter = adapter;
   ref.onDispose(() => dio.close(force: true));
   return BangumiCovers(dio);
 });

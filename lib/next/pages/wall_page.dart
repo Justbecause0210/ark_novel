@@ -2,24 +2,67 @@ import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:hive_ce_flutter/hive_flutter.dart';
 
 import '../env.dart';
 import '../motion.dart';
 import '../routes.dart';
 import '../stats.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
+import '../volumes.dart' show Vol, Volumes, volumeChangeForProvider, volumeMetaChangesProvider;
 import '../widgets.dart';
 import '../text.dart';
 
 /// 书籍墙：读完的每一卷（参考豆瓣的年度记录），按年份分组，每年顶部是数量和每月柱状图。点一卷进它的阅读报告。
-class WallPage extends ConsumerWidget {
+/// 整页只在已读完卷列表（`vdone:*` / `vols:*`）实际变化时重建；单本书后台抓到封面或改评分只刷新该书的 [_VolumeTile]。
+class WallPage extends ConsumerStatefulWidget {
   const WallPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    ref.watch(volumeChangesProvider);
-    final theme = Theme.of(context);
+  ConsumerState<WallPage> createState() => _WallPageState();
+}
+
+class _WallPageState extends ConsumerState<WallPage> {
+  Map<String, Map<String, int>> _doneRefs = const {};
+  Map<String, List<Vol>> _volRefs = const {};
+  List<(String, int, Vol, int)> _all = const [];
+  Map<int, List<(String, int, Vol, int)>> _years = const {};
+  Map<String, ({String title, String author, String img})> _infos = const {};
+
+  @override
+  void initState() {
+    super.initState();
+    _rebuildData();
+  }
+
+  (Map<String, Map<String, int>>, Map<String, List<Vol>>) _snapshotDoneRefs() {
+    if (!Hive.isBoxOpen('session')) return (const {}, const {});
+    final box = Hive.box('session');
+    final done = <String, Map<String, int>>{};
+    final vols = <String, List<Vol>>{};
+    for (final k in box.keys) {
+      if (k is String && k.startsWith('vdone:')) {
+        final aid = k.substring(6);
+        done[aid] = Volumes.done(aid);
+        vols[aid] = Volumes.of(aid);
+      }
+    }
+    return (done, vols);
+  }
+
+  bool _sameRefs(Map<String, Map<String, int>> nextDone, Map<String, List<Vol>> nextVols) {
+    if (nextDone.length != _doneRefs.length || nextVols.length != _volRefs.length) return false;
+    for (final e in nextDone.entries) {
+      if (!identical(_doneRefs[e.key], e.value)) return false;
+      if (!identical(_volRefs[e.key], nextVols[e.key])) return false;
+    }
+    return true;
+  }
+
+  void _rebuildData() {
+    final (doneRefs, volRefs) = _snapshotDoneRefs();
+    _doneRefs = doneRefs;
+    _volRefs = volRefs;
     final all = Volumes.allDone();
     final years = <int, List<(String, int, Vol, int)>>{};
     final infos = <String, ({String title, String author, String img})>{};
@@ -27,6 +70,24 @@ class WallPage extends ConsumerWidget {
       years.putIfAbsent(DateTime.fromMillisecondsSinceEpoch(e.$4).year, () => []).add(e);
       infos.putIfAbsent(e.$1, () => ReadingStats.info(e.$1));
     }
+    _all = all;
+    _years = years;
+    _infos = infos;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 仅订阅卷完读/结构变更，避免后台单张封面下载触发整墙检查与重建
+    ref.listen<int>(volumeMetaChangesProvider, (_, _) {
+      final (nextDone, nextVols) = _snapshotDoneRefs();
+      if (!_sameRefs(nextDone, nextVols) && mounted) {
+        setState(_rebuildData);
+      }
+    });
+    final theme = Theme.of(context);
+    final all = _all;
+    final years = _years;
+    final infos = _infos;
 
     return Scaffold(
       appBar: AppBar(title: const Text('书籍墙')),
@@ -156,6 +217,8 @@ class _VolumeTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final (aid, index, v, at) = entry;
+    // 按书号细粒度订阅卷封面与评分变化，单张封面下载完成只刷新对应项
+    ref.watch(volumeChangeForProvider(aid));
     final cover = ref.read(volumeCoverQueueProvider).volCover(aid, v, info.img);
     final stars = Volumes.rating(aid, v.title);
     final d = DateTime.fromMillisecondsSinceEpoch(at);

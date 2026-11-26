@@ -23,7 +23,13 @@ class _ShelfState extends ConsumerState<_Shelf> {
   (Map<String, LibBook>, ShelfOptions, String, String, bool, int, int)? _arrangeKey;
   List<LibBook> _arrangedBooks = const [];
   int _arrangeEpoch = 0;
+  bool _arrangeDirty = false;
+  bool _lastHasSelected = false;
   List<LibBook>? _lastWarmedBooks;
+
+  // 3D / 书脊模式焦点书号持久化防抖（400ms），避免快滑每划过一本就写 Hive
+  Timer? _focusSaveTimer;
+  String? _pendingFocusAid;
 
   // 滚动方向前方预解码状态（主封面缩略图提前解码进 Flutter ImageCache）
   int _layoutCols = 1;
@@ -33,6 +39,47 @@ class _ShelfState extends ConsumerState<_Shelf> {
   final _precachedUrls = <String>{};
   (bool, int, int)? _lastPrecacheSpan;
   DateTime _lastPrecacheAt = DateTime(0);
+
+  @override
+  void initState() {
+    super.initState();
+    widget.activeTab.addListener(_onActiveTabChanged);
+  }
+
+  @override
+  void didUpdateWidget(_Shelf old) {
+    super.didUpdateWidget(old);
+    if (old.activeTab != widget.activeTab) {
+      old.activeTab.removeListener(_onActiveTabChanged);
+      widget.activeTab.addListener(_onActiveTabChanged);
+    }
+    if (old.catId != widget.catId) {
+      _flushFocusAid(old.catId);
+    }
+  }
+
+  void _onActiveTabChanged() {
+    if (widget.activeTab.value == widget.catId && _arrangeDirty && mounted) {
+      setState(() => _arrangeDirty = false);
+    }
+  }
+
+  void _saveFocusAid(String aid) {
+    _pendingFocusAid = aid;
+    _focusSaveTimer?.cancel();
+    _focusSaveTimer = Timer(const Duration(milliseconds: 400), _flushFocusAid);
+  }
+
+  void _flushFocusAid([String? catId]) {
+    _focusSaveTimer?.cancel();
+    _focusSaveTimer = null;
+    final aid = _pendingFocusAid;
+    if (aid == null) return;
+    _pendingFocusAid = null;
+    if (Hive.isBoxOpen('session')) {
+      Hive.box('session').put('shelf3d:${catId ?? widget.catId}', aid);
+    }
+  }
 
   List<LibBook> _getArranged(LibraryState lib, ShelfOptions o, String query, bool updateRunning, int seed) {
     final k = _arrangeKey;
@@ -46,6 +93,12 @@ class _ShelfState extends ConsumerState<_Shelf> {
         k.$7 == _arrangeEpoch) {
       return _arrangedBooks;
     }
+    // 后台非活跃保活 Tab 已有缓存结果时延迟到切回可见再重排，避免切标签或搜索时多页同时全量排序
+    if (k != null && widget.activeTab.value != widget.catId) {
+      _arrangeDirty = true;
+      return _arrangedBooks;
+    }
+    _arrangeDirty = false;
     final list = _arrange(shelfBooksIn(lib, widget.catId), o, query, widget.catId);
     _arrangeKey = (lib.books, o, query, widget.catId, updateRunning, seed, _arrangeEpoch);
     _arrangedBooks = list;
@@ -120,6 +173,8 @@ class _ShelfState extends ConsumerState<_Shelf> {
 
   @override
   void dispose() {
+    widget.activeTab.removeListener(_onActiveTabChanged);
+    _flushFocusAid();
     _focus.dispose();
     _selecting.remove(widget.catId);
     Future.microtask(() => shelfSelecting.value = _selecting.isNotEmpty);
@@ -339,7 +394,7 @@ class _ShelfState extends ConsumerState<_Shelf> {
         ref.read(imageStoreProvider).warm([for (final b in books) _cover(b)], thumbnail: true);
       });
     }
-    final loggedIn = ref.watch(sessionProvider) is SessionLoggedIn;
+    final loggedIn = ref.watch(sessionProvider.select((s) => s is SessionLoggedIn));
     final cols = customCols == 0 ? null : customCols;
 
     Widget buildBody(double inset) {
@@ -396,6 +451,7 @@ class _ShelfState extends ConsumerState<_Shelf> {
         );
       }
       if (o.display == 4 || o.display == 5) {
+        final initialFocusAid = _pendingFocusAid ?? (Hive.box('session').get('shelf3d:${widget.catId}') as String?);
         // 正好一屏高；外面套一层能滚的，下拉同步照常可用；书脊/立体模式不显示继续阅读条，顶部不留冗余 inset
         return LayoutBuilder(
           builder: (context, c) => SingleChildScrollView(
@@ -407,8 +463,8 @@ class _ShelfState extends ConsumerState<_Shelf> {
                   builder: (context, tab, _) => o.display == 5
                       ? ShelfSpineView(
                           books: books,
-                          initialAid: Hive.box('session').get('shelf3d:${widget.catId}') as String?,
-                          onFocusChanged: (aid) => Hive.box('session').put('shelf3d:${widget.catId}', aid),
+                          initialAid: initialFocusAid,
+                          onFocusChanged: _saveFocusAid,
                           selected: _selected,
                           heroEnabled: tab == widget.catId,
                           coverOf: _cover,
@@ -417,23 +473,23 @@ class _ShelfState extends ConsumerState<_Shelf> {
                           actionOf: _shelf3dAction,
                           unreadOf: (b) => _unread(b.aid),
                           volumeCountOf: (b) => Volumes.of(b.aid).length,
-                          onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid)),
-                          onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid)),
+                          onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid), b.aid),
+                          onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid), b.aid),
                           onToggleSelect: (b) => _toggle(b.aid),
                         )
                       : Shelf3DView(
                           books: books,
                           // 每个标签记住上次停在哪本，只存在本机（不进备份、不同步）
-                          initialAid: Hive.box('session').get('shelf3d:${widget.catId}') as String?,
-                          onFocusChanged: (aid) => Hive.box('session').put('shelf3d:${widget.catId}', aid),
+                          initialAid: initialFocusAid,
+                          onFocusChanged: _saveFocusAid,
                           selected: _selected,
                           heroEnabled: tab == widget.catId,
                           coverOf: _cover,
                           badgeOf: _badge,
                           subtitleOf: _shelf3dLine,
                           actionOf: _shelf3dAction,
-                          onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid)),
-                          onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid)),
+                          onOpen: (b) => _openAndRefresh(Routes.volumes(b.aid), b.aid),
+                          onRead: (b, cid) => _openAndRefresh(Routes.reader(b.aid, cid), b.aid),
                           onToggleSelect: (b) => _toggle(b.aid),
                         ),
               ),
@@ -497,9 +553,13 @@ class _ShelfState extends ConsumerState<_Shelf> {
       );
     }
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _syncSelecting();
-    });
+    final hasSelected = _selected.isNotEmpty;
+    if (hasSelected != _lastHasSelected) {
+      _lastHasSelected = hasSelected;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncSelecting();
+      });
+    }
     return CallbackShortcuts(
       bindings: {
         if (_selected.isNotEmpty) const SingleActivator(LogicalKeyboardKey.escape): () => setState(_selected.clear),
@@ -640,13 +700,47 @@ class _ShelfState extends ConsumerState<_Shelf> {
     if (_selected.isNotEmpty) _focus.requestFocus(); // 保证桌面端按 Esc 可直接退出多选
   }
 
-  void _openAndRefresh(String route) {
+  (String?, int, Set<String>, int, int, int, int, int) _bookSnapshot(String aid) => (
+    ReadingProgress.of(aid)?.cid,
+    ReadingProgress.lastRead(aid),
+    ReadState.readView(aid),
+    ChapterCache.count(aid),
+    Bookmarks.bookmarkedCids(aid).length,
+    UpdateStore.known(aid),
+    UpdateStore.updatedAt(aid),
+    Volumes.changes.value,
+  );
+
+  void _openAndRefresh(String route, String aid) {
+    final before = _bookSnapshot(aid);
     context.push(route).then((_) {
-      if (mounted) setState(() => _arrangeEpoch++);
+      if (!mounted) return;
+      final after = _bookSnapshot(aid);
+      final unchanged = after.$1 == before.$1 &&
+          after.$2 == before.$2 &&
+          identical(after.$3, before.$3) &&
+          after.$4 == before.$4 &&
+          after.$5 == before.$5 &&
+          after.$6 == before.$6 &&
+          after.$7 == before.$7 &&
+          after.$8 == before.$8;
+      if (unchanged) return;
+      final o = shelfOptionsFor(ref.read(shelfOptionsProvider), widget.catId);
+      final affectsOrder = o.unread != 0 ||
+          o.started != 0 ||
+          o.cached != 0 ||
+          o.bookmarked != 0 ||
+          o.sort == ShelfSort.lastRead ||
+          o.sort == ShelfSort.updated ||
+          o.sort == ShelfSort.unread ||
+          o.sort == ShelfSort.total;
+      setState(() {
+        if (affectsOrder) _arrangeEpoch++;
+      });
     });
   }
 
-  void _tap(LibBook b) => _selected.isEmpty ? _openAndRefresh(Routes.novel(b.aid)) : _toggle(b.aid);
+  void _tap(LibBook b) => _selected.isEmpty ? _openAndRefresh(Routes.novel(b.aid), b.aid) : _toggle(b.aid);
 
   /// 立体模式下面的按钮：读过的接着读，没读过的从第一卷开始读，没有分卷信息就打开卷册页。
   /// 这是这一屏的主按钮，不受设置里封面角「继续阅读」小按钮开关的影响
@@ -678,7 +772,7 @@ class _ShelfState extends ConsumerState<_Shelf> {
       visualDensity: VisualDensity.compact,
       iconSize: 18,
       icon: const Icon(Icons.play_arrow),
-      onPressed: () => _openAndRefresh(Routes.reader(b.aid, p.cid)),
+      onPressed: () => _openAndRefresh(Routes.reader(b.aid, p.cid), b.aid),
     );
   }
 
@@ -776,7 +870,7 @@ class _ShelfState extends ConsumerState<_Shelf> {
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
-          onTap: () => _selected.isEmpty ? _openAndRefresh(Routes.volumes(b.aid)) : _toggle(b.aid),
+          onTap: () => _selected.isEmpty ? _openAndRefresh(Routes.volumes(b.aid), b.aid) : _toggle(b.aid),
           onLongPress: () => _toggle(b.aid),
           onSecondaryTap: () => _toggle(b.aid),
           child: _ShelfStackTile(book: b, catId: widget.catId, activeTab: widget.activeTab, badge: badge, coverSize: coverSize),

@@ -372,7 +372,9 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
       for (final idx in [center + d, center - d]) {
         if (idx < 0 || idx >= widget.books.length) continue;
         final url = widget.coverOf(widget.books[idx]);
-        if (url.isEmpty || !_precached.add(url)) continue;
+        if (url.isEmpty || _precached.contains(url)) continue;
+        if (_precached.length >= 128) _precached.remove(_precached.first);
+        _precached.add(url);
         NetImage.precache(context, url, size).ignore();
       }
     }
@@ -596,8 +598,14 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
 
   Widget _stage(PageController pc, double w, double stageW, double stageH) {
     final books = widget.books;
+    final cur = _cur.clamp(0, books.length - 1);
     final h = w / kCoverAspect;
     final persp = 1 / (w * 3.2);
+    // 在 AnimatedBuilder 外预计算可视区各书角标，避免滑动/悬停每帧重复构建角标子树
+    final badges = <String, Widget?>{
+      for (var i = math.max(0, cur - 3); i <= math.min(books.length - 1, cur + 3); i++) books[i].aid: widget.badgeOf(books[i]),
+    };
+    Widget? badgeFor(LibBook book) => badges.containsKey(book.aid) ? badges[book.aid] : (badges[book.aid] = widget.badgeOf(book));
     // 裁掉左右伸出去的书：TabBarView 切标签时不画到相邻标签上。上下不裁，封面的影子要完整
     return MouseRegion(
       cursor: _pointerOverBook ? SystemMouseCursors.click : SystemMouseCursors.basic,
@@ -622,7 +630,14 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
                       final p = _page;
                       final shown = [for (var i = math.max(0, p.floor() - 2); i <= math.min(books.length - 1, p.ceil() + 2); i++) i]
                         ..sort((a, b) => (b - p).abs().compareTo((a - p).abs())); // 远的先画，近的压在上面
-                      return Stack(alignment: Alignment.center, clipBehavior: Clip.none, children: [for (final i in shown) _book(i, i - p, w, h, persp)]);
+                      return Stack(
+                        alignment: Alignment.center,
+                        clipBehavior: Clip.none,
+                        children: [
+                          for (final i in shown)
+                            if (Shelf3DLayout.pose(i - p, w).opacity > 0.01) _book(i, i - p, w, h, persp, badgeFor(books[i])),
+                        ],
+                      );
                     },
                   ),
                 ),
@@ -660,12 +675,11 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
     );
   }
 
-  Widget _book(int i, double d, double w, double h, double persp) {
+  Widget _book(int i, double d, double w, double h, double persp, Widget? badge) {
     final book = widget.books[i];
     final pose = Shelf3DLayout.pose(d, w);
     final front = d.abs() < 0.5;
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final badge = widget.badgeOf(book);
     final lift = _reduceMotion ? 0.0 : (_lifts[i] ?? 0.0);
     final t = (1 - d.abs()).clamp(0.0, 1.0);
     final frontWeight = t * t * (3 - 2 * t);
@@ -717,7 +731,7 @@ class _Shelf3DViewState extends State<Shelf3DView> with SingleTickerProviderStat
         ),
       ),
     );
-    if (pose.opacity < 0.999) card = Opacity(opacity: pose.opacity, child: card);
+    if (pose.opacity < 0.995) card = Opacity(opacity: pose.opacity, child: card);
     return KeyedSubtree(key: ValueKey(book.aid), child: card);
   }
 
@@ -815,26 +829,28 @@ class ShelfCoverCard extends StatelessWidget {
     final baseShadow = dark ? 0.5 : 0.26;
     final shadowOpacity = (shadow / baseShadow).clamp(0.0, 1.0);
     final backing = (url.isEmpty ? null : savedCoverColor(url)) ?? (dark ? const Color(0xFF2A2927) : const Color(0xFFEAE4D8));
+    final primary = Theme.of(context).colorScheme.primary;
+    final shadowBox = RepaintBoundary(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: radius,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: baseShadow),
+              blurRadius: 22,
+              offset: const Offset(0, 10),
+            ),
+          ],
+        ),
+      ),
+    );
     return Stack(
       fit: StackFit.expand,
       children: [
-        Opacity(
-          opacity: shadowOpacity,
-          child: RepaintBoundary(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: radius,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: baseShadow),
-                    blurRadius: 22,
-                    offset: const Offset(0, 10),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
+        if (shadowOpacity >= 0.995)
+          shadowBox
+        else if (shadowOpacity > 0.01)
+          Opacity(opacity: shadowOpacity, child: shadowBox),
         RepaintBoundary(
           child: ClipRRect(
             borderRadius: radius,
@@ -849,15 +865,12 @@ class ShelfCoverCard extends StatelessWidget {
             ),
           ),
         IgnorePointer(
-          child: AnimatedOpacity(
-            opacity: selected ? 1.0 : 0.0,
+          child: AnimatedContainer(
             duration: AppMotion.dur(context, AppMotion.fast),
             curve: AppMotion.curve,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: radius,
-                border: Border.all(color: Theme.of(context).colorScheme.primary, width: 3),
-              ),
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(color: selected ? primary : primary.withValues(alpha: 0), width: 3),
             ),
           ),
         ),

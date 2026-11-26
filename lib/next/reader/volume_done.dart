@@ -14,6 +14,21 @@ import '../text.dart';
 
 enum VolumeDoneAction { next, shelf, stay }
 
+class _DoneCurveAnimatable extends Animatable<double> {
+  const _DoneCurveAnimatable(this.animation, {required this.curve, required this.reverseCurve});
+
+  final Animation<double> animation;
+  final Curve curve;
+  final Curve reverseCurve;
+
+  @override
+  double transform(double t) {
+    if (t == 0.0 || t == 1.0) return t;
+    final reversing = animation.status == AnimationStatus.reverse || animation.status == AnimationStatus.dismissed;
+    return reversing ? reverseCurve.flipped.transform(t) : curve.transform(t);
+  }
+}
+
 /// 读完一卷时弹出的庆祝卡片：封面带着光晕浮上来，下面是这一卷用了几天、多久、多少字，顺手打星，
 /// 再选「下一卷」或「回书架」。关掉（点空白、返回键）算 [VolumeDoneAction.stay]。
 Future<VolumeDoneAction> showVolumeDone(BuildContext context, {required String aid, required Vol vol, required int index, required String cover, required bool hasNext}) async {
@@ -27,7 +42,7 @@ Future<VolumeDoneAction> showVolumeDone(BuildContext context, {required String a
     transitionDuration: reduce ? Duration.zero : AppMotion.expressive,
     pageBuilder: (context, _, _) => _VolumeDoneCard(aid: aid, vol: vol, index: index, cover: cover, hasNext: hasNext),
     transitionBuilder: (context, a, _, child) => FadeTransition(
-      opacity: reduce ? a : CurvedAnimation(parent: a, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit),
+      opacity: reduce ? a : a.drive(_DoneCurveAnimatable(a, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit)),
       child: child,
     ),
   );
@@ -70,7 +85,7 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
     super.dispose();
   }
 
-  Animation<double> _at(double from, double to, [Curve curve = AppMotion.decelerate]) => CurvedAnimation(parent: _c, curve: Interval(from, to, curve: curve));
+  Animation<double> _at(double from, double to, [Curve curve = AppMotion.decelerate]) => _c.drive(CurveTween(curve: Interval(from, to, curve: curve)));
 
   /// 依次浮上来：每一块晚一点出现
   Widget _rise(double from, Widget child) {
@@ -147,7 +162,12 @@ class _VolumeDoneCardState extends State<_VolumeDoneCard> with SingleTickerProvi
                                 opacity: cheerIn.value.clamp(0, 1),
                                 child: Transform.translate(offset: Offset(0, 30 * (1 - cheerIn.value)), child: Transform.scale(scale: 0.7 + 0.3 * cheerIn.value, child: child)),
                               ),
-                              child: Image.asset(art.cheer, width: 120, height: 120),
+                              child: Image.asset(
+                                art.cheer,
+                                width: 120,
+                                height: 120,
+                                cacheHeight: (120 * MediaQuery.devicePixelRatioOf(context)).round().clamp(120, 480),
+                              ),
                             ),
                           ),
                       ],

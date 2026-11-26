@@ -323,7 +323,7 @@ Widget _hideShelfChip(BuildContext context, WidgetRef ref) {
 /// 打开了「隐藏书架里的」就返回判断函数，否则 null
 bool Function(String)? _hideShelved(WidgetRef ref) {
   if (!ref.watch(appPref(P.hideShelved, false))) return null;
-  final books = ref.watch(libraryProvider).books;
+  final books = ref.watch(libraryProvider.select((s) => s.books));
   return books.containsKey;
 }
 
@@ -334,7 +334,10 @@ class _RankingTab extends ConsumerStatefulWidget {
   ConsumerState<_RankingTab> createState() => _RankingTabState();
 }
 
-class _RankingTabState extends ConsumerState<_RankingTab> {
+class _RankingTabState extends ConsumerState<_RankingTab> with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   // 从上次的参数（比如 weekvisit）拆出榜单和时间
   late final _saved = parseRank(AppPrefs.read(P.discoverRank, ''));
   late var _kind = _saved.$1;
@@ -350,7 +353,8 @@ class _RankingTabState extends ConsumerState<_RankingTab> {
 
   @override
   Widget build(BuildContext context) {
-    if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
+    super.build(context);
+    if (!isWebPreview && ref.watch(sessionProvider.select((s) => s is SessionLoggedOut))) {
       return const LoginPrompt(title: '排行榜需要登录', detail: '登录轻小说文库账号后可查看点击榜、推荐榜、收藏榜等榜单；「推荐」分区可直接浏览。');
     }
     final api = ref.watch(apiProvider);
@@ -379,7 +383,12 @@ class _RankingTabState extends ConsumerState<_RankingTab> {
           ),
         ),
         Expanded(
-          child: PagedNovelGrid(key: ValueKey((node, param)), hide: _hideShelved(ref), fetch: (page) => api.ranking(param, page)),
+          child: PagedNovelGrid(
+            key: ValueKey((node, param)),
+            hide: _hideShelved(ref),
+            onRefresh: api.clearListCache,
+            fetchWithCancel: (page, cancelToken) => api.fetchRanking(param, page, cancelToken: cancelToken),
+          ),
         ),
       ],
     );
@@ -393,7 +402,10 @@ class _CategoryTab extends ConsumerStatefulWidget {
   ConsumerState<_CategoryTab> createState() => _CategoryTabState();
 }
 
-class _CategoryTabState extends ConsumerState<_CategoryTab> {
+class _CategoryTabState extends ConsumerState<_CategoryTab> with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   var _tag = categoryTags.contains(AppPrefs.read(P.discoverTag, '')) ? AppPrefs.read(P.discoverTag, '') : categoryTags.first;
   var _sort = categorySorts.firstWhere((e) => e.$2 == AppPrefs.read(P.discoverTagSort, ''), orElse: () => categorySorts.first);
   var _open = false; // 全部标签的下拉面板
@@ -447,7 +459,8 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> {
 
   @override
   Widget build(BuildContext context) {
-    if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
+    super.build(context);
+    if (!isWebPreview && ref.watch(sessionProvider.select((s) => s is SessionLoggedOut))) {
       return const LoginPrompt(title: '题材筛选需要登录', detail: '登录轻小说文库账号后可按奇幻、校园、恋爱等题材标签筛选小说。');
     }
     final api = ref.watch(apiProvider);
@@ -483,7 +496,12 @@ class _CategoryTabState extends ConsumerState<_CategoryTab> {
               },
             ),
             Expanded(
-              child: PagedNovelGrid(key: ValueKey((node, _tag, _sort)), hide: _hideShelved(ref), fetch: (page) => api.category(_tag, _sort.$2, page)),
+              child: PagedNovelGrid(
+                key: ValueKey((node, _tag, _sort)),
+                hide: _hideShelved(ref),
+                onRefresh: api.clearListCache,
+                fetchWithCancel: (page, cancelToken) => api.fetchCategory(_tag, _sort.$2, page, cancelToken: cancelToken),
+              ),
             ),
           ],
         ),
@@ -520,13 +538,18 @@ class _CompletedTab extends ConsumerStatefulWidget {
   ConsumerState<_CompletedTab> createState() => _CompletedTabState();
 }
 
-/// 通过 PageStorageKey 保留滚动位置，离开标签时释放已解码的封面 GPU 纹理
-class _CompletedTabState extends ConsumerState<_CompletedTab> {
+/// 保活保留已加载的分页列表与滚动位置，避免左右切换分区重复重新拉取
+class _CompletedTabState extends ConsumerState<_CompletedTab> with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   @override
   Widget build(BuildContext context) {
-    if (!isWebPreview && ref.watch(sessionProvider) is SessionLoggedOut) {
+    super.build(context);
+    if (!isWebPreview && ref.watch(sessionProvider.select((s) => s is SessionLoggedOut))) {
       return const LoginPrompt(title: '完结列表需要登录', detail: '登录轻小说文库账号后可浏览全部已完结小说。');
     }
+    final api = ref.watch(apiProvider);
     final hideOn = ref.watch(appPref(P.hideShelved, false));
     return Column(
       children: [
@@ -550,7 +573,14 @@ class _CompletedTabState extends ConsumerState<_CompletedTab> {
             ],
           ),
         ),
-        Expanded(child: PagedNovelGrid(key: ValueKey(ref.watch(nodeProvider)), hide: _hideShelved(ref), fetch: ref.watch(apiProvider).completed)),
+        Expanded(
+          child: PagedNovelGrid(
+            key: ValueKey(ref.watch(nodeProvider)),
+            hide: _hideShelved(ref),
+            onRefresh: api.clearListCache,
+            fetchWithCancel: (page, cancelToken) => api.fetchCompleted(page, cancelToken: cancelToken),
+          ),
+        ),
       ],
     );
   }

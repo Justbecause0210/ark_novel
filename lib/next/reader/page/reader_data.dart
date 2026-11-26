@@ -147,6 +147,23 @@ Future<Content> _fetchChapterRaw(
 const _maxKeptChapters = 4;
 const _chapterKeepAliveDuration = Duration(seconds: 90);
 final _keptChapters = <(String, String), ({Object link, VoidCallback close, Timer timer})>{};
+final _silentPrefetchKeys = <(String, String), int>{};
+
+/// 后台静默预热章节进内存 `chapterProvider`（禁用 Cloudflare 过盾弹窗，供常规及无痕预取复用）。
+Future<Chapter> prefetchChapterSilent(WidgetRef ref, String aid, String cid) async {
+  final key = (aid, cid);
+  _silentPrefetchKeys[key] = (_silentPrefetchKeys[key] ?? 0) + 1;
+  try {
+    return await ref.read(chapterProvider(key).future);
+  } finally {
+    final left = (_silentPrefetchKeys[key] ?? 1) - 1;
+    if (left <= 0) {
+      _silentPrefetchKeys.remove(key);
+    } else {
+      _silentPrefetchKeys[key] = left;
+    }
+  }
+}
 
 /// 收缩章节内存保活队列：[clearAll] 为 true（如内存压力告警）时关闭全部保活章节；
 /// 为 false（如退出阅读器）时仅保留最新 1 章，其余立即关闭释放。
@@ -183,6 +200,7 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
   if (raw != null && isLockedContent(raw)) raw = null; // 以前存下的「因版权问题…」，重新取
   if (raw == null) {
     final ticket = ChapterCache.ticket(key.$1, key.$2);
+    final allowChallenge = (_silentPrefetchKeys[key] ?? 0) == 0;
     try {
       raw = await _fetchChapterRaw(
         ref.read(wenku8ClientProvider),
@@ -192,7 +210,8 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
         key.$1,
         key.$2,
         cancelToken: cancel,
-        onCloudflare: () => ref.read(sessionProvider.notifier).markNeedsVerify(),
+        allowChallengeFallback: allowChallenge,
+        onCloudflare: allowChallenge ? () => ref.read(sessionProvider.notifier).markNeedsVerify() : null,
       );
     } on ChapterLockedException catch (e) {
       // 受限书里取不到的章（多半是插图）：给一句说明照常往后翻；不存缓存，下次还会再试
@@ -261,15 +280,58 @@ Future<(int, int)?> bookmarkPage(WidgetRef ref, BuildContext context, String aid
 }
 
 final _bookmarkPages = <Object, Future<(int, int)?>>{};
+Future<void> _bookmarkPaginateQueue = Future<void>.value();
+int _bookmarkQueueDepth = 0;
 
-/// 同一章、同样版面的分页结果（一章有好几个书签时只排一次版）
-final _bookmarkStarts = <Object, List<int>>{};
-
-/// 内存压力告警时清空书签页码、分页与章节保活缓存，释放非活跃章节内存。
+/// 内存压力告警时清空书签页码、共享分页、纹理与章节保活缓存，释放非活跃章节内存。
 void clearReaderBookmarkCaches() {
   _bookmarkPages.clear();
-  _bookmarkStarts.clear();
+  PaginateCache.clear();
+  ReaderBackground.evictTextureCache();
+  clearVolumeEtaCache();
   trimReaderChapterCache(clearAll: true);
+}
+
+Future<List<int>> _enqueueBookmarkPaginate({
+  required String text,
+  required TextStyle style,
+  required Size box,
+  required String title,
+  required double paragraphSpacing,
+}) {
+  final cached = PaginateCache.peek(
+    text: text,
+    style: style,
+    size: box,
+    title: title,
+    paragraphSpacing: paragraphSpacing,
+  );
+  if (cached != null) return Future<List<int>>.value(cached);
+
+  final completer = Completer<List<int>>();
+  final shouldYield = _bookmarkQueueDepth > 0;
+  _bookmarkQueueDepth++;
+  _bookmarkPaginateQueue = _bookmarkPaginateQueue.then((_) async {
+    if (shouldYield) await Future<void>.delayed(Duration.zero);
+    try {
+      final head = PaginateCache.headingHeightCached(title, style, box.width);
+      final starts = PaginateCache.paginateCached(
+        text: text,
+        style: style,
+        size: box,
+        title: title,
+        firstTop: head,
+        paragraphSpacing: paragraphSpacing,
+        strut: readerStrut(style),
+      );
+      completer.complete(starts);
+    } catch (e, st) {
+      completer.completeError(e, st);
+    } finally {
+      _bookmarkQueueDepth--;
+    }
+  });
+  return completer.future;
 }
 
 Future<(int, int)?> _bookmarkPage(WidgetRef ref, String aid, String cid, String title, int offset, ReaderPrefs prefs, Size size, EdgeInsets view) async {
@@ -280,11 +342,15 @@ Future<(int, int)?> _bookmarkPage(WidgetRef ref, String aid, String cid, String 
   // 否则照 PagedBody 的算法：上下各留出标题 / 页脚的位置，宽屏开双页时一屏两页
   final fallbackCols = prefs.dual && size.width >= 900 ? 2 : 1;
   final (box, cols) = PagedBody.lastLayout ?? (Size(size.width / fallbackCols - prefs.margin * 2, size.height - view.top - view.bottom - 72), fallbackCols);
-  final startsKey = (aid, cid, title, c.text.length, c.text.hashCode, style, prefs.paragraphSpacing, box);
   final starts = c.text.trim().isEmpty
       ? const <int>[]
-      : (_bookmarkStarts[startsKey] ??= paginate(c.text, style, box, strut: readerStrut(style), firstTop: headingHeight(title, style, box.width), paragraphSpacing: prefs.paragraphSpacing));
-  if (_bookmarkStarts.length > 4) _bookmarkStarts.remove(_bookmarkStarts.keys.first);
+      : await _enqueueBookmarkPaginate(
+          text: c.text,
+          style: style,
+          box: box,
+          title: title,
+          paragraphSpacing: prefs.paragraphSpacing,
+        );
   final total = starts.length + c.images.length;
   if (total == 0) return null;
   final page = offset > c.text.length ? math.min(starts.length + offset - c.text.length - 1, total - 1) : (starts.isEmpty ? 0 : pageOfOffset(starts, offset));

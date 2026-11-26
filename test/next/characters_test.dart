@@ -10,6 +10,7 @@ import 'package:ark_novel/next/rules.dart';
 import 'package:ark_novel/next/sync_merge.dart';
 import 'package:ark_novel/next/volumes.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive_ce/hive.dart';
@@ -365,5 +366,55 @@ void main() {
     await tester.tap(find.text('搜索全书出场'));
     await tester.pumpAndSettle();
     expect(searchedTerms, ['八奈见杏菜', '老八']);
+  });
+
+  group('BookCharacters 内存缓存与本地头像索引', () {
+    test('BookCharacters.of(aid)：未改动时复用同一不可变列表实例，变更后立即刷新', () async {
+      const aid = '4100';
+      await BookCharacters.upsert(const BookCharacter(id: 'k1', aid: aid, name: '角色A'));
+      final first = BookCharacters.of(aid);
+      final second = BookCharacters.of(aid);
+      expect(identical(first, second), isTrue);
+      expect(() => first.add(const BookCharacter(id: 'x', aid: aid, name: '非法修改')), throwsUnsupportedError);
+
+      await BookCharacters.upsert(const BookCharacter(id: 'k2', aid: aid, name: '角色B'));
+      final third = BookCharacters.of(aid);
+      expect(identical(first, third), isFalse);
+      expect(third.length, 2);
+    });
+
+    test('本地头像目录索引：ensureAvatarDirLoaded 扫描建索引，增删同步维护且不回退 existsSync', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      BookCharacters.resetAvatarCacheForTest();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/path_provider'),
+        (_) async => tmp.path,
+      );
+      addTearDown(() {
+        BookCharacters.resetAvatarCacheForTest();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+          const MethodChannel('plugins.flutter.io/path_provider'),
+          null,
+        );
+      });
+
+      final fileName = await BookCharacters.saveLocalAvatar('hero1', Uint8List.fromList([1, 2, 3, 4]));
+      final resolved = BookCharacters.localAvatarFileSync(fileName);
+      expect(resolved, isNotNull);
+      expect(resolved!.existsSync(), isTrue);
+
+      // 重置内存缓存后，在重新扫描前 localAvatarFileSync 必须返回 null（不走同步 existsSync）
+      BookCharacters.resetAvatarCacheForTest();
+      expect(BookCharacters.localAvatarFileSync(fileName), isNull);
+
+      // 重新异步扫描后恢复命中
+      await BookCharacters.ensureAvatarDirLoaded();
+      expect(BookCharacters.localAvatarFileSync(fileName), isNotNull);
+
+      // 删除后同步从索引与磁盘移除
+      await BookCharacters.deleteLocalAvatar(fileName);
+      expect(BookCharacters.localAvatarFileSync(fileName), isNull);
+      expect(resolved.existsSync(), isFalse);
+    });
   });
 }

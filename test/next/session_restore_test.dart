@@ -2,8 +2,13 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:ark_novel/data/wenku8/wenku8_client.dart';
+import 'package:ark_novel/data/wenku8/wenku8_parser.dart';
 import 'package:ark_novel/models/common/charset_type.dart';
 import 'package:ark_novel/models/common/wenku8_node.dart';
+import 'package:ark_novel/next/app.dart';
+import 'package:ark_novel/next/backup.dart';
+import 'package:ark_novel/next/env.dart';
+import 'package:ark_novel/next/fonts.dart';
 import 'package:ark_novel/next/net_io.dart';
 import 'package:ark_novel/next/session.dart';
 import 'package:dio/dio.dart';
@@ -288,6 +293,75 @@ void main() {
     adapter.close();
     expect(primaryClosed, isTrue);
     expect(fallbackClosed, isTrue);
+  });
+
+  test('UserInfo 结构化存储复用受保护的 userHtml 键、兼容旧版 HTML 回退，且 SessionLoggedIn 实现值相等', () async {
+    final store = await SessionStore.open();
+    final parsed = Wenku8Parser.userInfo(userPage);
+
+    // 写入结构化 UserInfo 后，本地 session Box 存轻量 Map 且仍受 Backup 本地键守卫保护
+    await store.setCachedUser(parsed);
+    expect(Backup.isLocalKey('userHtml'), isTrue);
+    expect(Hive.box('session').get('userHtml'), isA<Map>());
+    expect(store.userHtml, isNull);
+    final restored = store.cachedUser;
+    expect(restored, isNotNull);
+    expect(SessionLoggedIn(restored!), equals(SessionLoggedIn(parsed)));
+    expect(SessionLoggedIn(restored).hashCode, equals(SessionLoggedIn(parsed).hashCode));
+    expect(SessionLoggedIn(restored, offline: true), isNot(equals(SessionLoggedIn(parsed))));
+    expect(SessionLoggedIn(restored, needsVerify: true), isNot(equals(SessionLoggedIn(parsed))));
+
+    // 旧版 HTML 字符串格式仍能回退解析
+    await store.setUserHtml(userPage);
+    expect(store.userHtml, userPage);
+    final fromLegacy = store.cachedUser;
+    expect(fromLegacy, isNotNull);
+    expect(SessionLoggedIn(fromLegacy!), equals(SessionLoggedIn(parsed)));
+
+    await store.setCachedUser(null);
+    expect(store.cachedUser, isNull);
+  });
+
+  test('FontStore.loadSaved 在非自选字体时跳过磁盘读取，ensureLoaded 幂等按需加载', () async {
+    await SessionStore.open();
+    final box = Hive.box('session');
+    await box.put('r.font', 1);
+    await box.put('font:path', '${tmpDir.path}/nonexistent_font.ttf');
+    await box.put('font:family', 'TestLazyFont');
+    FontStore.ready.value = false;
+
+    await FontStore.loadSaved();
+    expect(FontStore.ready.value, isTrue);
+
+    // 切回自选字体后调用 ensureLoaded：先置 ready=false 再安全完成置 true
+    var sawFalse = false;
+    void listener() {
+      if (!FontStore.ready.value) sawFalse = true;
+    }
+
+    FontStore.ready.addListener(listener);
+    await FontStore.ensureLoaded();
+    FontStore.ready.removeListener(listener);
+    expect(sawFalse, isTrue);
+    expect(FontStore.ready.value, isTrue);
+
+    // 清理测试键
+    await box.deleteAll(['r.font', 'font:path', 'font:family']);
+  });
+
+  test('NextApp.markReaderActive 引用计数与 previewProxyBase 去尾斜杠行为正确', () {
+    expect(NextApp.isReaderActive, isFalse);
+    NextApp.markReaderActive(true);
+    NextApp.markReaderActive(true);
+    expect(NextApp.isReaderActive, isTrue);
+    NextApp.markReaderActive(false);
+    expect(NextApp.isReaderActive, isTrue);
+    NextApp.markReaderActive(false);
+    expect(NextApp.isReaderActive, isFalse);
+    NextApp.markReaderActive(false); // 多余退出不减成负数
+    expect(NextApp.isReaderActive, isFalse);
+
+    expect(previewProxyBase.endsWith('/'), isFalse);
   });
 }
 

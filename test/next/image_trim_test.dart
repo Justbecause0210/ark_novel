@@ -558,4 +558,64 @@ void main() {
     }
     await Future.wait(blockers.skip(1));
   });
+
+  test('ImageStore 磁盘损坏图自愈、15 分钟确定性负缓存与 forceRetry 绕过、trim 冷却与 force 强制清理', () async {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    final dir = await Directory.systemTemp.createTemp('imgstore_resilience');
+    addTearDown(() => dir.delete(recursive: true));
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(const MethodChannel('plugins.flutter.io/path_provider'), (_) async => dir.path);
+    await Hive.close();
+    Hive.init(dir.path);
+    await Hive.openBox('session');
+    await ChapterCache.open();
+    addTearDown(Hive.close);
+
+    var fail404 = true;
+    final net = _FakeAdapter((o) async {
+      if (o.uri.path.endsWith('missing.jpg')) {
+        return fail404 ? ResponseBody.fromBytes(const [], 404) : ResponseBody.fromBytes(_jpeg(3), 200);
+      }
+      return ResponseBody.fromBytes(_jpeg(2), 200);
+    });
+    final c = ProviderContainer(overrides: [imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net)]);
+    addTearDown(c.dispose);
+    final store = c.read(imageStoreProvider);
+
+    // 1. 404 写入负缓存，第二次不发网；显式 forceRetry: true 可绕过负缓存重下
+    const missingUrl = 'https://img.example/missing.jpg';
+    await expectLater(store.load(missingUrl), throwsA(isA<DioException>()));
+    expect(net.urls.length, 1);
+    await expectLater(store.load(missingUrl), throwsA(isA<DioException>()));
+    expect(net.urls.length, 1); // 命中内存负缓存
+
+    fail404 = false;
+    expect(await store.loadWithPriority(missingUrl, forceRetry: true), _jpeg(3));
+    expect(net.urls.length, 2);
+
+    // 2. 损坏磁盘缓存自动删除并回源重下
+    final cacheDir = Directory('${dir.path}/imgcache');
+    final files = cacheDir.listSync().whereType<File>().toList();
+    expect(files, hasLength(1));
+    await files.first.writeAsBytes('corrupted'.codeUnits);
+
+    final c2 = ProviderContainer(overrides: [imageDioProvider.overrideWithValue(Dio(BaseOptions(responseType: ResponseType.bytes))..httpClientAdapter = net)]);
+    addTearDown(c2.dispose);
+    final store2 = c2.read(imageStoreProvider);
+    expect(await store2.load(missingUrl), _jpeg(3));
+    expect(net.urls.length, 3);
+
+    // 3. trim() 冷却：首次执行后 24h 内且写入 < 50MB 时跳过，传 force: true 立即执行
+    const extra1 = 'https://img.example/e1.jpg';
+    const extra2 = 'https://img.example/e2.jpg';
+    await store2.load(extra1);
+    await store2.trim(maxBytes: 1); // 首次 trim 执行，清空未保留文件
+    expect(cacheDir.listSync().whereType<File>(), isEmpty);
+
+    await store2.load(extra2);
+    expect(cacheDir.listSync().whereType<File>(), hasLength(1));
+    await store2.trim(maxBytes: 1); // 冷却期内跳过
+    expect(cacheDir.listSync().whereType<File>(), hasLength(1));
+    await store2.trim(maxBytes: 1, force: true); // 手动强制清理生效
+    expect(cacheDir.listSync().whereType<File>(), isEmpty);
+  });
 }
