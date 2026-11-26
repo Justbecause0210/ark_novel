@@ -545,4 +545,63 @@ void main() {
     expect(find.text('动画 · 败犬女主太多了！动画'), findsOneWidget);
     expect(find.text('在 Bangumi 查看'), findsOneWidget);
   });
+
+  test('BangumiCovers：bgm:\$aid 30 天 stale-while-revalidate 立即返回旧缓存并后台刷新；forceRefresh 不复用非强刷任务', () async {
+    final oldTs = DateTime.now().subtract(const Duration(days: 35)).millisecondsSinceEpoch;
+    await Hive.box('session').put('bgm:601', {
+      'id': 3001,
+      'name': '旧系列名',
+      'vols': [{'n': 'Vol.1', 'i': 'https://lain.bgm.tv/old1.jpg'}],
+      'x': <Map>[],
+      't': oldTs,
+    });
+    final revalidated = Completer<void>();
+    final adapter = _MockBgmAdapter((opt) {
+      if (opt.path.endsWith('/subjects/3001/subjects')) {
+        if (!revalidated.isCompleted) revalidated.complete();
+        return (
+          200,
+          [
+            {'id': 1, 'name': 'Vol.1', 'relation': '单行本', 'type': 1, 'images': {'large': 'https://lain.bgm.tv/old1.jpg'}},
+            {'id': 2, 'name': 'Vol.2', 'relation': '单行本', 'type': 1, 'images': {'large': 'https://lain.bgm.tv/new2.jpg'}},
+          ],
+        );
+      }
+      return (404, {});
+    });
+    final bgm = BangumiCovers(Dio()..httpClientAdapter = adapter);
+    // 立即返回旧缓存（1 卷），同时后台静默刷新为 2 卷
+    final first = await bgm.series('601');
+    expect(first?.vols.length, 1);
+    await revalidated.future.timeout(const Duration(seconds: 2));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(BangumiCovers.saved('601')?.vols.length, 2);
+
+    // forceRefresh: true 不复用非 forceRefresh 的在途角色拉取任务
+    var charCalls = 0;
+    final gate = Completer<void>();
+    final asyncAdapter = _AsyncMockBgmAdapter((opt) async {
+      if (opt.path.endsWith('/subjects/3001/characters')) {
+        final call = ++charCalls;
+        if (call == 1) await gate.future;
+        return (
+          200,
+          [
+            {'id': call, 'name': '角色$call', 'relation': '主角', 'images': {'medium': 'https://img/c$call.jpg'}},
+            {'id': call + 10, 'name': '角色B', 'relation': '配角', 'images': {'medium': ''}},
+            {'id': call + 20, 'name': '角色C', 'relation': '配角', 'images': {'medium': ''}},
+          ],
+        );
+      }
+      return (200, const <Map>[]);
+    });
+    final bgm2 = BangumiCovers(Dio()..httpClientAdapter = asyncAdapter);
+    final normalF = bgm2.characters('601');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final forced = await bgm2.characters('601', forceRefresh: true);
+    expect(forced.first.id, 2);
+    gate.complete();
+    await normalF;
+    expect(charCalls, 2);
+  });
 }

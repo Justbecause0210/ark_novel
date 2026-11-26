@@ -13,6 +13,8 @@ import 'progress.dart';
 import 'session.dart';
 import 'sync.dart';
 
+final _titleEdgeTrimRe = RegExp(r'^[\s\-—–_]+|[\s\-—–_]+$');
+
 /// 有多个译名的书，网站把第二个译名用括号包在书名最后：「败北女角太多了！(败犬女主太多了！)」。
 /// 拆成 [前面的, 括号里的] 给改名时挑；只看最后一组括号（前面的括号是书名本身的一部分），拆不出两个返回空。
 List<String> titleAlternatives(String title) {
@@ -24,7 +26,7 @@ List<String> titleAlternatives(String title) {
     if (c == ')' || c == '）') depth++;
     if (c == '(' || c == '（') depth--;
     if (depth > 0) continue;
-    String clean(String s) => s.replaceAll(RegExp(r'^[\s\-—–_]+|[\s\-—–_]+$'), '');
+    String clean(String s) => s.replaceAll(_titleEdgeTrimRe, '');
     final main = clean(t.substring(0, i)), alt = clean(t.substring(i + 1, t.length - 1));
     return main.isEmpty || alt.isEmpty || main == alt ? const [] : [main, alt];
   }
@@ -429,7 +431,22 @@ class LibraryController extends Notifier<LibraryState> {
     return error;
   }
 
-  /// 和网站书架同步：拉网站全部 6 个书架 → 推本地排队的操作 → 对一遍。没登录、离线时什么都不做。
+  static const _allShelves = [0, 1, 2, 3, 4, 5];
+
+  List<int> _shelvesForSync(String uid, {required bool fullScan}) {
+    if (fullScan) return _allShelves;
+    final saved = _box.get('lib:shelves');
+    if (saved is Map && saved['uid'] == uid && saved['ids'] is List) {
+      final ids = <int>{0};
+      for (final item in saved['ids'] as List) {
+        if (item is int && item >= 0 && item < 6) ids.add(item);
+      }
+      return ids.toList()..sort();
+    }
+    return _allShelves;
+  }
+
+  /// 和网站书架同步：首次导入或手动刷新扫全部 6 个书架并记录非空书架编号；后台定时同步仅扫曾经有书的书架（默认仅默认书架 0，减少至 1 次请求）。
   /// 距上次不到 30 分钟时跳过（[force] 除外）。返回出错信息，成功或跳过返回 null；[force]（用户下拉）时跳过也说明原因。
   Future<String?> sync({bool force = false, bool details = true, Duration shelfDelay = const Duration(seconds: 1)}) async {
     final s = ref.read(sessionProvider);
@@ -448,11 +465,15 @@ class LibraryController extends Notifier<LibraryState> {
       if (!_sameAccount(s.user.uid)) return null;
       final api = ref.read(apiProvider);
       final remote = <String, RemoteBook>{};
-      for (var shelf = 0; shelf < 6; shelf++) {
-        if (shelf > 0 && shelfDelay > Duration.zero) await Future<void>.delayed(shelfDelay); // 连续读太快，网站会回 429
+      final shelvesToScan = _shelvesForSync(s.user.uid, fullScan: first || force);
+      final nonEmptyShelves = <int>{0};
+      for (var i = 0; i < shelvesToScan.length; i++) {
+        final shelf = shelvesToScan[i];
+        if (i > 0 && shelfDelay > Duration.zero) await Future<void>.delayed(shelfDelay); // 连续读太快，网站会回 429
         if (!_sameAccount(s.user.uid)) return null;
         final shelfBooks = (await api.bookshelf(shelf, fresh: true)).list;
         if (!_sameAccount(s.user.uid)) return null;
+        if (shelfBooks.isNotEmpty) nonEmptyShelves.add(shelf);
         for (final b in shelfBooks) {
           remote.putIfAbsent(b.aid, () => (bid: b.bid, title: b.title, img: b.img, shelf: shelf));
         }
@@ -475,7 +496,11 @@ class LibraryController extends Notifier<LibraryState> {
       await Future.wait([
         _save(next, cats),
         Sync.tombstone(removed),
-        _box.putAll({'lib:imported': s.user.uid, 'lib:sync': now}),
+        _box.putAll({
+          'lib:imported': s.user.uid,
+          'lib:sync': now,
+          'lib:shelves': {'uid': s.user.uid, 'ids': nonEmptyShelves.toList()..sort()},
+        }),
       ]);
       if (removed.isNotEmpty) PageStore.invalidateLooseCount();
       LibraryStore.noteRemovedElsewhere(readAfter);
