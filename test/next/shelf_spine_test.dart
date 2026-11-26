@@ -294,4 +294,12 @@ void main() {
     await tester.pumpAndSettle();
     expect(focused, '3');
   });
+
+  testWidgets('ShelfSpineView：竖排书脊标题改用单层 CustomPaint 绘制且正常兼容中英混合与超长省略', (tester) async {
+    await tester.pumpWidget(shelf(books, width: 1080, height: 720));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    // 书脊里不再为每个字符构建独立 Text（除底部信息栏与徽章外，书脊标题走 CustomPaint）
+    expect(find.descendant(of: find.byKey(const ValueKey('shelf-spine-stage')), matching: find.byType(CustomPaint)), findsAtLeastNWidgets(3));
+  });
 }

@@ -22,7 +22,7 @@ class _ResumeBar extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) => ValueListenableBuilder(
     valueListenable: Hive.box('session').listenable(keys: ['history2', 'resumeClosed']),
     builder: (context, box, _) {
-      final h = ReadingHistory.all().firstOrNull;
+      final h = ReadingHistory.latest(limit: 1).firstOrNull;
       if (h == null || box.get('resumeClosed') == h.aid) {
         onHeight(0);
         return const SizedBox.shrink();

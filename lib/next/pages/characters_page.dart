@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../models/cat_volume.dart';
@@ -24,6 +25,7 @@ import '../motion.dart';
 import '../reader/reader_body.dart' show readableHighlightColor;
 import '../reader/reader_sheets.dart';
 import '../routes.dart';
+import '../rules.dart' show RuleNotes;
 import '../stats.dart';
 import '../text.dart';
 import '../volumes.dart';
@@ -47,6 +49,8 @@ class CharactersPage extends ConsumerStatefulWidget {
 }
 
 class _CharactersPageState extends ConsumerState<CharactersPage> {
+  static final _wsRe = RegExp(r'\s+');
+
   final _searchCtrl = TextEditingController();
   String _search = '';
   String _roleFilter = '';
@@ -196,9 +200,10 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
         await _batchFetchCnSummaries();
       case 'clear_support':
         final all = BookCharacters.of(widget.aid);
+        final notes = Hive.isBoxOpen('session') ? RuleNotes.of(widget.aid) : const <String, String>{};
         final toDelete = {
           for (final c in all)
-            if (c.role != CharacterRole.main && BookCharacters.noteOf(c).trim().isEmpty) c.id,
+            if (c.role != CharacterRole.main && (notes[c.effectiveNoteKey] ?? '').trim().isEmpty) c.id,
         };
         if (toDelete.isEmpty) {
           _snack('没有可清理的无笔记配角/设定');
@@ -263,10 +268,10 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
   @override
   Widget build(BuildContext context) {
     ref.watch(bookCharactersChangesProvider);
-    ref.watch(novelProvider(widget.aid));
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final allChars = BookCharacters.of(widget.aid);
+    final notes = Hive.isBoxOpen('session') ? RuleNotes.of(widget.aid) : const <String, String>{};
     final activeRuleIds = BookCharacters.activeHighlightRuleIds();
     final hlIds = {for (final c in allChars) if (c.ruleId.isNotEmpty && activeRuleIds.contains(c.ruleId)) c.id};
     final q = _search.trim().toLowerCase();
@@ -278,7 +283,7 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
           c.originalName.toLowerCase().contains(q) ||
           c.aliases.any((a) => a.toLowerCase().contains(q)) ||
           c.preferredSummary.toLowerCase().contains(q) ||
-          BookCharacters.noteOf(c).toLowerCase().contains(q);
+          (notes[c.effectiveNoteKey] ?? '').toLowerCase().contains(q);
     }).toList();
     final currentVol = BookCharacters.currentReadingVolume(widget.aid);
     final rolesPresent = {for (final c in allChars) c.role};
@@ -477,7 +482,7 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
                                   key: ValueKey('chars-${_roleFilter}_$_onlyHighlighted'),
                                   padding: const EdgeInsets.fromLTRB(16, 6, 16, 32),
                                   itemCount: chars.length,
-                                  itemBuilder: (context, i) => _buildCard(chars[i], currentVol, hlIds.contains(chars[i].id)),
+                                  itemBuilder: (context, i) => _buildCard(chars[i], currentVol, hlIds.contains(chars[i].id), notes[chars[i].effectiveNoteKey] ?? ''),
                                 ),
                         ),
                       ),
@@ -489,12 +494,11 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
     );
   }
 
-  Widget _buildCard(BookCharacter c, int currentVol, bool hlOn) {
+  Widget _buildCard(BookCharacter c, int currentVol, bool hlOn, String note) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final dark = theme.brightness == Brightness.dark;
     final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
-    final note = BookCharacters.noteOf(c);
     final hideSpoiler = note.isNotEmpty && c.shouldHideSpoiler(currentVol) && !_revealed.contains(c.id);
     final displayAliases = BookCharacter.cleanAliases(c.aliases, name: c.name, originalName: c.originalName);
     final summaryText = c.preferredSummary;
@@ -554,7 +558,7 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
                     if (summaryText.isNotEmpty) ...[
                       const SizedBox(height: 4),
                       Text(
-                        summaryText.replaceAll(RegExp(r'\s+'), ' '),
+                        summaryText.replaceAll(_wsRe, ' '),
                         maxLines: summaryIsJpOnly ? 1 : 2,
                         overflow: TextOverflow.ellipsis,
                         style: theme.textTheme.bodySmall?.copyWith(
@@ -571,7 +575,7 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
                           const SizedBox(width: 4),
                           Expanded(
                             child: Text(
-                              hideSpoiler ? '个人笔记已折叠（第 ${c.spoilerVol} 卷解锁）' : note.replaceAll(RegExp(r'\s+'), ' '),
+                              hideSpoiler ? '个人笔记已折叠（第 ${c.spoilerVol} 卷解锁）' : note.replaceAll(_wsRe, ' '),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary),
@@ -620,6 +624,62 @@ class _CharactersPageState extends ConsumerState<CharactersPage> {
   }
 }
 
+/// 全屏立绘弹窗过渡：持有并释放 [CurvedAnimation]，避免每次动画帧重复创建泄漏。
+class _PortraitDialogTransition extends StatefulWidget {
+  const _PortraitDialogTransition({required this.animation, required this.reduce, required this.child});
+
+  final Animation<double> animation;
+  final bool reduce;
+  final Widget child;
+
+  @override
+  State<_PortraitDialogTransition> createState() => _PortraitDialogTransitionState();
+}
+
+class _PortraitDialogTransitionState extends State<_PortraitDialogTransition> {
+  late CurvedAnimation _fade;
+  late CurvedAnimation _scaleCurve;
+  late Animation<double> _scale;
+
+  void _bind(Animation<double> animation) {
+    _fade = CurvedAnimation(parent: animation, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit);
+    _scaleCurve = CurvedAnimation(parent: animation, curve: AppMotion.curve, reverseCurve: AppMotion.exit);
+    _scale = Tween<double>(begin: 0.92, end: 1.0).animate(_scaleCurve);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _bind(widget.animation);
+  }
+
+  @override
+  void didUpdateWidget(_PortraitDialogTransition old) {
+    super.didUpdateWidget(old);
+    if (old.animation != widget.animation) {
+      _fade.dispose();
+      _scaleCurve.dispose();
+      _bind(widget.animation);
+    }
+  }
+
+  @override
+  void dispose() {
+    _fade.dispose();
+    _scaleCurve.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.reduce) return FadeTransition(opacity: _fade, child: widget.child);
+    return FadeTransition(
+      opacity: _fade,
+      child: ScaleTransition(scale: _scale, child: widget.child),
+    );
+  }
+}
+
 /// 人物头像组件：优先展示内存预览/本地裁剪图，其次 Bangumi 上半身特写（顶部对齐露脸），点击可放大查看完整立绘。
 class _CharacterAvatar extends StatelessWidget {
   const _CharacterAvatar({required this.char, this.size = 48, this.allowPreview = true, this.previewBytes});
@@ -631,21 +691,16 @@ class _CharacterAvatar extends StatelessWidget {
 
   void _showFullPortrait(BuildContext context, File? localFile) {
     final reduce = AppMotion.reduce(context);
+    final screen = MediaQuery.sizeOf(context);
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final maxPx = math.min(2048, (math.max(screen.width, screen.height) * dpr).ceil().clamp(720, 2048));
     showGeneralDialog<void>(
       context: context,
       barrierDismissible: true,
       barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
       barrierColor: Colors.black.withValues(alpha: 0.85),
       transitionDuration: reduce ? AppMotion.instant : AppMotion.standard,
-      transitionBuilder: (ctx, animation, _, child) {
-        final fade = CurvedAnimation(parent: animation, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit);
-        if (reduce) return FadeTransition(opacity: fade, child: child);
-        final scale = Tween<double>(begin: 0.92, end: 1.0).animate(CurvedAnimation(parent: animation, curve: AppMotion.curve, reverseCurve: AppMotion.exit));
-        return FadeTransition(
-          opacity: fade,
-          child: ScaleTransition(scale: scale, child: child),
-        );
-      },
+      transitionBuilder: (ctx, animation, _, child) => _PortraitDialogTransition(animation: animation, reduce: reduce, child: child),
       pageBuilder: (ctx, _, _) => Material(
         type: MaterialType.transparency,
         child: Stack(
@@ -662,7 +717,7 @@ class _CharacterAvatar extends StatelessWidget {
                       child: Padding(
                         padding: const EdgeInsets.all(24),
                         child: localFile != null
-                            ? Image.file(localFile, fit: BoxFit.contain)
+                            ? Image.file(localFile, fit: BoxFit.contain, cacheWidth: maxPx)
                             : NetImage(
                                 bgmCharacterFullUrl(char.avatarUrl),
                                 fit: BoxFit.contain,
@@ -713,6 +768,8 @@ class _CharacterAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final cachePx = (size * dpr).ceil().clamp(48, 320);
     final fallbackColor = readableHighlightColor(Color(char.color), darkSurface: dark);
     final initial = char.name.trim().isEmpty ? '?' : String.fromCharCode(char.name.trim().runes.first);
     final placeholder = Container(
@@ -728,12 +785,12 @@ class _CharacterAvatar extends StatelessWidget {
     if (previewBytes != null && previewBytes!.isNotEmpty) {
       box = ClipRRect(
         borderRadius: BorderRadius.circular(size * 0.24),
-        child: Image.memory(previewBytes!, width: size, height: size, fit: BoxFit.cover, errorBuilder: (_, _, _) => placeholder),
+        child: Image.memory(previewBytes!, width: size, height: size, fit: BoxFit.cover, cacheWidth: cachePx, cacheHeight: cachePx, errorBuilder: (_, _, _) => placeholder),
       );
     } else if (localFile != null) {
       box = ClipRRect(
         borderRadius: BorderRadius.circular(size * 0.24),
-        child: Image.file(localFile, width: size, height: size, fit: BoxFit.cover, errorBuilder: (_, _, _) => placeholder),
+        child: Image.file(localFile, width: size, height: size, fit: BoxFit.cover, cacheWidth: cachePx, cacheHeight: cachePx, errorBuilder: (_, _, _) => placeholder),
       );
     } else if (char.avatarUrl.isNotEmpty) {
       final avatarUrl = bgmCharacterAvatarUrl(char.avatarUrl);

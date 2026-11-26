@@ -59,11 +59,37 @@ bool _handlingRefreshNotice = false;
 
 class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProviderStateMixin {
   bool _searching = false;
+  final _searchCtrl = TextEditingController();
+  Timer? _searchDebounce;
 
   void _setSearching(bool v) {
     _searching = v;
     // 晚一拍改通知器：同一次返回键里，外层 PopScope 不管先后都读到旧值
     Future.microtask(() => shelfSearching.value = _searching);
+  }
+
+  void _onSearchChanged(String v) {
+    _searchDebounce?.cancel();
+    if (v.isEmpty) {
+      ref.read(shelfQueryProvider.notifier).set('');
+      return;
+    }
+    _searchDebounce = Timer(const Duration(milliseconds: 150), () {
+      if (mounted) ref.read(shelfQueryProvider.notifier).set(v);
+    });
+  }
+
+  void _clearSearchQuery() {
+    _searchDebounce?.cancel();
+    _searchCtrl.clear();
+    ref.read(shelfQueryProvider.notifier).set('');
+  }
+
+  void _closeSearch() {
+    _searchDebounce?.cancel();
+    _searchCtrl.clear();
+    setState(() => _setSearching(false));
+    ref.read(shelfQueryProvider.notifier).set('');
   }
 
   TabController? _tc;
@@ -72,10 +98,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
   final _activeTab = ValueNotifier<String>(''); // 当前激活的标签 id，用来关掉后台保活标签页的重复 Hero
   final _keys = <String, GlobalKey>{};
   final _stripKey = GlobalKey();
-  int _measureRetries = 0;
   final _tabScroll = ScrollController();
-
-  Box get _box => Hive.box('session');
 
   @override
   void initState() {
@@ -95,6 +118,8 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
   @override
   void dispose() {
     LibraryStore.syncNotice.removeListener(_onSyncNotice);
+    _searchDebounce?.cancel();
+    _searchCtrl.dispose();
     shelfSearching.value = false;
     _resumeHidden.dispose();
     _resumeHeight.dispose();
@@ -102,15 +127,6 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
     _tc?.dispose();
     _tabScroll.dispose();
     super.dispose();
-  }
-
-  /// 第 i 个标签里文字那一段在标签栏里的位置（左边、宽度）；还没排好版时返回 null
-  (double, double)? _labelRect(List<LibCategory> tabs, int i) {
-    final strip = _stripKey.currentContext?.findRenderObject() as RenderBox?;
-    final box = _keys[tabs[i].id]?.currentContext?.findRenderObject() as RenderBox?;
-    if (strip == null || box == null || !box.attached || !box.hasSize) return null;
-    final left = box.localToGlobal(Offset.zero, ancestor: strip).dx;
-    return (left + 14, box.size.width - 28); // 去掉左右内边距，下划线和字一样宽
   }
 
   /// 标签变了（新增 / 删除 / 拖动）就换一个 TabController，停在原来的标签上。
@@ -122,7 +138,6 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
       _tc = TabController(length: ids.length, vsync: this, initialIndex: math.max(0, ids.indexOf(cur)));
       _ids = ids;
       _activeTab.value = _ids[_tc!.index];
-      _measureRetries = 0; // 标签变了（比如新建了分类）要重新量下划线的位置
       _tc!.addListener(_scrollToTab);
       if (old != null) WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
       if (first) WidgetsBinding.instance.addPostFrameCallback((_) => mounted ? _scrollToTab() : null); // 标签栏滚到上次的标签
@@ -145,119 +160,28 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
     if (ctx != null) Scrollable.ensureVisible(ctx, duration: AppMotion.dur(context, AppMotion.fast), curve: AppMotion.curve, alignment: 0.5);
   }
 
-  /// 标签栏内容：点一下切换，长按拖动调整顺序；宽屏单行顶栏直接内嵌，窄屏挂在 AppBar.bottom。
-  Widget _tabStripBody(List<LibCategory> tabs, TabController tc, LibraryState lib, {required bool counts, required bool perCat, double height = 42, EdgeInsets padding = const EdgeInsets.symmetric(horizontal: 8)}) {
-    final query = ref.watch(shelfQueryProvider);
-    final opts = ref.watch(shelfOptionsProvider);
-    if (perCat && query.isNotEmpty) {
-      for (final c in tabs) {
-        ref.watch(appPrefProvider('shelf.tab.${c.id}'));
-      }
-    }
-    // 搜索时每个标签显示找到几本（和标签里列出来的一样，也算上筛选）
-    // 在动画外面算好：下面的 AnimatedBuilder 滑动时每帧都重建，每帧对每个标签筛选、排序一遍会掉帧
-    final showCounts = counts || query.isNotEmpty;
-    final tabNums = {
-      for (final c in tabs)
-        c.id: query.isNotEmpty
-            ? _arrange(shelfBooksIn(lib, c.id), shelfOptionsFor(opts, c.id), query, c.id).length
-            : (counts ? shelfBooksIn(lib, c.id).length : null),
-    };
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return SizedBox(
-      height: height,
-      // 下划线和字色跟着滑动的进度走（和发现页的系统标签栏一样），不是切换完才跳过去
-      child: AnimatedBuilder(
-        animation: Listenable.merge([tc.animation!, _tabScroll]),
-        builder: (context, _) {
-          final at = tc.animation!.value.clamp(0.0, tabs.length - 1.0);
-          final lo = at.floor(), hi = at.ceil();
-          // 标签滑出屏幕时量不到（列表只排眼前的），就先用另一头的位置
-          final ra = _labelRect(tabs, lo), rb = _labelRect(tabs, hi);
-          final a = ra ?? rb, b = rb ?? ra;
-          final t = at - lo;
-          // 第一次进来时标签还没排好版：下一帧再画一次（最多重试几次，免得一直重建）
-          if (a == null && _measureRetries++ < 3) WidgetsBinding.instance.addPostFrameCallback((_) => mounted ? setState(() {}) : null);
-          return Stack(
-            key: _stripKey,
-            children: [
-              ReorderableListView.builder(
-                scrollController: _tabScroll,
-                scrollDirection: Axis.horizontal,
-                buildDefaultDragHandles: false,
-                padding: padding,
-                itemCount: tabs.length,
-                proxyDecorator: (child, _, _) => Material(color: Colors.transparent, child: child),
-                onReorderItem: (from, to) {
-                  final ids = [for (final c in tabs) c.id];
-                  ids.insert(to, ids.removeAt(from));
-                  // 隐藏的标签留在原位，可见的按新顺序填回它们占的位置
-                  final all = [for (final c in allShelfTabs(lib.cats)) c.id];
-                  var k = 0;
-                  final ordered = [for (final id in all) ids.contains(id) ? ids[k++] : id];
-                  _box.put('shelfTabOrder', ordered);
-                  final catMap = {for (final c in lib.cats) c.id: c};
-                  ref.read(libraryProvider.notifier).reorderCategories([for (final id in ordered) if (catMap[id] != null) catMap[id]!]);
-                  setState(() {});
-                },
-                itemBuilder: (context, i) {
-                  final c = tabs[i];
-                  final near = (1 - (at - i).abs()).clamp(0.0, 1.0); // 1 = 正在这个标签
-                  final labelColor = Color.lerp(scheme.onSurfaceVariant.withValues(alpha: 0.76), scheme.onSurface, near);
-                  final countColor = Color.lerp(scheme.onSurfaceVariant.withValues(alpha: 0.45), scheme.primary.withValues(alpha: 0.78), near);
-                  final num = tabNums[c.id];
-                  return ReorderableDelayedDragStartListener(
-                    key: ValueKey(c.id),
-                    index: i,
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(8),
-                      onTap: () => tc.animateTo(i),
-                      child: Container(
-                        key: _keys.putIfAbsent(c.id, GlobalKey.new),
-                        alignment: Alignment.center,
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        child: Text.rich(
-                          TextSpan(
-                            children: [
-                              TextSpan(
-                                text: c.name,
-                                style: TextStyle(fontSize: 14.5, fontWeight: near > 0.5 ? FontWeight.w600 : FontWeight.w500, color: labelColor),
-                              ),
-                              if (showCounts && num != null)
-                                TextSpan(
-                                  text: ' $num',
-                                  style: TextStyle(
-                                    fontSize: 11.5,
-                                    fontWeight: FontWeight.w500,
-                                    color: countColor,
-                                    fontFeatures: const [FontFeature.tabularFigures()],
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-              if (a != null && b != null)
-                Positioned(
-                  left: a.$1 + (b.$1 - a.$1) * t,
-                  width: a.$2 + (b.$2 - a.$2) * t,
-                  bottom: 0,
-                  height: 2,
-                  child: IgnorePointer(
-                    child: DecoratedBox(decoration: BoxDecoration(color: scheme.primary, borderRadius: BorderRadius.circular(2))),
-                  ),
-                ),
-            ],
-          );
-        },
-      ),
-    );
-  }
+  /// 标签栏内容：抽成独立 ConsumerWidget，避免搜索词变更重建整页、RuinsScene 与 TabBarView。
+  Widget _tabStripBody(
+    List<LibCategory> tabs,
+    TabController tc,
+    LibraryState lib, {
+    required bool counts,
+    required bool perCat,
+    double height = 42,
+    EdgeInsets padding = const EdgeInsets.symmetric(horizontal: 8),
+  }) => _ShelfTabStrip(
+    tabs: tabs,
+    tc: tc,
+    lib: lib,
+    counts: counts,
+    perCat: perCat,
+    height: height,
+    padding: padding,
+    stripKey: _stripKey,
+    tabKeys: _keys,
+    tabScroll: _tabScroll,
+    onReordered: () => setState(() {}),
+  );
 
   PreferredSizeWidget _tabStrip(List<LibCategory> tabs, TabController tc, LibraryState lib, {required bool counts, required bool perCat}) => PreferredSize(
     preferredSize: const Size.fromHeight(42),
@@ -359,10 +283,27 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
     final sceneMotion = scene ? ref.watch(appPref(P.sceneMotion, true)) : false;
     final wide = MediaQuery.sizeOf(context).width >= 720;
     final singleRowHeader = wide && !scene;
-    final searchField = TextField(
-      autofocus: true,
-      decoration: const InputDecoration(hint: Text('在书架中搜索', maxLines: 1, overflow: TextOverflow.ellipsis), border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none, filled: false),
-      onChanged: ref.read(shelfQueryProvider.notifier).set,
+    final searchField = ValueListenableBuilder<TextEditingValue>(
+      valueListenable: _searchCtrl,
+      builder: (context, val, _) => TextField(
+        controller: _searchCtrl,
+        autofocus: true,
+        decoration: InputDecoration(
+          hint: const Text('在书架中搜索', maxLines: 1, overflow: TextOverflow.ellipsis),
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          filled: false,
+          suffixIcon: val.text.isEmpty
+              ? null
+              : IconButton(
+                  tooltip: hz(context, '清空搜索'),
+                  icon: const Icon(Icons.clear, size: 18),
+                  onPressed: _clearSearchQuery,
+                ),
+        ),
+        onChanged: _onSearchChanged,
+      ),
     );
     // 插画主题：顶栏加高，标题和按钮压在插画的天空上，下面的分类标签仍在页面底色上
     // 宽屏普通主题：标签栏与右侧图标合并为单行极简顶栏，消除多余顶部空白
@@ -391,8 +332,11 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
             child: Icon(_searching ? Icons.close : Icons.search, key: ValueKey(_searching), size: singleRowHeader ? 20 : 22),
           ),
           onPressed: () {
-            setState(() => _setSearching(!_searching));
-            if (!_searching) ref.read(shelfQueryProvider.notifier).set('');
+            if (_searching) {
+              _closeSearch();
+            } else {
+              setState(() => _setSearching(true));
+            }
           },
         ),
         IconButton(
@@ -439,18 +383,13 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
     );
     return CallbackShortcuts(
       bindings: {
-        if (_searching)
-          const SingleActivator(LogicalKeyboardKey.escape): () {
-            setState(() => _setSearching(false));
-            ref.read(shelfQueryProvider.notifier).set('');
-          },
+        if (_searching) const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
       },
       child: PopScope(
       canPop: !_searching,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        setState(() => _setSearching(false));
-        ref.read(shelfQueryProvider.notifier).set('');
+        _closeSearch();
       },
       child: Scaffold(
         resizeToAvoidBottomInset: false, // 外层主界面已经让开了键盘，这里再让一次，书架只剩上面一小截
@@ -487,6 +426,235 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
         ),
       ),
       ),
+    );
+  }
+}
+
+/// 纯过滤计数：替代 `_arrange(...).length`，搜索时无需构造副本或排序。
+int _countMatching(Iterable<LibBook> list, ShelfOptions o, String query) {
+  final q = query.toLowerCase();
+  final markedAids = o.bookmarked == 0 ? const <String>{} : Bookmarks.bookmarkedAids();
+  var count = 0;
+  for (final b in list) {
+    if (q.isNotEmpty && !b.shown.toLowerCase().contains(q) && !b.title.toLowerCase().contains(q)) continue;
+    if (!_tri(o.unread, () => _unread(b.aid) > 0)) continue;
+    if (!_tri(o.started, () => _started(b.aid))) continue;
+    if (!_tri(o.cached, () => ChapterCache.count(b.aid) > 0)) continue;
+    if (!_tri(o.bookmarked, () => markedAids.contains(b.aid))) continue;
+    if (!_tri(o.completed, () => b.done)) continue;
+    count++;
+  }
+  return count;
+}
+
+/// 书架分类标签条：独立订阅 `shelfQueryProvider` 与 `shelfOptionsProvider`，避免搜索敲字重建 `BookshelfPage`、`RuinsScene` 与 `TabBarView`。
+/// 下划线拆成独立叠层 [_ShelfTabIndicator]，滑动切换标签时不每帧重建 `ReorderableListView.builder`。
+class _ShelfTabStrip extends ConsumerWidget {
+  const _ShelfTabStrip({
+    required this.tabs,
+    required this.tc,
+    required this.lib,
+    required this.counts,
+    required this.perCat,
+    required this.height,
+    required this.padding,
+    required this.stripKey,
+    required this.tabKeys,
+    required this.tabScroll,
+    required this.onReordered,
+  });
+
+  final List<LibCategory> tabs;
+  final TabController tc;
+  final LibraryState lib;
+  final bool counts;
+  final bool perCat;
+  final double height;
+  final EdgeInsets padding;
+  final GlobalKey stripKey;
+  final Map<String, GlobalKey> tabKeys;
+  final ScrollController tabScroll;
+  final VoidCallback onReordered;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final query = ref.watch(shelfQueryProvider);
+    final opts = ref.watch(shelfOptionsProvider);
+    if (perCat && query.isNotEmpty) {
+      for (final c in tabs) {
+        ref.watch(appPrefProvider('shelf.tab.${c.id}'));
+      }
+    }
+    final showCounts = counts || query.isNotEmpty;
+    final tabNums = {
+      for (final c in tabs)
+        c.id: query.isNotEmpty
+            ? _countMatching(shelfBooksIn(lib, c.id), shelfOptionsFor(opts, c.id), query)
+            : (counts ? shelfBooksIn(lib, c.id).length : null),
+    };
+    final scheme = Theme.of(context).colorScheme;
+    final anim = tc.animation!;
+
+    return SizedBox(
+      height: height,
+      child: Stack(
+        key: stripKey,
+        children: [
+          ReorderableListView.builder(
+            scrollController: tabScroll,
+            scrollDirection: Axis.horizontal,
+            buildDefaultDragHandles: false,
+            padding: padding,
+            itemCount: tabs.length,
+            proxyDecorator: (child, _, _) => Material(color: Colors.transparent, child: child),
+            onReorderItem: (from, to) {
+              final ids = [for (final c in tabs) c.id];
+              ids.insert(to, ids.removeAt(from));
+              // 隐藏的标签留在原位，可见的按新顺序填回它们占的位置
+              final all = [for (final c in allShelfTabs(lib.cats)) c.id];
+              final idSet = ids.toSet();
+              var k = 0;
+              final ordered = [for (final id in all) idSet.contains(id) ? ids[k++] : id];
+              Hive.box('session').put('shelfTabOrder', ordered);
+              final catMap = {for (final c in lib.cats) c.id: c};
+              ref.read(libraryProvider.notifier).reorderCategories([for (final id in ordered) if (catMap[id] != null) catMap[id]!]);
+              onReordered();
+            },
+            itemBuilder: (context, i) {
+              final c = tabs[i];
+              final num = tabNums[c.id];
+              return ReorderableDelayedDragStartListener(
+                key: ValueKey(c.id),
+                index: i,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => tc.animateTo(i),
+                  child: Container(
+                    key: tabKeys.putIfAbsent(c.id, GlobalKey.new),
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: AnimatedBuilder(
+                      animation: anim,
+                      builder: (context, _) {
+                        final at = anim.value.clamp(0.0, tabs.length - 1.0);
+                        final near = (1 - (at - i).abs()).clamp(0.0, 1.0); // 1 = 正在这个标签
+                        final labelColor = Color.lerp(scheme.onSurfaceVariant.withValues(alpha: 0.76), scheme.onSurface, near);
+                        final countColor = Color.lerp(scheme.onSurfaceVariant.withValues(alpha: 0.45), scheme.primary.withValues(alpha: 0.78), near);
+                        return Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: c.name,
+                                style: TextStyle(fontSize: 14.5, fontWeight: near > 0.5 ? FontWeight.w600 : FontWeight.w500, color: labelColor),
+                              ),
+                              if (showCounts && num != null)
+                                TextSpan(
+                                  text: ' $num',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w500,
+                                    color: countColor,
+                                    fontFeatures: const [FontFeature.tabularFigures()],
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: _ShelfTabIndicator(
+                tabs: tabs,
+                tc: tc,
+                tabScroll: tabScroll,
+                stripKey: stripKey,
+                tabKeys: tabKeys,
+                color: scheme.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 独立下划线指示器叠层：只监听标签动画与横向滚动，避免每帧重建整条标签列表。
+class _ShelfTabIndicator extends StatefulWidget {
+  const _ShelfTabIndicator({
+    required this.tabs,
+    required this.tc,
+    required this.tabScroll,
+    required this.stripKey,
+    required this.tabKeys,
+    required this.color,
+  });
+
+  final List<LibCategory> tabs;
+  final TabController tc;
+  final ScrollController tabScroll;
+  final GlobalKey stripKey;
+  final Map<String, GlobalKey> tabKeys;
+  final Color color;
+
+  @override
+  State<_ShelfTabIndicator> createState() => _ShelfTabIndicatorState();
+}
+
+class _ShelfTabIndicatorState extends State<_ShelfTabIndicator> {
+  int _measureRetries = 0;
+
+  @override
+  void didUpdateWidget(_ShelfTabIndicator old) {
+    super.didUpdateWidget(old);
+    if (old.tc != widget.tc || old.tabs.length != widget.tabs.length) {
+      _measureRetries = 0;
+    }
+  }
+
+  (double, double)? _labelRect(int i) {
+    final strip = widget.stripKey.currentContext?.findRenderObject() as RenderBox?;
+    final box = widget.tabKeys[widget.tabs[i].id]?.currentContext?.findRenderObject() as RenderBox?;
+    if (strip == null || box == null || !box.attached || !box.hasSize) return null;
+    final left = box.localToGlobal(Offset.zero, ancestor: strip).dx;
+    return (left + 14, math.max(0.0, box.size.width - 28));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.tabs.isEmpty) return const SizedBox.shrink();
+    return AnimatedBuilder(
+      animation: Listenable.merge([widget.tc.animation!, widget.tabScroll]),
+      builder: (context, _) {
+        final at = widget.tc.animation!.value.clamp(0.0, widget.tabs.length - 1.0);
+        final lo = at.floor(), hi = at.ceil();
+        final ra = _labelRect(lo), rb = _labelRect(hi);
+        final a = ra ?? rb, b = rb ?? ra;
+        final t = at - lo;
+        if (a == null && _measureRetries++ < 3) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => mounted ? setState(() {}) : null);
+        }
+        if (a == null || b == null) return const SizedBox.shrink();
+        final left = a.$1 + (b.$1 - a.$1) * t;
+        final width = a.$2 + (b.$2 - a.$2) * t;
+        return Align(
+          alignment: Alignment.bottomLeft,
+          child: Transform.translate(
+            offset: Offset(left, 0),
+            child: SizedBox(
+              width: width,
+              height: 2,
+              child: DecoratedBox(decoration: BoxDecoration(color: widget.color, borderRadius: BorderRadius.circular(2))),
+            ),
+          ),
+        );
+      },
     );
   }
 }

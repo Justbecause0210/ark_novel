@@ -20,7 +20,7 @@ import '../stats.dart';
 import '../text.dart';
 import '../theme.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
+import '../volumes.dart' show Vol, Volumes, volumeMetaChangesProvider;
 import '../widgets.dart';
 import 'stats_page.dart' show charsPerMinute;
 
@@ -489,12 +489,27 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
   final _shot = GlobalKey();
   late int _year;
   bool _capturing = false;
+  (int, int, int?)? _yearsKey;
+  List<int> _cachedYears = const [];
+  (int, int, int)? _summaryKey;
+  YearlySummary? _cachedSummary;
+
+  void _onStatsChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void initState() {
     super.initState();
-    final years = _availableYears();
+    ReadingStats.changes.addListener(_onStatsChanged);
+    final years = _getAvailableYears(Volumes.changes.value);
     _year = widget.year ?? years.first;
+  }
+
+  @override
+  void dispose() {
+    ReadingStats.changes.removeListener(_onStatsChanged);
+    super.dispose();
   }
 
   List<int> _availableYears() => yearlyReportYears(
@@ -502,6 +517,20 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
     allDone: Volumes.allDone(),
     fallbackYear: widget.year ?? DateTime.now().year,
   );
+
+  List<int> _getAvailableYears(int volVersion) {
+    final key = (ReadingStats.changes.value, volVersion, widget.year);
+    if (_yearsKey == key) return _cachedYears;
+    _yearsKey = key;
+    return _cachedYears = _availableYears();
+  }
+
+  YearlySummary _getSummary(int year, int volVersion) {
+    final key = (year, volVersion, ReadingStats.changes.value);
+    if (_summaryKey == key && _cachedSummary != null) return _cachedSummary!;
+    _summaryKey = key;
+    return _cachedSummary = YearlySummary.fromStore(year);
+  }
 
   Future<void> _share(int year) async {
     try {
@@ -527,10 +556,10 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
 
   @override
   Widget build(BuildContext context) {
-    ref.watch(volumeChangesProvider);
-    final years = _availableYears();
+    final volVersion = ref.watch(volumeMetaChangesProvider);
+    final years = _getAvailableYears(volVersion);
     if (!years.contains(_year)) _year = years.first;
-    final summary = YearlySummary.fromStore(_year);
+    final summary = _getSummary(_year, volVersion);
     final queue = ref.read(volumeCoverQueueProvider);
     String coverOf(String aid, String img) => queue.bookCover(aid, img.isNotEmpty ? img : Wenku8Parser.coverUrl(aid));
 

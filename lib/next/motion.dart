@@ -90,27 +90,80 @@ class ApplePageTransitionsBuilder extends PageTransitionsBuilder {
     if (!isDesktopPlatform) {
       return _cupertino.buildTransitions(route, context, animation, secondaryAnimation, child);
     }
-    final primary = CurvedAnimation(
-      parent: animation,
-      curve: AppMotion.decelerate,
-      reverseCurve: AppMotion.exit,
-    );
-    final secondary = CurvedAnimation(
-      parent: secondaryAnimation,
-      curve: AppMotion.curve,
-      reverseCurve: AppMotion.decelerate,
-    );
-    return SlideTransition(
-      position: Tween<Offset>(begin: Offset.zero, end: const Offset(-0.018, 0)).animate(secondary),
-      child: FadeTransition(
-        opacity: primary,
-        child: SlideTransition(
-          position: Tween<Offset>(begin: const Offset(0.032, 0), end: Offset.zero).animate(primary),
-          child: child,
-        ),
-      ),
-    );
+    return _DesktopPageTransition(animation: animation, secondaryAnimation: secondaryAnimation, child: child);
   }
+}
+
+/// 桌面端克制横移 + 淡入转场：在独立 StatefulWidget 中管理两个 [CurvedAnimation] 生命周期，避免每次 build 泄漏监听器。
+class _DesktopPageTransition extends StatefulWidget {
+  const _DesktopPageTransition({
+    required this.animation,
+    required this.secondaryAnimation,
+    required this.child,
+  });
+
+  final Animation<double> animation;
+  final Animation<double> secondaryAnimation;
+  final Widget child;
+
+  @override
+  State<_DesktopPageTransition> createState() => _DesktopPageTransitionState();
+}
+
+class _DesktopPageTransitionState extends State<_DesktopPageTransition> {
+  static final _primaryOffset = Tween<Offset>(begin: const Offset(0.032, 0), end: Offset.zero);
+  static final _secondaryOffset = Tween<Offset>(begin: Offset.zero, end: const Offset(-0.018, 0));
+
+  late CurvedAnimation _primary;
+  late CurvedAnimation _secondary;
+  late Animation<Offset> _primarySlide;
+  late Animation<Offset> _secondarySlide;
+
+  @override
+  void initState() {
+    super.initState();
+    _initPrimary();
+    _initSecondary();
+  }
+
+  void _initPrimary() {
+    _primary = CurvedAnimation(parent: widget.animation, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit);
+    _primarySlide = _primaryOffset.animate(_primary);
+  }
+
+  void _initSecondary() {
+    _secondary = CurvedAnimation(parent: widget.secondaryAnimation, curve: AppMotion.curve, reverseCurve: AppMotion.decelerate);
+    _secondarySlide = _secondaryOffset.animate(_secondary);
+  }
+
+  @override
+  void didUpdateWidget(_DesktopPageTransition oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.animation != oldWidget.animation) {
+      _primary.dispose();
+      _initPrimary();
+    }
+    if (widget.secondaryAnimation != oldWidget.secondaryAnimation) {
+      _secondary.dispose();
+      _initSecondary();
+    }
+  }
+
+  @override
+  void dispose() {
+    _primary.dispose();
+    _secondary.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SlideTransition(
+    position: _secondarySlide,
+    child: FadeTransition(
+      opacity: _primary,
+      child: SlideTransition(position: _primarySlide, child: widget.child),
+    ),
+  );
 }
 
 /// 苹果风格的按压与悬停微缩反馈。
@@ -486,7 +539,7 @@ class AppCrossfade extends StatelessWidget {
   }
 }
 
-/// 平滑线性进度条：进度值与色彩变化自动按苹果减速曲线丝滑推进，替代生硬跳格。
+/// 平滑线性进度条：单个 [ImplicitlyAnimatedWidget] 同步驱动进度值与前后景色插值，避免多层嵌套动画控制器开销。
 class AppProgressBar extends StatelessWidget {
   const AppProgressBar({
     super.key,
@@ -510,32 +563,67 @@ class AppProgressBar extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final fg = color ?? scheme.primary;
     final bg = backgroundColor ?? fg.withValues(alpha: 0.14);
-    final clamped = value.clamp(0.0, 1.0);
-    final d = AppMotion.dur(context, duration);
+    return _AnimatedProgressBar(
+      value: value.clamp(0.0, 1.0),
+      minHeight: minHeight,
+      borderRadius: borderRadius,
+      color: fg,
+      backgroundColor: bg,
+      duration: AppMotion.dur(context, duration),
+      curve: AppMotion.curve,
+    );
+  }
+}
+
+class _AnimatedProgressBar extends ImplicitlyAnimatedWidget {
+  const _AnimatedProgressBar({
+    required this.value,
+    required this.minHeight,
+    required this.borderRadius,
+    required this.color,
+    required this.backgroundColor,
+    required super.duration,
+    required super.curve,
+  });
+
+  final double value;
+  final double minHeight;
+  final double borderRadius;
+  final Color color;
+  final Color backgroundColor;
+
+  @override
+  ImplicitlyAnimatedWidgetState<_AnimatedProgressBar> createState() => _AnimatedProgressBarState();
+}
+
+class _AnimatedProgressBarState extends AnimatedWidgetBaseState<_AnimatedProgressBar> {
+  Tween<double>? _value;
+  ColorTween? _color;
+  ColorTween? _bg;
+
+  @override
+  void forEachTween(TweenVisitor<dynamic> visitor) {
+    _value = visitor(_value, widget.value, (dynamic v) => Tween<double>(begin: v as double)) as Tween<double>?;
+    _color = visitor(_color, widget.color, (dynamic v) => ColorTween(begin: v as Color?)) as ColorTween?;
+    _bg = visitor(_bg, widget.backgroundColor, (dynamic v) => ColorTween(begin: v as Color?)) as ColorTween?;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final v = _value?.evaluate(animation) ?? widget.value;
+    final fill = _color?.evaluate(animation) ?? widget.color;
+    final track = _bg?.evaluate(animation) ?? widget.backgroundColor;
     return ClipRRect(
-      borderRadius: BorderRadius.circular(borderRadius),
+      borderRadius: BorderRadius.circular(widget.borderRadius),
       child: SizedBox(
-        height: minHeight,
+        height: widget.minHeight,
         width: double.infinity,
-        child: TweenAnimationBuilder<Color?>(
-          tween: ColorTween(end: bg),
-          duration: d,
-          curve: AppMotion.curve,
-          builder: (context, track, child) => ColoredBox(color: track ?? bg, child: child),
-          child: TweenAnimationBuilder<double>(
-            tween: Tween<double>(end: clamped),
-            duration: d,
-            curve: AppMotion.curve,
-            builder: (context, v, _) => FractionallySizedBox(
-              alignment: Alignment.centerLeft,
-              widthFactor: v,
-              child: TweenAnimationBuilder<Color?>(
-                tween: ColorTween(end: fg),
-                duration: d,
-                curve: AppMotion.curve,
-                builder: (_, fill, _) => ColoredBox(color: fill ?? fg),
-              ),
-            ),
+        child: ColoredBox(
+          color: track,
+          child: FractionallySizedBox(
+            alignment: Alignment.centerLeft,
+            widthFactor: v,
+            child: ColoredBox(color: fill),
           ),
         ),
       ),
@@ -558,9 +646,8 @@ class _AppSkeletonPulseState extends State<AppSkeletonPulse> with SingleTickerPr
     vsync: this,
     duration: const Duration(milliseconds: 1100),
   );
-  late final Animation<double> _opacity = Tween<double>(begin: 0.52, end: 1.0).animate(
-    CurvedAnimation(parent: _controller, curve: Curves.easeInOutSine),
-  );
+  late final CurvedAnimation _curved = CurvedAnimation(parent: _controller, curve: Curves.easeInOutSine);
+  late final Animation<double> _opacity = Tween<double>(begin: 0.52, end: 1.0).animate(_curved);
 
   @override
   void didChangeDependencies() {
@@ -575,6 +662,7 @@ class _AppSkeletonPulseState extends State<AppSkeletonPulse> with SingleTickerPr
 
   @override
   void dispose() {
+    _curved.dispose();
     _controller.dispose();
     super.dispose();
   }

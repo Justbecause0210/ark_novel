@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart' hide Text;
+import 'package:flutter/semantics.dart' show SemanticsProperties;
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -15,7 +16,7 @@ import '../read_state.dart';
 import '../routes.dart';
 import '../stats.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Vol, Volumes, volumeChangesProvider;
+import '../volumes.dart' show Vol, Volumes, volumeMetaChangesProvider;
 import '../widgets.dart';
 import '../text.dart';
 
@@ -332,7 +333,7 @@ class _StatsPageState extends ConsumerState<StatsPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final volVersion = ref.watch(volumeChangesProvider);
+    final volVersion = ref.watch(volumeMetaChangesProvider);
     final dailyGoal = ref.watch(appPref(P.statsDailyGoal, 0));
     final yearlyVolGoal = ref.watch(appPref(P.statsYearlyVolGoal, 0));
     final queue = ref.read(volumeCoverQueueProvider);
@@ -772,17 +773,33 @@ class _DurationChartCard extends StatefulWidget {
 class _DurationChartCardState extends State<_DurationChartCard> {
   int _range = 0; // 0 周、1 月、2 年
   int? _picked;
+  (int, _StatsSnapshot)? _barsKey;
+  List<(String, int, String, String)> _cachedBars = const [];
+
+  List<(String, int, String, String)> _getBars() {
+    final key = (_range, widget.snap);
+    if (_barsKey == key) return _cachedBars;
+    _barsKey = key;
+    return _cachedBars = _bars(widget.snap.perDay, widget.now);
+  }
 
   /// 柱状图的数据：(标签, 秒, 点中时显示的日期, 日期前缀)。
   List<(String, int, String, String)> _bars(Map<String, int> perDay, DateTime now) {
     const week = ['一', '二', '三', '四', '五', '六', '日'];
     if (_range == 2) {
+      final byMonth = <String, int>{};
+      for (final e in perDay.entries) {
+        if (e.key.length >= 8) {
+          final prefix = e.key.substring(0, 8);
+          byMonth[prefix] = (byMonth[prefix] ?? 0) + e.value;
+        }
+      }
       return [
         for (var i = 11; i >= 0; i--)
           () {
             final m = DateTime(now.year, now.month - i);
             final prefix = '${m.year}-${m.month.toString().padLeft(2, '0')}-';
-            return ('${m.month}月', perDay.entries.where((e) => e.key.startsWith(prefix)).fold(0, (a, e) => a + e.value), '${m.year} 年 ${m.month} 月', prefix);
+            return ('${m.month}月', byMonth[prefix] ?? 0, '${m.year} 年 ${m.month} 月', prefix);
           }(),
       ];
     }
@@ -802,7 +819,7 @@ class _DurationChartCardState extends State<_DurationChartCard> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final muted = theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant);
-    final bars = _bars(widget.snap.perDay, widget.now);
+    final bars = _getBars();
     final maxBar = bars.fold(1, (a, b) => b.$2 > a ? b.$2 : a);
     final nonZero = bars.where((b) => b.$2 > 0);
     final avg = nonZero.isEmpty ? 0 : nonZero.fold(0, (a, b) => a + b.$2) ~/ nonZero.length;
@@ -1018,8 +1035,22 @@ class _Heatmap extends StatefulWidget {
 }
 
 class _HeatmapState extends State<_Heatmap> {
-  static const _cell = 13.0, _gap = 3.0;
+  static const _cell = 13.0, _gap = 3.0, _stride = _cell + _gap;
   DateTime? _picked;
+  DateTime? _hovered;
+
+  DateTime? _dayAt(Offset pos, DateTime start, DateTime today, int weeks) {
+    final w = (pos.dx / _stride).floor();
+    final d = (pos.dy / _stride).floor();
+    if (w < 0 || w >= weeks || d < 0 || d >= 7) return null;
+    final day = DateTime(start.year, start.month, start.day + w * 7 + d);
+    return day.isAfter(today) ? null : day;
+  }
+
+  void _toggleDay(DateTime day) {
+    HapticFeedback.selectionClick();
+    setState(() => _picked = _picked == day ? null : day);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1040,71 +1071,72 @@ class _HeatmapState extends State<_Heatmap> {
         ? const <MapEntry<String, int>>[]
         : ((widget.dayToBooks[pickedKey] ?? const <String, int>{}).entries.toList()..sort((a, b) => b.value.compareTo(a.value)));
 
+    final hovered = _hovered;
+    final hoveredSec = hovered == null ? 0 : (widget.perDay[ReadingStats.dayKey(hovered)] ?? 0);
+    final hant = UiHant.of(context);
+    String fmt(String s) => hant?.convert(s) ?? s;
+
     return LayoutBuilder(
       builder: (context, c) {
-        final weeks = ((c.maxWidth + _gap) / (_cell + _gap)).floor().clamp(4, 53);
+        final weeks = ((c.maxWidth + _gap) / _stride).floor().clamp(4, 53);
         final today = DateTime(widget.now.year, widget.now.month, widget.now.day);
         final monday = DateTime(today.year, today.month, today.day - (today.weekday - 1));
         final start = DateTime(monday.year, monday.month, monday.day - 7 * (weeks - 1));
+        final gridW = weeks * _cell + (weeks - 1) * _gap;
+        const gridH = 7 * _cell + 6 * _gap;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                for (var w = 0; w < weeks; w++)
-                  Column(
-                    children: [
-                      for (var d = 0; d < 7; d++)
-                        () {
-                          final day = DateTime(start.year, start.month, start.day + w * 7 + d);
-                          final future = day.isAfter(today);
-                          final sec = future ? 0 : (widget.perDay[ReadingStats.dayKey(day)] ?? 0);
-                          final isPicked = !future && picked == day;
-                          final label = '${day.year}年${day.month}月${day.day}日，${sec == 0 ? '未阅读' : _duration(sec)}';
-                          final box = Padding(
-                            padding: EdgeInsets.only(right: w < weeks - 1 ? _gap : 0, bottom: d < 6 ? _gap : 0),
-                            child: Container(
-                              width: _cell,
-                              height: _cell,
-                              decoration: BoxDecoration(
-                                color: future ? Colors.transparent : colorOf(sec),
-                                borderRadius: BorderRadius.circular(3),
-                                border: isPicked
-                                    ? Border.all(color: scheme.onSurface, width: 1.6)
-                                    : (day == today ? Border.all(color: scheme.primary, width: 1.2) : null),
-                              ),
-                            ),
-                          );
-                          if (future) return box;
-                          return Semantics(
-                            button: true,
-                            selected: isPicked,
-                            label: label,
-                            child: Tooltip(
-                              message: label,
-                              child: MouseRegion(
-                                cursor: SystemMouseCursors.click,
-                                child: GestureDetector(
-                                  behavior: HitTestBehavior.opaque,
-                                  onTap: () {
-                                    HapticFeedback.selectionClick();
-                                    setState(() => _picked = _picked == day ? null : day);
-                                  },
-                                  child: box,
-                                ),
-                              ),
-                            ),
-                          );
-                        }(),
-                    ],
+            MouseRegion(
+              cursor: hovered != null ? SystemMouseCursors.click : MouseCursor.defer,
+              onHover: (e) {
+                final day = _dayAt(e.localPosition, start, today, weeks);
+                if (day != _hovered) setState(() => _hovered = day);
+              },
+              onExit: (_) {
+                if (_hovered != null) setState(() => _hovered = null);
+              },
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTapUp: (d) {
+                  final day = _dayAt(d.localPosition, start, today, weeks);
+                  if (day != null) _toggleDay(day);
+                },
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    key: const ValueKey('stats-heatmap'),
+                    size: Size(gridW, gridH),
+                    painter: _HeatmapPainter(
+                      perDay: widget.perDay,
+                      start: start,
+                      today: today,
+                      weeks: weeks,
+                      picked: picked,
+                      hovered: hovered,
+                      primary: scheme.primary,
+                      onSurface: scheme.onSurface,
+                      textDirection: Directionality.of(context),
+                      formatLabel: fmt,
+                      onSelect: _toggleDay,
+                    ),
                   ),
-              ],
+                ),
+              ),
             ),
             const SizedBox(height: 8),
             Row(
               children: [
-                Text('${start.month}月${start.day}日', style: small),
-                const Spacer(),
+                Expanded(
+                  child: Text(
+                    hovered != null
+                        ? '${hovered.year}年${hovered.month}月${hovered.day}日 · ${hoveredSec == 0 ? '未阅读' : _duration(hoveredSec)}'
+                        : '${start.month}月${start.day}日',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: hovered != null ? small?.copyWith(color: scheme.primary, fontWeight: FontWeight.w600) : small,
+                  ),
+                ),
+                const SizedBox(width: 8),
                 Text('少 ', style: small),
                 for (final s in const [0, 600, 1200, 2400, 3600]) Container(width: 10, height: 10, margin: const EdgeInsets.only(left: 2), decoration: BoxDecoration(color: colorOf(s), borderRadius: BorderRadius.circular(2))),
                 Text(' 多', style: small),
@@ -1160,6 +1192,117 @@ class _HeatmapState extends State<_Heatmap> {
       },
     );
   }
+}
+
+class _HeatmapPainter extends CustomPainter {
+  const _HeatmapPainter({
+    required this.perDay,
+    required this.start,
+    required this.today,
+    required this.weeks,
+    required this.picked,
+    required this.hovered,
+    required this.primary,
+    required this.onSurface,
+    required this.textDirection,
+    required this.formatLabel,
+    required this.onSelect,
+  });
+
+  static const _cell = 13.0, _gap = 3.0, _stride = _cell + _gap;
+  static const _radius = Radius.circular(3);
+
+  final Map<String, int> perDay;
+  final DateTime start;
+  final DateTime today;
+  final int weeks;
+  final DateTime? picked;
+  final DateTime? hovered;
+  final Color primary;
+  final Color onSurface;
+  final TextDirection textDirection;
+  final String Function(String) formatLabel;
+  final ValueChanged<DateTime> onSelect;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c0 = onSurface.withValues(alpha: 0.06);
+    final c1 = primary.withValues(alpha: 0.3);
+    final c2 = primary.withValues(alpha: 0.5);
+    final c3 = primary.withValues(alpha: 0.75);
+    final c4 = primary;
+    final fill = Paint()..style = PaintingStyle.fill;
+    final stroke = Paint()..style = PaintingStyle.stroke;
+
+    for (var w = 0; w < weeks; w++) {
+      final x = w * _stride;
+      for (var d = 0; d < 7; d++) {
+        final day = DateTime(start.year, start.month, start.day + w * 7 + d);
+        if (day.isAfter(today)) continue;
+        final sec = perDay[ReadingStats.dayKey(day)] ?? 0;
+        final m = sec / 60;
+        fill.color = m <= 0 ? c0 : (m < 15 ? c1 : (m < 30 ? c2 : (m < 60 ? c3 : c4)));
+        final y = d * _stride;
+        final rect = Rect.fromLTWH(x, y, _cell, _cell);
+        canvas.drawRRect(RRect.fromRectAndRadius(rect, _radius), fill);
+        if (picked == day) {
+          stroke
+            ..color = onSurface
+            ..strokeWidth = 1.6;
+          canvas.drawRRect(RRect.fromRectAndRadius(rect.deflate(0.8), _radius), stroke);
+        } else if (hovered == day) {
+          stroke
+            ..color = onSurface.withValues(alpha: 0.45)
+            ..strokeWidth = 1.2;
+          canvas.drawRRect(RRect.fromRectAndRadius(rect.deflate(0.6), _radius), stroke);
+        } else if (day == today) {
+          stroke
+            ..color = primary
+            ..strokeWidth = 1.2;
+          canvas.drawRRect(RRect.fromRectAndRadius(rect.deflate(0.6), _radius), stroke);
+        }
+      }
+    }
+  }
+
+  @override
+  SemanticsBuilderCallback get semanticsBuilder => (Size size) {
+    final out = <CustomPainterSemantics>[];
+    for (var w = 0; w < weeks; w++) {
+      final x = w * _stride;
+      for (var d = 0; d < 7; d++) {
+        final day = DateTime(start.year, start.month, start.day + w * 7 + d);
+        if (day.isAfter(today)) continue;
+        final sec = perDay[ReadingStats.dayKey(day)] ?? 0;
+        final label = formatLabel('${day.year}年${day.month}月${day.day}日，${sec == 0 ? '未阅读' : _duration(sec)}');
+        out.add(
+          CustomPainterSemantics(
+            rect: Rect.fromLTWH(x, d * _stride, _cell, _cell),
+            properties: SemanticsProperties(
+              button: true,
+              selected: picked == day,
+              label: label,
+              textDirection: textDirection,
+              onTap: () => onSelect(day),
+            ),
+          ),
+        );
+      }
+    }
+    return out;
+  };
+
+  @override
+  bool shouldRepaint(_HeatmapPainter old) =>
+      !identical(old.perDay, perDay) ||
+      old.start != start ||
+      old.today != today ||
+      old.weeks != weeks ||
+      old.picked != picked ||
+      old.hovered != hovered ||
+      old.primary != primary ||
+      old.onSurface != onSurface ||
+      old.textDirection != textDirection;
 }
 
 /// 每日阅读目标环形进度绘制器。

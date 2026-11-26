@@ -101,7 +101,9 @@ class _StoragePageState extends ConsumerState<StoragePage> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final books = ChapterCache.cachedBooks().toList()..sort((a, b) => ChapterCache.bytesOf(b).compareTo(ChapterCache.bytesOf(a)));
+    final cachedIds = ChapterCache.cachedBooks().toList();
+    final bytesByBook = {for (final aid in cachedIds) aid: ChapterCache.bytesOf(aid)};
+    final books = cachedIds..sort((a, b) => bytesByBook[b]!.compareTo(bytesByBook[a]!));
     return Scaffold(
       appBar: AppBar(title: const Text('存储空间'), actions: [TextButton(onPressed: books.isEmpty ? null : _clearRead, child: const Text('清除已读章节'))]),
       body: contentWidth(
@@ -136,7 +138,7 @@ class _StoragePageState extends ConsumerState<StoragePage> {
               for (final aid in books)
                 XTile(
                   title: ReadingStats.info(aid).title,
-                  subtitle: '${ChapterCache.count(aid)} 章 · ${ChapterCache.sizeLabel(aid)}',
+                  subtitle: '${ChapterCache.count(aid)} 章 · ${sizeText(bytesByBook[aid]!)}',
                   onTap: () => context.push(Routes.cacheBook(aid)).then((_) => mounted ? _refresh() : null),
                   trailing: IconButton(
                     tooltip: hz(context, '删除缓存'),

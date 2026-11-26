@@ -1,7 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:ark_novel/models/novel_cover.dart';
 import 'package:ark_novel/next/cache.dart';
+import 'package:ark_novel/next/data.dart' show PageResult;
+import 'package:ark_novel/next/image_cache.dart';
 import 'package:ark_novel/next/motion.dart';
 import 'package:ark_novel/next/pages/rules_page.dart';
 import 'package:ark_novel/next/pages/settings_page.dart';
@@ -12,6 +16,8 @@ import 'package:ark_novel/next/session.dart';
 import 'package:ark_novel/next/stats.dart';
 import 'package:ark_novel/next/swipe.dart';
 import 'package:ark_novel/next/theme.dart';
+import 'package:ark_novel/next/widgets.dart';
+import 'package:dio/dio.dart' show CancelToken;
 import 'package:flutter/cupertino.dart' show CupertinoPageTransition;
 import 'package:flutter/gestures.dart' show PointerDeviceKind, kSecondaryMouseButton;
 import 'package:flutter/material.dart';
@@ -332,6 +338,127 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(tester.widget<FractionallySizedBox>(find.byType(FractionallySizedBox)).widthFactor, closeTo(0.8, 0.01));
+      // 合并为单个 ImplicitlyAnimatedWidget，不再使用多层 TweenAnimationBuilder
+      expect(find.descendant(of: find.byType(AppProgressBar), matching: find.byType(TweenAnimationBuilder)), findsNothing);
+    });
+
+    testWidgets('PagedNovelGrid 卸载时取消在途 CancelToken，且重建不重复执行 hide 过滤', (tester) async {
+      CancelToken? capturedToken;
+      final pending = Completer<PageResult>();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [sessionStoreProvider.overrideWithValue(store)],
+          child: _app(
+            Scaffold(
+              body: PagedNovelGrid(
+                fetchWithCancel: (page, token) {
+                  capturedToken = token;
+                  return pending.future;
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(capturedToken, isNotNull);
+      expect(capturedToken!.isCancelled, isFalse);
+
+      await tester.pumpWidget(_app(const SizedBox.shrink()));
+      expect(capturedToken!.isCancelled, isTrue);
+
+      var hideCalls = 0;
+      bool hideFn(String aid) {
+        hideCalls++;
+        return aid == '2';
+      }
+
+      late StateSetter setLocal;
+      var tick = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            sessionStoreProvider.overrideWithValue(store),
+            imageStoreProvider.overrideWithValue(_NullImageStore()),
+          ],
+          child: _app(
+            Scaffold(
+              body: StatefulBuilder(
+                builder: (_, setState) {
+                  setLocal = setState;
+                  return Column(
+                    children: [
+                      Text('t=$tick'),
+                      Expanded(
+                        child: PagedNovelGrid(
+                          hide: hideFn,
+                          fetch: (_) async => PageResult([NovelCover('书一', '', '1'), NovelCover('书二', '', '2')], 1),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('书一'), findsOneWidget);
+      expect(find.text('书二'), findsNothing);
+      final callsAfterLoad = hideCalls;
+
+      // 相同 hide 回调下父级多次 rebuild，不重跑 .where 过滤
+      setLocal(() => tick++);
+      await tester.pump();
+      setLocal(() => tick++);
+      await tester.pump();
+      expect(hideCalls, callsAfterLoad);
+    });
+
+    testWidgets('NetImage(full: true) 走异步 _Fitted 而非裸 MemoryImage，滑出卸载时取消在途请求', (tester) async {
+      final png1x1 = Uint8List.fromList([
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+        0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+        0x42, 0x60, 0x82,
+      ]);
+      final completer = Completer<Uint8List>();
+      final fakeStore = _TrackingImageStore(
+        onLoad: (_) => completer.future,
+      );
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [imageStoreProvider.overrideWithValue(fakeStore)],
+          child: const MaterialApp(
+            home: SizedBox(width: 200, height: 200, child: NetImage('https://example.com/full.png', full: true)),
+          ),
+        ),
+      );
+      await tester.pump();
+      final img = tester.widget<Image>(find.byType(Image));
+      expect(img.image, isNot(isA<MemoryImage>()));
+
+      // 在途未完成前卸载 widget 应自动触发 ImageStore.cancel
+      await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+      expect(fakeStore.cancelled, contains('https://example.com/full.png'));
+
+      // 正常加载完成显示图片且缓存键不持有原 ImageProvider
+      final readyStore = _TrackingImageStore(onLoad: (_) async => png1x1);
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [imageStoreProvider.overrideWithValue(readyStore)],
+          child: const MaterialApp(
+            home: SizedBox(width: 200, height: 200, child: NetImage('https://example.com/full2.png', full: true)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final img2 = tester.widget<Image>(find.byType(Image));
+      expect(img2.image, isNot(isA<MemoryImage>()));
+      final key = await img2.image.obtainKey(ImageConfiguration.empty);
+      expect(identical(key, img2.image), isFalse);
     });
 
     testWidgets('AppSkeletonPulse 开启减少动态效果时停止 Ticker，不空转', (tester) async {
@@ -707,4 +834,43 @@ void main() {
       expect(m.p95Ms, lessThan(ciDebugFrameBudgetMs));
     });
   });
+}
+
+class _NullImageStore implements ImageStore {
+  @override
+  final srVersion = ValueNotifier<int>(0);
+
+  @override
+  Uint8List? peek(String rawUrl) => null;
+
+  @override
+  Future<Uint8List> load(String rawUrl) => Future<Uint8List>.error('skip');
+
+  @override
+  void cancel(String rawUrl) {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _TrackingImageStore implements ImageStore {
+  _TrackingImageStore({required this.onLoad});
+
+  final Future<Uint8List> Function(String rawUrl) onLoad;
+  final cancelled = <String>[];
+
+  @override
+  final srVersion = ValueNotifier<int>(0);
+
+  @override
+  Uint8List? peek(String rawUrl) => null;
+
+  @override
+  Future<Uint8List> load(String rawUrl) => onLoad(rawUrl);
+
+  @override
+  void cancel(String rawUrl) => cancelled.add(rawUrl);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

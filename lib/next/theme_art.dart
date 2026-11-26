@@ -25,6 +25,7 @@ class _ArtNavIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final d = AppMotion.dur(context, AppMotion.fast);
+    final px = (32 * 1.14 * MediaQuery.devicePixelRatioOf(context)).ceil();
     return AnimatedScale(
       scale: selected ? 1.14 : 0.92,
       duration: d,
@@ -33,7 +34,7 @@ class _ArtNavIcon extends StatelessWidget {
         opacity: selected ? 1 : 0.65,
         duration: d,
         curve: AppMotion.curve,
-        child: Image.asset(asset, width: 32, height: 32),
+        child: Image.asset(asset, width: 32, height: 32, cacheWidth: px, cacheHeight: px),
       ),
     );
   }

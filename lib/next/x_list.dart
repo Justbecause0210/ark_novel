@@ -428,7 +428,12 @@ class XEmpty extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             if (art != null)
-              Image.asset(art.empty, width: 132, height: 132)
+              Builder(
+                builder: (context) {
+                  final px = (132 * MediaQuery.devicePixelRatioOf(context)).round();
+                  return Image.asset(art.empty, width: 132, height: 132, cacheWidth: px, cacheHeight: px);
+                },
+              )
             else
               Container(
                 width: 72,
