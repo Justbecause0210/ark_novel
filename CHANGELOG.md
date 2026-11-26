@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.9.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.8.1...ark_novel-v1.9.0) (2026-11-26)
+
+
+### Features
+
+* 优化全书搜索后台响应速度与长篇插图 EPUB 流式导出 ([f392377](https://github.com/chenshi221/ark_novel/commit/f3923777a8d389b607e72b1b427349ea3cf9edd2))
+* 优化冷启动速度、阅读器翻页与排版引擎及滚动朗读流畅度 ([4e392cd](https://github.com/chenshi221/ark_novel/commit/4e392cd62f6ebdcca51e564e94e4312f3f535ab0))
+* 优化多层缓存、网页压缩存储、WebDAV 增量同步与网络请求取消 ([ded4ece](https://github.com/chenshi221/ark_novel/commit/ded4ece374ef6509364857996cbe0b9757235c4e))
+* 原生重写安卓桌面小组件并压缩内置主题与繁简词表，显著缩小安装包体积 ([c4bbeb0](https://github.com/chenshi221/ark_novel/commit/c4bbeb064393b7797568d4b4c934c9816c840b6c))
+
+
+### Bug Fixes
+
+* 优化书架与统计页渲染流畅度、降低图片显存峰值并修复多处动画内存泄漏 ([f684115](https://github.com/chenshi221/ark_novel/commit/f6841152261e8cfd5f962a9258ef99af5068da29))
+
 ## [1.8.1](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.8.0...ark_novel-v1.8.1) (2026-11-25)
 
 
