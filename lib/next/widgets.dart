@@ -16,6 +16,7 @@ import 'package:flutter/services.dart';
 import 'data.dart' show PageResult;
 import 'image_cache.dart';
 import 'env.dart';
+import 'motion.dart';
 import 'routes.dart';
 import 'session.dart';
 import 'theme_doodle.dart';
@@ -409,9 +410,34 @@ class NetImage extends ConsumerWidget {
   }
 }
 
-/// 按格子大小解码。高清封面原图 1440×2048，原样解码一张占 12 MB，Flutter 的图片缓存（100 MB）装不下一屏书架，滑回来又得重新解码。
-/// 按地址认图（不按字节对象）：内存里的字节被挤掉、再从磁盘读回来时，Flutter 图片缓存里解码好的那张还能接着用。
-class _Fitted extends ImageProvider<_Fitted> {
+/// 按格子大小解码。高清封面原图 1440×2048，原样解码一张占 12 MB，Flutter 的图片缓存装不下一屏书架，滑回来又得重新解码。
+/// 缓存键仅保留地址、字节长度与目标尺寸，不持有压缩图片 [Uint8List]，避免纹理未淘汰期间锁死原图字节内存。
+@immutable
+class _FittedKey {
+  const _FittedKey(this.url, this.byteLength, this.box, this.cover, this.maxDecodeWidth);
+
+  final String url;
+  final int byteLength;
+  final Size box;
+  final bool cover;
+  final int? maxDecodeWidth;
+
+  // 带上字节数：同一个地址换成放大清晰度后的图时不会拿到原图解码好的那张
+  @override
+  bool operator ==(Object other) =>
+      other is _FittedKey &&
+      other.url == url &&
+      other.byteLength == byteLength &&
+      other.box == box &&
+      other.cover == cover &&
+      other.maxDecodeWidth == maxDecodeWidth;
+
+  @override
+  int get hashCode => Object.hash(url, byteLength, box, cover, maxDecodeWidth);
+}
+
+@immutable
+class _Fitted extends ImageProvider<_FittedKey> {
   const _Fitted(this.url, this.bytes, this.box, this.cover, {this.maxDecodeWidth});
 
   final String url;
@@ -421,24 +447,29 @@ class _Fitted extends ImageProvider<_Fitted> {
   final int? maxDecodeWidth;
 
   @override
-  Future<_Fitted> obtainKey(ImageConfiguration configuration) => SynchronousFuture(this);
+  Future<_FittedKey> obtainKey(ImageConfiguration configuration) => SynchronousFuture(_FittedKey(url, bytes.length, box, cover, maxDecodeWidth));
 
   @override
-  ImageStreamCompleter loadImage(_Fitted key, ImageDecoderCallback decode) => MultiFrameImageStreamCompleter(codec: _codec(decode), scale: 1);
+  ImageStreamCompleter loadImage(_FittedKey key, ImageDecoderCallback decode) => MultiFrameImageStreamCompleter(codec: _codec(decode), scale: 1);
 
-  Future<ui.Codec> _codec(ImageDecoderCallback decode) async => decode(
-    await ui.ImmutableBuffer.fromUint8List(bytes),
-    getTargetSize: (w, h) {
-      final sx = box.width / w, sy = box.height / h;
-      var s = sx.isInfinite ? sy : (sy.isInfinite ? sx : (cover ? math.max(sx, sy) : math.min(sx, sy)));
-      if (maxDecodeWidth != null && w > maxDecodeWidth!) {
-        s = math.min(s, maxDecodeWidth! / w);
-      }
-      return s >= 1 ? const ui.TargetImageSize() : ui.TargetImageSize(width: math.max(1, (w * s).ceil()));
-    },
-  );
+  Future<ui.Codec> _codec(ImageDecoderCallback decode) async {
+    final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+    final targetBox = box;
+    final isCover = cover;
+    final maxW = maxDecodeWidth;
+    return decode(
+      buffer,
+      getTargetSize: (w, h) {
+        final sx = targetBox.width / w, sy = targetBox.height / h;
+        var s = sx.isInfinite ? sy : (sy.isInfinite ? sx : (isCover ? math.max(sx, sy) : math.min(sx, sy)));
+        if (maxW != null && w > maxW) {
+          s = math.min(s, maxW / w);
+        }
+        return s >= 1 ? const ui.TargetImageSize() : ui.TargetImageSize(width: math.max(1, (w * s).ceil()));
+      },
+    );
+  }
 
-  // 带上字节数：同一个地址换成放大清晰度后的图时不会拿到原图解码好的那张
   @override
   bool operator ==(Object other) => other is _Fitted && other.url == url && other.bytes.length == bytes.length && other.box == box && other.cover == cover && other.maxDecodeWidth == maxDecodeWidth;
 
@@ -447,7 +478,9 @@ class _Fitted extends ImageProvider<_Fitted> {
 }
 
 Widget _fadeIn(BuildContext context, Widget child, int? frame, bool sync) =>
-    sync ? child : AnimatedOpacity(opacity: frame == null ? 0 : 1, duration: const Duration(milliseconds: 150), child: child);
+    sync || AppMotion.reduce(context)
+    ? child
+    : AnimatedOpacity(opacity: frame == null ? 0 : 1, duration: AppMotion.fast, curve: AppMotion.decelerate, child: child);
 
 class CoverImage extends ConsumerWidget {
   const CoverImage(
@@ -460,6 +493,7 @@ class CoverImage extends ConsumerWidget {
     this.lowPriority = false,
     this.decodeSize,
     this.borderRadius = 10,
+    this.backgroundColor,
   });
 
   final String url;
@@ -470,6 +504,7 @@ class CoverImage extends ConsumerWidget {
   final bool lowPriority;
   final Size? decodeSize;
   final double borderRadius;
+  final Color? backgroundColor;
 
   /// 封面加载失败的短 TTL 记录（30s）：首次偶发失败先轻量重试，避免瞬态抖动直接整轮拉黑。
   static const failedUrlTtl = Duration(seconds: 30);
@@ -501,33 +536,36 @@ class CoverImage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final scheme = Theme.of(context).colorScheme;
+    final active = TickerMode.valuesOf(context).enabled;
     final icon = Icon(Icons.menu_book_outlined, color: scheme.onSurfaceVariant);
     final content = DecoratedBox(
-      decoration: BoxDecoration(color: scheme.surfaceContainer),
-      child: SizedBox.expand(
-        child: NetImage(
-          url,
-          maxDecodeWidth: maxDecodeWidth,
-          thumbnail: thumbnail,
-          lowPriority: lowPriority,
-          decodeSize: decodeSize,
-          error: icon,
-          errorBuilder: (retry) {
-            final clean = splitCrop(url).url;
-            if (clean.isEmpty) return icon;
-            final now = clock();
-            _pruneFailed(now);
-            if (!_failedUrls.containsKey(clean)) {
-              _failedUrls[clean] = now;
-              Future.microtask(retry);
-            } else if (aid != null) {
-              final queue = ref.read(volumeCoverQueueProvider);
-              Future.microtask(() => queue.reportCoverFailed(aid!, url, volumeTitle: volumeTitle));
-            }
-            return icon;
-          },
-        ),
-      ),
+      decoration: BoxDecoration(color: backgroundColor ?? scheme.surfaceContainer),
+      child: active
+          ? SizedBox.expand(
+              child: NetImage(
+                url,
+                maxDecodeWidth: maxDecodeWidth,
+                thumbnail: thumbnail,
+                lowPriority: lowPriority,
+                decodeSize: decodeSize,
+                error: icon,
+                errorBuilder: (retry) {
+                  final clean = splitCrop(url).url;
+                  if (clean.isEmpty) return icon;
+                  final now = clock();
+                  _pruneFailed(now);
+                  if (!_failedUrls.containsKey(clean)) {
+                    _failedUrls[clean] = now;
+                    Future.microtask(retry);
+                  } else if (aid != null) {
+                    final queue = ref.read(volumeCoverQueueProvider);
+                    Future.microtask(() => queue.reportCoverFailed(aid!, url, volumeTitle: volumeTitle));
+                  }
+                  return icon;
+                },
+              ),
+            )
+          : const SizedBox.expand(),
     );
     if (borderRadius <= 0) return content;
     return ClipRRect(borderRadius: BorderRadius.circular(borderRadius), child: content);
@@ -561,26 +599,30 @@ class NovelCard extends StatelessWidget {
       container: true,
       label: title,
       button: true,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(10),
-        onTap: onTap ?? () => context.push(Routes.novel(aid)),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            AspectRatio(
-              aspectRatio: 3 / 4,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  cover ?? CoverImage(imageUrl ?? Wenku8Parser.coverUrl(aid), aid: aid, thumbnail: thumbnail, decodeSize: decodeSize),
-                  if (badge != null) Positioned(top: 6, right: 6, child: badge!),
-                  if (action != null) Positioned(right: 2, bottom: 2, child: action!),
-                ],
+      child: AppPressScale(
+        scale: 0.968,
+        hoverScale: isDesktop ? 1.014 : 1.0,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: onTap ?? () => context.push(Routes.novel(aid)),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AspectRatio(
+                aspectRatio: 3 / 4,
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    cover ?? CoverImage(imageUrl ?? Wenku8Parser.coverUrl(aid), aid: aid, thumbnail: thumbnail, decodeSize: decodeSize),
+                    if (badge != null) Positioned(top: 6, right: 6, child: badge!),
+                    if (action != null) Positioned(right: 2, bottom: 2, child: action!),
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 8),
-            Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(height: 1.3)),
-          ],
+              const SizedBox(height: 8),
+              Text(title, maxLines: 2, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodyMedium?.copyWith(height: 1.3)),
+            ],
+          ),
         ),
       ),
     );
@@ -659,14 +701,20 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
 
   @override
   Widget build(BuildContext context) {
+    final Widget content;
     if (_items.isEmpty) {
-      if (_loading) return LayoutBuilder(builder: (context, c) => _GridSkeleton(width: c.maxWidth));
-      return RefreshIndicator(
-        onRefresh: () => _load(reset: true),
-        child: _error != null
-            ? StatePanel(title: '加载失败', detail: _error.toString(), error: _error, sourceHtml: widget.sourceHtml?.call(), onRetry: () => _load(reset: true))
-            : StatePanel(title: widget.emptyTitle, detail: widget.emptyDetail),
-      );
+      if (_loading) {
+        content = LayoutBuilder(key: const ValueKey('grid-loading'), builder: (context, c) => _GridSkeleton(width: c.maxWidth));
+      } else {
+        content = RefreshIndicator(
+          key: ValueKey(_error != null ? 'grid-error' : 'grid-empty'),
+          onRefresh: () => _load(reset: true),
+          child: _error != null
+              ? StatePanel(title: '加载失败', detail: _error.toString(), error: _error, sourceHtml: widget.sourceHtml?.call(), onRetry: () => _load(reset: true))
+              : StatePanel(title: widget.emptyTitle, detail: widget.emptyDetail),
+        );
+      }
+      return AppCrossfade(fill: true, duration: AppMotion.fast, child: content);
     }
     final items = widget.hide == null ? _items : _items.where((e) => !widget.hide!(e.aid)).toList();
     // 滤掉太多、一屏都不满时滑不动，自己接着加载下一页
@@ -679,9 +727,14 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
       });
     }
     if (items.isEmpty && !_loading && _error == null && _page >= _maxPage) {
-      return RefreshIndicator(
-        onRefresh: () => _load(reset: true),
-        child: const StatePanel(title: '结果都在书架里了', detail: '可点右上角筛选按钮取消「隐藏书架里的书」。'),
+      return AppCrossfade(
+        fill: true,
+        duration: AppMotion.fast,
+        child: RefreshIndicator(
+          key: const ValueKey('grid-all-hidden'),
+          onRefresh: () => _load(reset: true),
+          child: const StatePanel(title: '结果都在书架里了', detail: '可点右上角筛选按钮取消「隐藏书架里的书」。'),
+        ),
       );
     }
     final theme = Theme.of(context);
@@ -703,7 +756,8 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
       return const SizedBox.shrink();
     }
 
-    return RefreshIndicator(
+    content = RefreshIndicator(
+      key: const ValueKey('grid-data'),
       onRefresh: () => _load(reset: true),
       child: NotificationListener<ScrollNotification>(
         onNotification: (n) {
@@ -719,7 +773,8 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
             final itemW = math.max(1.0, (c.maxWidth - 32 - 14 * (cols - 1)) / cols);
             final coverSize = Size(itemW, itemW * 4 / 3);
             return CustomScrollView(
-              scrollCacheExtent: const ScrollCacheExtent.viewport(0.8), // 提前排上下面几行的封面
+              key: widget.key != null ? PageStorageKey<Key>(widget.key!) : null,
+              scrollCacheExtent: const ScrollCacheExtent.viewport(0.4), // 适量提前准备上下邻近封面，控制活跃解码纹理数
               slivers: [
                 SliverPadding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -736,6 +791,7 @@ class _PagedNovelGridState extends ConsumerState<PagedNovelGrid> {
         ),
       ),
     );
+    return AppCrossfade(fill: true, duration: AppMotion.fast, child: content);
   }
 }
 
@@ -749,20 +805,22 @@ class _GridSkeleton extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = Theme.of(context).colorScheme.surfaceContainer;
     Widget bar(double w) => Container(height: 12, width: w, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(6)));
-    return GridView.builder(
-      physics: const NeverScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      gridDelegate: novelGridDelegate(width, textScale: MediaQuery.textScalerOf(context).scale(1)),
-      itemCount: 12,
-      itemBuilder: (context, i) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(child: DecoratedBox(decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: const SizedBox.expand())),
-          const SizedBox(height: 8),
-          bar(double.infinity),
-          const SizedBox(height: 6),
-          bar(48),
-        ],
+    return AppSkeletonPulse(
+      child: GridView.builder(
+        physics: const NeverScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+        gridDelegate: novelGridDelegate(width, textScale: MediaQuery.textScalerOf(context).scale(1)),
+        itemCount: 12,
+        itemBuilder: (context, i) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(child: DecoratedBox(decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(10)), child: const SizedBox.expand())),
+            const SizedBox(height: 8),
+            bar(double.infinity),
+            const SizedBox(height: 6),
+            bar(48),
+          ],
+        ),
       ),
     );
   }

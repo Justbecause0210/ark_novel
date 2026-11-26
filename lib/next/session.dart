@@ -42,9 +42,9 @@ class SessionStore {
       await Hive.initFlutter('next');
     }
     if (!kIsWeb) await Backup.applyPending();
-    final boxes = await Future.wait<Box>([Hive.openBox('session'), Hive.openBox(MetaCache.boxName)]);
-    await MetaCache.migrateFromSession();
-    return SessionStore._(boxes[0]);
+    final sessionBox = await Hive.openBox('session');
+    await MetaCache.open();
+    return SessionStore._(sessionBox);
   }
 
   /// 登录 cookie（`jieqiUserInfo=…;jieqiVisitInfo=…`）；网页预览：cookie 保存在转发程序里，这里只存一个标记。
@@ -261,6 +261,34 @@ class NativeNetController extends Notifier<bool> {
 
 final nativeNetProvider = NotifierProvider<NativeNetController, bool>(NativeNetController.new);
 
+/// 包装共享的底层 [HttpClientAdapter]：忽略单个上层 [Dio.close]，由 [sharedHttpAdapterProvider] 统一管理生命周期。
+class NonClosingHttpClientAdapter implements HttpClientAdapter {
+  NonClosingHttpClientAdapter(this._inner);
+
+  final HttpClientAdapter _inner;
+
+  @override
+  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream, Future<void>? cancelFuture) =>
+      _inner.fetch(options, requestStream, cancelFuture);
+
+  @override
+  void close({bool force = false}) {}
+}
+
+/// 全局共享单一底层网络适配器（Cronet / NSURLSession / Dart IO），避免多个 Dio 各自创建独立的原生网络引擎。
+final sharedHttpAdapterProvider = Provider<HttpClientAdapter>((ref) {
+  final store = ref.watch(sessionStoreProvider);
+  ref.watch(proxyProvider);
+  ref.watch(nativeNetProvider);
+  final raw = store.adapter();
+  ref.onDispose(() {
+    try {
+      raw.close(force: false);
+    } catch (_) {}
+  });
+  return NonClosingHttpClientAdapter(raw);
+});
+
 /// 当前用于请求的站点地址：网页预览走转发程序，原生 App 直连所选节点。
 String siteBase(Wenku8Node node) => isWebPreview ? previewProxyBase : node.node;
 
@@ -272,7 +300,7 @@ final wenku8ClientProvider = Provider<Wenku8Client>((ref) {
     charset: () => CharsetType.gbk,
     // 浏览器不允许网页设置 User-Agent，由转发程序代为添加
     headers: kIsWeb ? const {} : {'User-Agent': store.userAgent},
-    dio: kIsWeb ? null : (Dio()..httpClientAdapter = store.adapter()),
+    dio: kIsWeb ? null : (Dio()..httpClientAdapter = ref.read(sharedHttpAdapterProvider)),
     challengeFallback: kIsWeb
         ? null
         : (url, {referer}) => webFetch(
@@ -288,10 +316,9 @@ final wenku8ClientProvider = Provider<Wenku8Client>((ref) {
           ),
     shouldRetryAfterFallback: kIsWeb ? null : (html) => store.cookie != null && store.cookie != 'preview' && Wenku8Parser.needsLogin(html),
   );
-  // shortcut: 换代理或切换原生网络栈时热替换适配器（旧适配器在途请求自然结束，避免正在传输时强关底层引擎）
+  // 换代理或切换原生网络栈时热替换共享适配器（旧底层适配器优雅排空在途请求后自动释放）
   if (!kIsWeb) {
-    ref.listen(proxyProvider, (_, _) => client.dio.httpClientAdapter = store.adapter());
-    ref.listen(nativeNetProvider, (_, _) => client.dio.httpClientAdapter = store.adapter());
+    ref.listen<HttpClientAdapter>(sharedHttpAdapterProvider, (_, next) => client.dio.httpClientAdapter = next);
   }
   return client;
 });
@@ -328,11 +355,9 @@ final imageChallengeProvider = Provider<ImageChallengeFallback?>((ref) {
 /// 图片专用的 Dio：和请求页面一样走所选代理与原生网络栈，通过拦截器动态读取当前节点 Referer、浏览器 UA 与各图床保存的 Cloudflare cookie。
 final imageDioProvider = Provider<Dio>((ref) {
   final store = ref.watch(sessionStoreProvider);
-  ref.watch(proxyProvider);
-  ref.watch(nativeNetProvider);
   final jar = ref.watch(imageCookieJarProvider);
   final dio = Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 25)))
-    ..httpClientAdapter = store.adapter();
+    ..httpClientAdapter = ref.watch(sharedHttpAdapterProvider);
   if (!kIsWeb) {
     final restoring = <String, Future<void>>{};
     dio.interceptors.add(

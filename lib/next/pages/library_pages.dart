@@ -8,6 +8,7 @@ import '../cache.dart';
 import '../history.dart';
 import '../progress.dart';
 import '../library.dart';
+import '../motion.dart';
 import '../routes.dart';
 import '../theme_doodle.dart';
 import '../volume_covers.dart';
@@ -234,9 +235,9 @@ class CachePage extends ConsumerWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const SizedBox(height: 4),
-                              LinearProgressIndicator(value: total == 0 ? 0 : done / total, minHeight: 4, borderRadius: BorderRadius.circular(2)),
+                              AppProgressBar(value: total == 0 ? 0 : done / total, minHeight: 4, borderRadius: 2),
                               const SizedBox(height: 4),
-                              Text('$done/$total 章 · ${ChapterCache.sizeLabel(b.key)}${t?.running ?? false ? ' · 下载中' : ''}'),
+                              Text('$done/$total 章 · ${ChapterCache.sizeLabel(b.key)}${t?.running ?? false ? ' · 下载中' : ''}', style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()])),
                             ],
                           ),
                           onTap: () {
@@ -245,33 +246,36 @@ class CachePage extends ConsumerWidget {
                             context.push(cid.isEmpty ? Routes.cacheBook(b.key) : Routes.reader(b.key, cid));
                           },
                           onLongPress: () => context.push(Routes.cacheBook(b.key)),
-                          trailing: (t?.running ?? false)
-                              ? IconButton(icon: const Icon(Icons.pause_circle_outline), tooltip: hz(context, '暂停下载'), onPressed: () => ref.read(downloadProvider.notifier).cancel(b.key))
-                              : PopupMenuButton<String>(
-                                  onSelected: (v) async {
-                                    if (v == 'manage') {
-                                      await context.push(Routes.cacheBook(b.key));
-                                    } else {
-                                      final title = LibraryStore.shown(b.key, b.value.$1);
-                                      final ok = await showDialog<bool>(
-                                        context: context,
-                                        builder: (ctx) => AlertDialog(
-                                          title: const Text('删除离线缓存？'),
-                                          content: Text('将删除《$title》已下载的整本离线缓存（${ChapterCache.sizeLabel(b.key)}），不影响书架和阅读进度。'),
-                                          actions: [
-                                            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
-                                            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('删除')),
-                                          ],
-                                        ),
-                                      );
-                                      if (ok != true) return;
-                                      // 先停掉这本书的下载，再删；不重建整个下载管理器，别的书的下载不受影响
-                                      ref.read(downloadProvider.notifier).forget(b.key);
-                                      await ChapterCache.remove(b.key);
-                                    }
-                                  },
-                                  itemBuilder: (_) => const [PopupMenuItem(value: 'manage', child: Text('管理章节')), PopupMenuItem(value: 'delete', child: Text('删除缓存'))],
-                                ),
+                          trailing: AppIconSwap(
+                            child: (t?.running ?? false)
+                                ? IconButton(key: const ValueKey('pause'), icon: const Icon(Icons.pause_circle_outline), tooltip: hz(context, '暂停下载'), onPressed: () => ref.read(downloadProvider.notifier).cancel(b.key))
+                                : PopupMenuButton<String>(
+                                    key: const ValueKey('menu'),
+                                    onSelected: (v) async {
+                                      if (v == 'manage') {
+                                        await context.push(Routes.cacheBook(b.key));
+                                      } else {
+                                        final title = LibraryStore.shown(b.key, b.value.$1);
+                                        final ok = await showDialog<bool>(
+                                          context: context,
+                                          builder: (ctx) => AlertDialog(
+                                            title: const Text('删除离线缓存？'),
+                                            content: Text('将删除《$title》已下载的整本离线缓存（${ChapterCache.sizeLabel(b.key)}），不影响书架和阅读进度。'),
+                                            actions: [
+                                              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+                                              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('删除')),
+                                            ],
+                                          ),
+                                        );
+                                        if (ok != true) return;
+                                        // 先停掉这本书的下载，再删；不重建整个下载管理器，别的书的下载不受影响
+                                        ref.read(downloadProvider.notifier).forget(b.key);
+                                        await ChapterCache.remove(b.key);
+                                      }
+                                    },
+                                    itemBuilder: (_) => const [PopupMenuItem(value: 'manage', child: Text('管理章节')), PopupMenuItem(value: 'delete', child: Text('删除缓存'))],
+                                  ),
+                          ),
                         );
                       },
                     ),

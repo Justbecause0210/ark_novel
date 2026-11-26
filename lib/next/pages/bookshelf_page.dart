@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
+import 'package:flutter/foundation.dart' show TargetPlatform, ValueListenable, defaultTargetPlatform, kIsWeb, listEquals;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/rendering.dart' show RenderProxyBox, ScrollCacheExtent;
 import 'package:flutter/services.dart' show HapticFeedback, LogicalKeyboardKey;
@@ -19,6 +19,7 @@ import '../env.dart';
 import '../history.dart';
 import '../image_cache.dart';
 import '../library.dart';
+import '../motion.dart';
 import '../progress.dart';
 import '../read_state.dart';
 import '../routes.dart';
@@ -141,7 +142,7 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
     _scrollAccum = 0;
     _resumeHidden.value = false;
     final ctx = _keys[id]?.currentContext;
-    if (ctx != null) Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 200), alignment: 0.5);
+    if (ctx != null) Scrollable.ensureVisible(ctx, duration: AppMotion.dur(context, AppMotion.fast), curve: AppMotion.curve, alignment: 0.5);
   }
 
   /// 标签栏内容：点一下切换，长按拖动调整顺序；宽屏单行顶栏直接内嵌，窄屏挂在 AppBar.bottom。
@@ -370,15 +371,25 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
       titleSpacing: singleRowHeader ? 8 : null,
       foregroundColor: scene ? RuinsColors.of(context).ink : null,
       flexibleSpace: scene ? Column(children: [Expanded(child: RuinsScene(animate: sceneMotion, horizon: 0.86, ceiling: 0.5)), const SizedBox(height: 42)]) : null,
-      title: _searching
-          ? searchField
-          : (singleRowHeader
-                ? _tabStripBody(tabs, tc, lib, counts: tabCounts, perCat: perCat, height: 52, padding: const EdgeInsets.symmetric(horizontal: 6))
-                : Text('书架 · ${lib.books.length}')),
+      title: AppCrossfade(
+        alignment: Alignment.centerLeft,
+        duration: AppMotion.fast,
+        child: _searching
+            ? KeyedSubtree(key: const ValueKey('shelf-search'), child: searchField)
+            : (singleRowHeader
+                  ? KeyedSubtree(
+                      key: const ValueKey('shelf-tabs'),
+                      child: _tabStripBody(tabs, tc, lib, counts: tabCounts, perCat: perCat, height: 52, padding: const EdgeInsets.symmetric(horizontal: 6)),
+                    )
+                  : KeyedSubtree(key: const ValueKey('shelf-title'), child: Text('书架 · ${lib.books.length}'))),
+      ),
       actions: [
         IconButton(
           tooltip: hz(context, _searching ? '关闭搜索' : '搜索书架'),
-          icon: Icon(_searching ? Icons.close : Icons.search, size: singleRowHeader ? 20 : 22),
+          icon: AppIconSwap(
+            rotate: true,
+            child: Icon(_searching ? Icons.close : Icons.search, key: ValueKey(_searching), size: singleRowHeader ? 20 : 22),
+          ),
           onPressed: () {
             setState(() => _setSearching(!_searching));
             if (!_searching) ref.read(shelfQueryProvider.notifier).set('');
@@ -386,7 +397,9 @@ class _BookshelfPageState extends ConsumerState<BookshelfPage> with TickerProvid
         ),
         IconButton(
           tooltip: hz(context, '筛选、排序、显示'),
-          icon: Icon(Icons.filter_list, size: singleRowHeader ? 20 : 22, color: o.filtering ? Theme.of(context).colorScheme.primary : null),
+          icon: AppIconSwap(
+            child: Icon(Icons.filter_list, key: ValueKey(o.filtering), size: singleRowHeader ? 20 : 22, color: o.filtering ? Theme.of(context).colorScheme.primary : null),
+          ),
           onPressed: _showOptions,
         ),
         PopupMenuButton<String>(

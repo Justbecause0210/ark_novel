@@ -3,6 +3,8 @@ import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../env.dart';
+import '../motion.dart';
 import '../routes.dart';
 import '../stats.dart';
 import '../volume_covers.dart';
@@ -157,39 +159,43 @@ class _VolumeTile extends ConsumerWidget {
     final cover = ref.read(volumeCoverQueueProvider).volCover(aid, v, info.img);
     final stars = Volumes.rating(aid, v.title);
     final d = DateTime.fromMillisecondsSinceEpoch(at);
-    return InkWell(
-      borderRadius: BorderRadius.circular(10),
-      onTap: () => context.push(Routes.report(aid, vol: index)),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          CoverImage(cover, thumbnail: true, decodeSize: decodeSize),
-          DecoratedBox(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(10),
-              gradient: const LinearGradient(begin: Alignment(0, 0.1), end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black87]),
+    return AppPressScale(
+      scale: 0.968,
+      hoverScale: isDesktop ? 1.015 : 1.0,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: () => context.push(Routes.report(aid, vol: index)),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            CoverImage(cover, thumbnail: true, decodeSize: decodeSize),
+            DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(10),
+                gradient: const LinearGradient(begin: Alignment(0, 0.1), end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black87]),
+              ),
             ),
-          ),
-          Positioned(
-            left: 10,
-            right: 10,
-            bottom: 10,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600, height: 1.25)),
-                Text(info.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70, fontSize: 11)),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Expanded(child: Text('${d.month}月${d.day}日 读完', style: const TextStyle(color: Colors.white70, fontSize: 11))),
-                    for (var i = 1; i <= stars; i++) const Icon(Icons.star_rounded, size: 12, color: Color(0xFFFFC53D)),
-                  ],
-                ),
-              ],
+            Positioned(
+              left: 10,
+              right: 10,
+              bottom: 10,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600, height: 1.25)),
+                  Text(info.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(child: Text('${d.month}月${d.day}日 读完', style: const TextStyle(color: Colors.white70, fontSize: 11))),
+                      for (var i = 1; i <= stars; i++) const Icon(Icons.star_rounded, size: 12, color: Color(0xFFFFC53D)),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

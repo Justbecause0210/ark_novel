@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import '../epub_codec.dart' show detectImageFormat;
 import '../files.dart';
 import '../image_cache.dart' show shrinkImage;
+import '../motion.dart';
 
 /// 阅读器内置纸张纹理选项：0 无纹理、1 宣纸细纹、2 复古纸微噪点、3 淡雅笔记纸。
 const kReaderBgTextures = <int, String>{
@@ -99,7 +100,8 @@ class ReaderBackground extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hasImage = !kIsWeb && imagePath != null && imagePath!.isNotEmpty;
-    if (!hasImage && texture == 0) return ColoredBox(color: baseColor);
+    final dur = AppMotion.dur(context, AppMotion.standard);
+    if (!hasImage && texture == 0) return AnimatedContainer(duration: dur, curve: AppMotion.curve, color: baseColor);
 
     final isDark = ThemeData.estimateBrightnessForColor(baseColor) == Brightness.dark;
     final clampedOpacity = imageOpacity.clamp(0.05, 0.85);
@@ -113,7 +115,7 @@ class ReaderBackground extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          ColoredBox(color: baseColor),
+          AnimatedContainer(duration: dur, curve: AppMotion.curve, color: baseColor),
           if (hasImage) ...[
             Image.file(
               File(imagePath!),

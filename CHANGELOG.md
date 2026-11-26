@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.8.1](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.8.0...ark_novel-v1.8.1) (2026-11-25)
+
+
+### Features
+
+* 统一页面过渡与按压回弹动效并支持减弱动态效果 ([81f46a2](https://github.com/chenshi221/ark_novel/commit/81f46a230862cd2cd0a979590f936ba143581ca8))
+
+
+### Bug Fixes
+
+* 修复书架书脊视图两侧点击不切换与封面书名接缝闪烁 ([a726709](https://github.com/chenshi221/ark_novel/commit/a7267095abc46979cb439a795a5aeddae3ddf5c6))
+* 小幅优化图片缓存与阅读页内存占用 ([1ba0ba7](https://github.com/chenshi221/ark_novel/commit/1ba0ba7c3359a726c2a7c6d0b1def7c7785f3cd8))
+
 ## [1.8.0](https://github.com/chenshi221/ark_novel/compare/ark_novel-v1.7.0...ark_novel-v1.8.0) (2026-11-24)
 
 

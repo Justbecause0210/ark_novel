@@ -138,9 +138,8 @@ class UnlockService {
 
   Dio _createApiDio() {
     if (apiDioBuilder != null) return apiDioBuilder!();
-    final store = _ref.read(sessionStoreProvider);
     return Dio(BaseOptions(responseType: ResponseType.bytes, connectTimeout: const Duration(seconds: 12), receiveTimeout: const Duration(seconds: 30)))
-      ..httpClientAdapter = store.adapter();
+      ..httpClientAdapter = _ref.read(sharedHttpAdapterProvider);
   }
 
   Dio _createTxtDio() {
@@ -154,7 +153,7 @@ class UnlockService {
         receiveTimeout: const Duration(seconds: 18),
         headers: {'Accept': '*/*'},
       ),
-    )..httpClientAdapter = store.adapter();
+    )..httpClientAdapter = _ref.read(sharedHttpAdapterProvider);
     dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) {
@@ -546,8 +545,7 @@ String _describeDioException(DioException error) {
 
 final unlockServiceProvider = Provider<UnlockService>((ref) {
   try {
-    ref.watch(proxyProvider);
-    ref.watch(nativeNetProvider);
+    ref.watch(sharedHttpAdapterProvider);
   } catch (e) {
     // 部分纯单测未覆盖 sessionStoreProvider，跳过代理监听以便照常构造服务对象
     if (e is! UnimplementedError && !e.toString().contains('UnimplementedError')) rethrow;

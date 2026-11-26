@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../data/wenku8/wenku8_parser.dart';
 import '../cache.dart';
+import '../motion.dart';
 import '../read_state.dart';
 import '../routes.dart';
 import '../stats.dart';
@@ -725,7 +726,7 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  _MonthlyChart(monthlySeconds: summary.monthlySeconds, peakMonth: summary.peakMonth),
+                  _MonthlyChart(monthlySeconds: summary.monthlySeconds, peakMonth: summary.peakMonth, animate: !_capturing),
                   if (summary.peakMonth != null || summary.bestDayKey != null) ...[
                     const SizedBox(height: 14),
                     Container(
@@ -816,14 +817,13 @@ class _YearlyReportPageState extends ConsumerState<YearlyReportPage> {
                                       Text(book.author, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white54, fontSize: 11.5)),
                                     ],
                                     const SizedBox(height: 5),
-                                    ClipRRect(
-                                      borderRadius: BorderRadius.circular(3),
-                                      child: LinearProgressIndicator(
-                                        value: summary.topBooks.first.seconds > 0 ? book.seconds / summary.topBooks.first.seconds : 0,
-                                        minHeight: 4,
-                                        color: i == 0 ? _gold : Colors.white70,
-                                        backgroundColor: Colors.white.withValues(alpha: 0.12),
-                                      ),
+                                    AppProgressBar(
+                                      value: summary.topBooks.first.seconds > 0 ? book.seconds / summary.topBooks.first.seconds : 0,
+                                      minHeight: 4,
+                                      borderRadius: 3,
+                                      color: i == 0 ? _gold : Colors.white70,
+                                      backgroundColor: Colors.white.withValues(alpha: 0.12),
+                                      duration: _capturing ? Duration.zero : AppMotion.expressive,
                                     ),
                                   ],
                                 ),
@@ -983,7 +983,7 @@ String _formatDayLabel(String key) {
   return dt == null ? key : '${dt.month} 月 ${dt.day} 日';
 }
 
-const _bigStyle = TextStyle(color: Colors.white, fontSize: 23, fontWeight: FontWeight.w700);
+const _bigStyle = TextStyle(color: Colors.white, fontSize: 23, fontWeight: FontWeight.w700, fontFeatures: [FontFeature.tabularFigures()]);
 
 List<(String, String)> _durationParts(int s) {
   if (s <= 0) return [('0', ' 分')];
@@ -1046,14 +1046,16 @@ class _MetricTile extends StatelessWidget {
 }
 
 class _MonthlyChart extends StatelessWidget {
-  const _MonthlyChart({required this.monthlySeconds, required this.peakMonth});
+  const _MonthlyChart({required this.monthlySeconds, required this.peakMonth, this.animate = true});
 
   final List<int> monthlySeconds;
   final int? peakMonth;
+  final bool animate;
 
   @override
   Widget build(BuildContext context) {
     final maxSec = monthlySeconds.fold(1, math.max);
+    final dur = animate ? AppMotion.dur(context, AppMotion.expressive) : Duration.zero;
     return SizedBox(
       height: 92,
       child: Row(
@@ -1066,7 +1068,9 @@ class _MonthlyChart extends StatelessWidget {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
-                    Container(
+                    AnimatedContainer(
+                      duration: dur,
+                      curve: AppMotion.curve,
                       height: monthlySeconds[m] <= 0 ? 3.0 : math.max(5.0, 66.0 * monthlySeconds[m] / maxSec),
                       margin: const EdgeInsets.symmetric(horizontal: 3),
                       decoration: BoxDecoration(

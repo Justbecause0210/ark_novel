@@ -66,6 +66,7 @@ class Hant {
   final _postTriggers = <int>{};
 
   static Future<Hant>? _loading;
+  static int _loadGen = 0;
 
   /// 在后台 Isolate 解析词表（原生端走 `Isolate.run`，Web 端自动同步执行），避免主线程冷卡顿。
   static Future<Hant> parseAsync(String chars, String phrases, [String tw = '', String fixes = '']) =>
@@ -73,6 +74,7 @@ class Hant {
 
   /// 第一次用到时才加载词表（约 1 MB），之后复用。
   static Future<Hant> load() => _loading ??= () async {
+    final gen = ++_loadGen;
     try {
       final [chars, phrases, tw, fixes] = await Future.wait([
         rootBundle.loadString('assets/opencc/STCharacters.txt'),
@@ -80,12 +82,21 @@ class Hant {
         rootBundle.loadString('assets/opencc/TWVariants.txt'),
         rootBundle.loadString('assets/opencc/ArkFixes.txt'),
       ]);
-      return loaded = await parseAsync(chars, phrases, tw, fixes);
+      final h = await parseAsync(chars, phrases, tw, fixes);
+      if (gen == _loadGen) loaded = h;
+      return h;
     } catch (_) {
-      _loading = null;
+      if (gen == _loadGen) _loading = null;
       rethrow;
     }
   }();
+
+  /// 当界面繁体与阅读器繁体均处于关闭状态，或收到系统内存压力告警时卸载词表，释放约 15~20 MB 常驻词组表。
+  static void unload() {
+    _loadGen++;
+    loaded = null;
+    _loading = null;
+  }
 
   /// 已经加载好的词表；界面在 build 里同步用它，没加载完时为 null（先显示原文）。
   static Hant? loaded;

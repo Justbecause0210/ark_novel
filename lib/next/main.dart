@@ -26,10 +26,44 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   _installErrorHooks();
   registerFontLicenses();
-  // 解码好的封面多留一些，滑回去不用重新解码；移动端 150 MB 避免内存吃紧，桌面保留 200 MB
-  final mobile = !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
-  PaintingBinding.instance.imageCache.maximumSizeBytes = (mobile ? 150 : 200) << 20;
+  configureAppImageCache();
   await _bootstrap();
+}
+
+int _compactImageCacheDepth = 0;
+
+/// 配置全局解码纹理缓存上限；Impeller（Metal/Vulkan）下每 1 MB 纹理连同 Mipmap 与堆对齐实际占约 1.6~1.8 MB 显存，
+/// 需严格收紧上限，避免多标签浏览后累积上百 MB 图形内存。
+void configureAppImageCache({bool compact = false}) {
+  final mobile = !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
+  final cache = PaintingBinding.instance.imageCache;
+  if (compact) {
+    cache.maximumSize = mobile ? 32 : 40;
+    cache.maximumSizeBytes = (mobile ? 12 : 16) << 20;
+  } else {
+    cache.maximumSize = mobile ? 90 : 120;
+    cache.maximumSizeBytes = (mobile ? 28 : 40) << 20;
+  }
+}
+
+/// 清理所有已无可见控件监听的非活跃解码纹理（正在当前屏幕挂载的 `_liveImages` 不受影响）。
+void evictInactiveImageCache() {
+  PaintingBinding.instance.imageCache.clear();
+}
+
+/// 进入低水位图片缓存模式（支持阅读页与退后台引用计数叠加）。
+void enterCompactImageCache() {
+  if (++_compactImageCacheDepth == 1) {
+    configureAppImageCache(compact: true);
+    evictInactiveImageCache();
+  }
+}
+
+/// 退出低水位图片缓存模式；全部紧凑场景退出后恢复常规上限。
+void exitCompactImageCache() {
+  if (_compactImageCacheDepth > 0 && --_compactImageCacheDepth == 0) {
+    configureAppImageCache(compact: false);
+  }
 }
 
 void _installErrorHooks() {

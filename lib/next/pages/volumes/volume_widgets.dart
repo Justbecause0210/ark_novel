@@ -54,7 +54,7 @@ class _Carousel extends StatelessWidget {
                   // 返回时原地很快淡出（往中间收会在封面飞走后露出来）
                   final closing = route.status == AnimationStatus.reverse;
                   final flying = route.status == AnimationStatus.forward;
-                  final q = closing ? 1.0 : Curves.easeOutCubic.transform(intro.value);
+                  final q = closing ? 1.0 : AppMotion.curve.transform(intro.value);
                   final fade = closing ? const Interval(0.6, 1).transform(route.value) : 1.0;
                   final edges = stackEdges(vols.length);
                   final shown = [for (var i = math.max(0, p.floor() - 3); i <= math.min(vols.length - 1, p.ceil() + 3); i++) i]
@@ -157,7 +157,8 @@ class _VolumeCard extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           ColoredBox(color: Colors.white.withValues(alpha: 0.15)),
-          RepaintBoundary(child: NetImage(url, decodeSize: Size(width, width / kCoverAspect), error: const Icon(Icons.menu_book_outlined, color: Colors.white54))),
+          if (TickerMode.valuesOf(context).enabled)
+            NetImage(url, decodeSize: Size(width, width / kCoverAspect), error: const Icon(Icons.menu_book_outlined, color: Colors.white54)),
           ColoredBox(color: Colors.black.withValues(alpha: (shade + (untouched ? 0.2 : 0)).clamp(0, 0.75))),
           if (reading)
             Positioned(
@@ -326,33 +327,15 @@ class _DetailsState extends State<_Details> {
         Row(
           children: [
             Expanded(child: Text(_progress(aid, v), style: muted.copyWith(fontSize: 12))),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (var i = 1; i <= 5; i++)
-                  Semantics(
-                    button: true,
-                    selected: i <= rating,
-                    label: hz(context, '$i 星评分'),
-                    child: MouseRegion(
-                      cursor: SystemMouseCursors.click,
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.opaque,
-                        onTap: () async {
-                          await Volumes.setRating(aid, v.title, rating == i ? 0 : i); // 再点一次当前星数就取消
-                          if (mounted) setState(() {});
-                        },
-                        child: SizedBox(
-                          width: 40,
-                          height: 40,
-                          child: Center(
-                            child: Icon(i <= rating ? Icons.star_rounded : Icons.star_outline_rounded, color: const Color(0xFFFFC53D), size: 22),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
+            AnimatedStarRating(
+              rating: rating,
+              starSize: 22,
+              itemSize: 40,
+              labelBuilder: (i) => hz(context, '$i 星评分'),
+              onChanged: (nextRating) async {
+                await Volumes.setRating(aid, v.title, nextRating);
+                if (mounted) setState(() {});
+              },
             ),
           ],
         ),
@@ -360,13 +343,16 @@ class _DetailsState extends State<_Details> {
         Row(
           children: [
             Expanded(
-              child: FilledButton.icon(
-                style: FilledButton.styleFrom(minimumSize: const Size(0, 40), textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                onPressed: () => context.push(Routes.reader(aid, next)).then((_) {
-                  if (mounted) setState(() {});
-                }),
-                icon: const Icon(Icons.play_arrow, size: 20),
-                label: Text(label),
+              child: AppPressScale(
+                scale: 0.975,
+                child: FilledButton.icon(
+                  style: FilledButton.styleFrom(minimumSize: const Size(0, 40), textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  onPressed: () => context.push(Routes.reader(aid, next)).then((_) {
+                    if (mounted) setState(() {});
+                  }),
+                  icon: const Icon(Icons.play_arrow, size: 20),
+                  label: Text(label),
+                ),
               ),
             ),
             const SizedBox(width: 8),
@@ -472,8 +458,12 @@ class _DetailsState extends State<_Details> {
               // 横屏里详情在右侧并排展示，往下拉目录顶头时不应该把右侧面板关掉
               child: widget.wide ? list : PullToClose(onClose: widget.onClose, child: list),
             ),
-            if (_picked.isNotEmpty)
-              ColoredBox(
+            AppCollapse(
+              visible: _picked.isNotEmpty,
+              axisAlignment: 1.0,
+              duration: AppMotion.standard,
+              reverseDuration: AppMotion.fast,
+              child: ColoredBox(
                 color: Colors.black.withValues(alpha: 0.25),
                 child: SafeArea(
                   top: false,
@@ -483,7 +473,7 @@ class _DetailsState extends State<_Details> {
                       children: [
                         IconButton(tooltip: hz(context, '取消'), color: Colors.white, icon: const Icon(Icons.close), onPressed: () => setState(_picked.clear)),
                         Expanded(
-                          child: Text('已选 ${_picked.length} 章', style: const TextStyle(color: Colors.white)),
+                          child: Text('已选 ${_picked.length} 章', style: const TextStyle(color: Colors.white, fontFeatures: [FontFeature.tabularFigures()])),
                         ),
                         TextButton(onPressed: () => _mark(true), child: const Text('已读')),
                         TextButton(onPressed: () => _mark(false), child: const Text('未读')),
@@ -510,6 +500,7 @@ class _DetailsState extends State<_Details> {
                   ),
                 ),
               ),
+            ),
           ],
         ),
       ),
@@ -527,27 +518,36 @@ class _DetailsToggle extends StatelessWidget {
   final VoidCallback onList;
   final bool wide;
 
-  Widget _pill(bool expanded, String text, VoidCallback onTap) => Material(
-    color: Colors.white.withValues(alpha: 0.12),
-    shape: const StadiumBorder(),
-    child: InkWell(
-      customBorder: const StadiumBorder(),
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 7),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              wide
-                  ? (expanded ? Icons.keyboard_arrow_left : Icons.keyboard_arrow_right)
-                  : (expanded ? Icons.keyboard_arrow_down : Icons.keyboard_arrow_up),
-              size: 18,
-              color: Colors.white70,
-            ),
-            const SizedBox(width: 4),
-            Text(text, style: const TextStyle(color: Colors.white70, fontSize: 13)),
-          ],
+  Widget _pill(BuildContext context, bool expanded, String text, VoidCallback onTap) => AppPressScale(
+    scale: 0.95,
+    child: Material(
+      color: Colors.white.withValues(alpha: expanded ? 0.2 : 0.12),
+      shape: const StadiumBorder(),
+      child: InkWell(
+        customBorder: const StadiumBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 7),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              AnimatedRotation(
+                turns: expanded ? 0.5 : 0.0,
+                duration: AppMotion.dur(context, AppMotion.fast),
+                curve: AppMotion.snappy,
+                child: Icon(
+                  wide ? Icons.keyboard_arrow_right : Icons.keyboard_arrow_up,
+                  size: 18,
+                  color: Colors.white70,
+                ),
+              ),
+              const SizedBox(width: 4),
+              AppCrossfade(
+                duration: AppMotion.fast,
+                child: Text(text, key: ValueKey(text), style: const TextStyle(color: Colors.white70, fontSize: 13)),
+              ),
+            ],
+          ),
         ),
       ),
     ),
@@ -560,7 +560,7 @@ class _DetailsToggle extends StatelessWidget {
       alignment: WrapAlignment.center,
       spacing: 10,
       runSpacing: 8,
-      children: [_pill(open, open ? '收起' : '详情和目录', onTap), _pill(list, list ? '收起' : '全部卷', onList)],
+      children: [_pill(context, open, open ? '收起' : '详情和目录', onTap), _pill(context, list, list ? '收起' : '全部卷', onList)],
     ),
   );
 }
@@ -603,49 +603,53 @@ class _VolList extends StatelessWidget {
                 final finished = done.containsKey(v.title);
                 final total = v.textCids.length;
                 final progress = i == reading && !finished && total > 0 ? v.textCids.where(read.contains).length / total : null;
-                return GestureDetector(
-                  onTap: () => onPick(i),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      AspectRatio(
-                        aspectRatio: kCoverAspect,
-                        child: DecoratedBox(
-                          position: DecorationPosition.foreground,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(6),
-                            border: i == cur ? Border.all(color: Colors.white, width: 2) : null,
-                          ),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(6),
-                            child: Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                ColoredBox(color: Colors.white10, child: NetImage(coverOf(v), thumbnail: true, decodeSize: Size(w, w / kCoverAspect))),
-                                if (finished)
-                                  const Positioned(
-                                    top: 5,
-                                    right: 5,
-                                    child: DecoratedBox(
-                                      decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
-                                      child: Padding(padding: EdgeInsets.all(2), child: Icon(Icons.check, size: 14, color: Colors.white)),
+                return AppPressScale(
+                  scale: 0.96,
+                  child: GestureDetector(
+                    onTap: () => onPick(i),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AspectRatio(
+                          aspectRatio: kCoverAspect,
+                          child: AnimatedContainer(
+                            duration: AppMotion.dur(context, AppMotion.fast),
+                            curve: AppMotion.curve,
+                            foregroundDecoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(6),
+                              border: i == cur ? Border.all(color: Colors.white, width: 2) : null,
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(6),
+                              child: Stack(
+                                fit: StackFit.expand,
+                                children: [
+                                  ColoredBox(color: Colors.white10, child: NetImage(coverOf(v), thumbnail: true, decodeSize: Size(w, w / kCoverAspect))),
+                                  if (finished)
+                                    const Positioned(
+                                      top: 5,
+                                      right: 5,
+                                      child: DecoratedBox(
+                                        decoration: BoxDecoration(color: Colors.black54, shape: BoxShape.circle),
+                                        child: Padding(padding: EdgeInsets.all(2), child: Icon(Icons.check, size: 14, color: Colors.white)),
+                                      ),
                                     ),
-                                  ),
-                                if (progress != null)
-                                  Positioned(left: 0, right: 0, bottom: 0, child: LinearProgressIndicator(value: progress, minHeight: 4, color: Colors.white, backgroundColor: Colors.black45)),
-                              ],
+                                  if (progress != null)
+                                    Positioned(left: 0, right: 0, bottom: 0, child: AppProgressBar(value: progress, minHeight: 4, borderRadius: 0, color: Colors.white, backgroundColor: Colors.black45)),
+                                ],
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        v.title,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 12, height: 1.3, color: i == cur ? Colors.white : Colors.white70, fontWeight: i == cur ? FontWeight.w700 : null),
-                      ),
-                    ],
+                        const SizedBox(height: 6),
+                        Text(
+                          v.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 12, height: 1.3, color: i == cur ? Colors.white : Colors.white70, fontWeight: i == cur ? FontWeight.w700 : null),
+                        ),
+                      ],
+                    ),
                   ),
                 );
               },
@@ -753,10 +757,10 @@ class _OpeningBookState extends State<_OpeningBook> with SingleTickerProviderSta
       child: AnimatedBuilder(
         animation: _c,
         builder: (context, _) {
-          final grow = Curves.easeInOutCubic.transform((_c.value / 0.46).clamp(0.0, 1.0));
+          final grow = AppMotion.inOut.transform((_c.value / 0.46).clamp(0.0, 1.0));
           final spread = Curves.easeInCubic.transform((_c.value / 0.46).clamp(0.0, 1.0));
           final turn = Curves.easeInCubic.transform((_c.value / 0.42).clamp(0.0, 1.0)); // 0 合着 → 1 翻到垂直看不见
-          final fade = 1 - Curves.easeOut.transform(((_c.value - 0.72) / 0.28).clamp(0.0, 1.0));
+          final fade = 1 - AppMotion.exit.transform(((_c.value - 0.72) / 0.28).clamp(0.0, 1.0));
           final coverRect = Rect.lerp(widget.from, coverTarget, grow)!;
           final pageRect = wide ? Rect.lerp(coverRect, screen, spread)! : coverRect;
           final radius = BorderRadius.circular(8 * (1 - grow));
@@ -798,7 +802,7 @@ class _OpeningBookState extends State<_OpeningBook> with SingleTickerProviderSta
                               fit: BoxFit.fill,
                               child: SizedBox.fromSize(
                                 size: widget.from.size,
-                                child: NetImage(widget.url),
+                                child: NetImage(widget.url, decodeSize: widget.from.size),
                               ),
                             ),
                             // 翻得越开越暗，像封面背光

@@ -174,6 +174,28 @@ class LibraryController extends Notifier<LibraryState> {
   // 同步合并完会重建这个 provider：放在实例上的话，新实例不知道旧实例还在推送，会同时推一遍
   static bool _syncing = false;
   static String? _flushingAid;
+  static int _bgPauseCount = 0;
+  static Completer<void>? _bgResumeCompleter;
+
+  static bool get isBackgroundPaused => _bgPauseCount > 0;
+
+  static void pauseBackground() {
+    _bgPauseCount++;
+    _bgResumeCompleter ??= Completer<void>();
+  }
+
+  static void resumeBackground() {
+    if (_bgPauseCount > 0 && --_bgPauseCount == 0) {
+      _bgResumeCompleter?.complete();
+      _bgResumeCompleter = null;
+    }
+  }
+
+  static void resetBackgroundPause() {
+    _bgPauseCount = 0;
+    _bgResumeCompleter?.complete();
+    _bgResumeCompleter = null;
+  }
 
   @override
   LibraryState build() => _load();
@@ -493,6 +515,12 @@ class LibraryController extends Notifier<LibraryState> {
     try {
       final api = ref.read(apiProvider);
       for (final b in state.books.values.toList()) {
+        while (_bgPauseCount > 0 && ref.mounted) {
+          final c = _bgResumeCompleter;
+          if (c == null) break;
+          await c.future;
+        }
+        if (!ref.mounted || !_online) break;
         if (api.hasDetail(b.aid)) continue;
         final d = await runInBackground(() => api.detail(b.aid));
         pending[b.aid] = (title: d.title, img: d.imgUrl, status: d.status);

@@ -114,10 +114,16 @@ class _CharacterDetailSheetState extends ConsumerState<_CharacterDetailSheet> {
                 ),
               ],
             ),
-            if (summaryText.isNotEmpty) ...[
-              const SizedBox(height: 14),
-              Text(summaryText, style: theme.textTheme.bodyMedium?.copyWith(height: 1.6, fontSize: 13.5)),
-            ],
+            AppCollapse(
+              visible: summaryText.isNotEmpty,
+              child: Padding(
+                padding: const EdgeInsets.only(top: 14),
+                child: AppCrossfade(
+                  alignment: Alignment.topLeft,
+                  child: Text(summaryText, key: ValueKey(summaryText), style: theme.textTheme.bodyMedium?.copyWith(height: 1.6, fontSize: 13.5)),
+                ),
+              ),
+            ),
             const SizedBox(height: 8),
             Wrap(
               spacing: 8,
@@ -145,41 +151,50 @@ class _CharacterDetailSheetState extends ConsumerState<_CharacterDetailSheet> {
             ),
             if (note.isNotEmpty) ...[
               const SizedBox(height: 10),
-              if (hideSpoiler)
-                InkWell(
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: () => setState(() => _revealed = true),
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainerHighest.withValues(alpha: 0.7),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: scheme.outlineVariant),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.visibility_off_outlined, size: 16, color: scheme.onSurfaceVariant),
-                        const SizedBox(width: 8),
-                        Expanded(child: Text('防剧透已折叠（第 ${_char.spoilerVol} 卷解锁 · 点击展开笔记）', style: muted)),
-                      ],
-                    ),
-                  ),
-                )
-              else
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(color: scheme.surfaceContainerLow, borderRadius: BorderRadius.circular(10)),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('个人笔记', style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary, fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 4),
-                      Text(note, style: theme.textTheme.bodySmall?.copyWith(height: 1.55)),
-                    ],
-                  ),
+              AnimatedSize(
+                duration: AppMotion.dur(context, AppMotion.fast),
+                curve: AppMotion.curve,
+                alignment: Alignment.topCenter,
+                child: AppCrossfade(
+                  alignment: Alignment.topCenter,
+                  child: hideSpoiler
+                      ? InkWell(
+                          key: const ValueKey('spoiler-hidden'),
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: () => setState(() => _revealed = true),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                            decoration: BoxDecoration(
+                              color: scheme.surfaceContainerHighest.withValues(alpha: 0.7),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: scheme.outlineVariant),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(Icons.visibility_off_outlined, size: 16, color: scheme.onSurfaceVariant),
+                                const SizedBox(width: 8),
+                                Expanded(child: Text('防剧透已折叠（第 ${_char.spoilerVol} 卷解锁 · 点击展开笔记）', style: muted)),
+                              ],
+                            ),
+                          ),
+                        )
+                      : Container(
+                          key: const ValueKey('spoiler-shown'),
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          decoration: BoxDecoration(color: scheme.surfaceContainerLow, borderRadius: BorderRadius.circular(10)),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('个人笔记', style: theme.textTheme.labelSmall?.copyWith(color: scheme.primary, fontWeight: FontWeight.w600)),
+                              const SizedBox(height: 4),
+                              Text(note, style: theme.textTheme.bodySmall?.copyWith(height: 1.55)),
+                            ],
+                          ),
+                        ),
                 ),
+              ),
             ],
             const SizedBox(height: 14),
             Row(
@@ -380,10 +395,16 @@ class _ReaderCharacterSheetState extends ConsumerState<_ReaderCharacterSheet> {
                   ),
                 ],
               ),
-              if (summaryText.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                Text(summaryText, maxLines: 6, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(height: 1.55)),
-              ],
+              AppCollapse(
+                visible: summaryText.isNotEmpty,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: AppCrossfade(
+                    alignment: Alignment.topLeft,
+                    child: Text(summaryText, key: ValueKey(summaryText), maxLines: 6, overflow: TextOverflow.ellipsis, style: theme.textTheme.bodySmall?.copyWith(height: 1.55)),
+                  ),
+                ),
+              ),
               if (showMoegirlBtn || _moegirlTip != null || _char.name.isNotEmpty) ...[
                 const SizedBox(height: 6),
                 Wrap(
@@ -411,38 +432,47 @@ class _ReaderCharacterSheetState extends ConsumerState<_ReaderCharacterSheet> {
                 ),
               ],
               const SizedBox(height: 12),
-              if (hideSpoiler)
-                InkWell(
-                  borderRadius: BorderRadius.circular(10),
-                  onTap: () => setState(() => _revealed = true),
-                  child: Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-                    decoration: BoxDecoration(
-                      color: scheme.surfaceContainerHigh,
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: scheme.outline),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.visibility_off_outlined, size: 18, color: scheme.onSurfaceVariant),
-                        const SizedBox(width: 8),
-                        Expanded(child: Text('防剧透保护（第 ${_char.spoilerVol} 卷解锁）：点击展开查看或编辑笔记', style: muted)),
-                      ],
-                    ),
-                  ),
-                )
-              else
-                TextField(
-                  controller: _note,
-                  minLines: 2,
-                  maxLines: 6,
-                  decoration: InputDecoration(
-                    label: const Text('个人笔记'),
-                    hint: const Text('记录人物身份、关系、伏笔…', maxLines: 1, overflow: TextOverflow.ellipsis),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                  ),
+              AnimatedSize(
+                duration: AppMotion.dur(context, AppMotion.fast),
+                curve: AppMotion.curve,
+                alignment: Alignment.topCenter,
+                child: AppCrossfade(
+                  alignment: Alignment.topCenter,
+                  child: hideSpoiler
+                      ? InkWell(
+                          key: const ValueKey('reader-spoiler-hidden'),
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: () => setState(() => _revealed = true),
+                          child: Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                            decoration: BoxDecoration(
+                              color: scheme.surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: scheme.outline),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(Icons.visibility_off_outlined, size: 18, color: scheme.onSurfaceVariant),
+                                const SizedBox(width: 8),
+                                Expanded(child: Text('防剧透保护（第 ${_char.spoilerVol} 卷解锁）：点击展开查看或编辑笔记', style: muted)),
+                              ],
+                            ),
+                          ),
+                        )
+                      : TextField(
+                          key: const ValueKey('reader-spoiler-shown'),
+                          controller: _note,
+                          minLines: 2,
+                          maxLines: 6,
+                          decoration: InputDecoration(
+                            label: const Text('个人笔记'),
+                            hint: const Text('记录人物身份、关系、伏笔…', maxLines: 1, overflow: TextOverflow.ellipsis),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                        ),
                 ),
+              ),
               const SizedBox(height: 14),
               Row(
                 children: [
@@ -465,12 +495,15 @@ class _ReaderCharacterSheetState extends ConsumerState<_ReaderCharacterSheet> {
                     child: const Text('人物词典'),
                   ),
                   const Spacer(),
-                  if (!hideSpoiler)
-                    FilledButton(
+                  AppReveal(
+                    visible: !hideSpoiler,
+                    beginScale: 0.92,
+                    child: FilledButton(
                       style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
                       onPressed: _saveNote,
                       child: const Text('保存笔记'),
                     ),
+                  ),
                 ],
               ),
             ],

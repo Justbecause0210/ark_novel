@@ -13,7 +13,7 @@ class _Shelf extends ConsumerStatefulWidget {
   ConsumerState<_Shelf> createState() => _ShelfState();
 }
 
-class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMixin {
+class _ShelfState extends ConsumerState<_Shelf> {
   final _selected = <String>{};
   static final _selecting = <String>{}; // 哪几个标签页正在多选
   final _focus = FocusNode(debugLabel: 'shelf-select');
@@ -33,9 +33,6 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
   final _precachedUrls = <String>{};
   (bool, int, int)? _lastPrecacheSpan;
   DateTime _lastPrecacheAt = DateTime(0);
-
-  @override
-  bool get wantKeepAlive => true;
 
   List<LibBook> _getArranged(LibraryState lib, ShelfOptions o, String query, bool updateRunning, int seed) {
     final k = _arrangeKey;
@@ -66,7 +63,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     _layoutCoverSize = coverSize;
   }
 
-  /// 监听书架垂直滑动方向，在前进方向前方约 1.5~2 屏对主封面主动预解码（带节流与去重）。
+  /// 监听书架垂直滑动方向，在前进方向前方约 1 屏对主封面主动预解码（带节流与去重）。
   bool _onShelfScrollPrecache(ScrollNotification n) {
     if (isWebPreview || n.metrics.axis != Axis.vertical || n is! ScrollUpdateNotification || n.metrics.outOfRange) return false;
     final dy = n.scrollDelta ?? 0;
@@ -78,8 +75,8 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     if (viewport <= 0) return false;
     final pixels = n.metrics.pixels;
     final forward = dy > 0;
-    final aheadStartPx = forward ? pixels + viewport * 0.6 : math.max(0.0, pixels - viewport * 1.8);
-    final aheadEndPx = forward ? pixels + viewport * 2.4 : math.max(0.0, pixels - viewport * 0.1);
+    final aheadStartPx = forward ? pixels + viewport * 0.6 : math.max(0.0, pixels - viewport * 1.1);
+    final aheadEndPx = forward ? pixels + viewport * 1.3 : math.max(0.0, pixels - viewport * 0.1);
     final totalRows = (_arrangedBooks.length + _layoutCols - 1) ~/ _layoutCols;
     if (totalRows <= 0) return false;
     final startRow = (((aheadStartPx - _layoutTopPadding) / _layoutRowExtent).floor()).clamp(0, totalRows - 1);
@@ -97,7 +94,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
     var queued = 0;
     if (forward) {
-      for (var i = startIdx; i <= endIdx && queued < 24; i++) {
+      for (var i = startIdx; i <= endIdx && queued < 12; i++) {
         final url = _cover(_arrangedBooks[i]);
         if (url.isNotEmpty && _precachedUrls.add(url)) {
           queued++;
@@ -105,7 +102,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
         }
       }
     } else {
-      for (var i = endIdx; i >= startIdx && queued < 24; i--) {
+      for (var i = endIdx; i >= startIdx && queued < 12; i--) {
         final url = _cover(_arrangedBooks[i]);
         if (url.isNotEmpty && _precachedUrls.add(url)) {
           queued++;
@@ -317,7 +314,6 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
   @override
   Widget build(BuildContext context) {
-    super.build(context);
     final lib = ref.watch(libraryProvider);
     final perCat = ref.watch(appPref(P.perCat, false));
     if (perCat) ref.watch(appPrefProvider('shelf.tab.${widget.catId}'));
@@ -392,7 +388,12 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
       }
       if (o.display == 2) {
         _syncLayoutMetrics(cols: 1, rowExtent: 72, topPadding: inset, coverSize: const Size(40, 54));
-        return ListView.builder(padding: EdgeInsets.fromLTRB(0, inset, 0, 24), itemCount: books.length, itemBuilder: (context, i) => _listTile(books[i]));
+        return ListView.builder(
+          key: PageStorageKey('shelf:${widget.catId}:${o.display}'),
+          padding: EdgeInsets.fromLTRB(0, inset, 0, 24),
+          itemCount: books.length,
+          itemBuilder: (context, i) => _listTile(books[i]),
+        );
       }
       if (o.display == 4 || o.display == 5) {
         // 正好一屏高；外面套一层能滚的，下拉同步照常可用；书脊/立体模式不显示继续阅读条，顶部不留冗余 inset
@@ -452,7 +453,8 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
             final topPad = 12 + inset;
             _syncLayoutMetrics(cols: n, rowExtent: mainExtent + 16, topPadding: topPad, coverSize: coverSize);
             return GridView.builder(
-              scrollCacheExtent: const ScrollCacheExtent.viewport(1), // 上下各多备一屏，快速滑动时封面也已经解码好
+              key: PageStorageKey('shelf:${widget.catId}:${o.display}'),
+              scrollCacheExtent: const ScrollCacheExtent.viewport(0.4), // 上下适量多备，兼顾滑动顺滑与活跃纹理数
               padding: EdgeInsets.fromLTRB(16, topPad, 16, 24),
               // 一格 = 封面（右边留出后面几卷的边）+ 下面两行字（随系统字号伸缩防溢出）
               gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: n, mainAxisSpacing: 16, crossAxisSpacing: 14, mainAxisExtent: mainExtent),
@@ -482,7 +484,8 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
           }
           _syncLayoutMetrics(cols: n, rowExtent: rowExtent, topPadding: topPad, coverSize: coverSize);
           return GridView.builder(
-            scrollCacheExtent: const ScrollCacheExtent.viewport(1),
+            key: PageStorageKey('shelf:${widget.catId}:${o.display}'),
+            scrollCacheExtent: const ScrollCacheExtent.viewport(0.4),
             padding: EdgeInsets.fromLTRB(16, topPad, 16, 24),
             gridDelegate: compact
                 ? SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: n, mainAxisSpacing: 8, crossAxisSpacing: 8, childAspectRatio: 0.72)
@@ -517,13 +520,36 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
                     final inset = widget.resumeEnabled ? rawInset : 0.0;
                     return NotificationListener<ScrollNotification>(
                       onNotification: _onShelfScrollPrecache,
-                      child: RefreshIndicator(edgeOffset: inset, onRefresh: _refresh, child: buildBody(inset)),
+                      child: RefreshIndicator(
+                        edgeOffset: inset,
+                        onRefresh: _refresh,
+                        child: AppCrossfade(
+                          fill: true,
+                          duration: AppMotion.fast,
+                          child: KeyedSubtree(
+                            key: ValueKey(
+                              lib.books.isEmpty
+                                  ? 'empty-lib'
+                                  : books.isEmpty
+                                  ? 'empty-cat'
+                                  : (o.sort == ShelfSort.custom && query.isEmpty && !o.filtering)
+                                  ? 'custom'
+                                  : 'display:${o.display}',
+                            ),
+                            child: buildBody(inset),
+                          ),
+                        ),
+                      ),
                     );
                   },
                 ),
               ),
-              if (_selected.isNotEmpty)
-                Material(
+              AppCollapse(
+                visible: _selected.isNotEmpty,
+                axisAlignment: 1.0,
+                duration: AppMotion.standard,
+                reverseDuration: AppMotion.fast,
+                child: Material(
                   elevation: 3,
                   color: theme.colorScheme.surfaceContainer,
                   child: SafeArea(
@@ -534,18 +560,46 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
                         Expanded(
                           child: Row(
                             children: [
-                              if (_markingRead) ...[
-                                const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
-                                const SizedBox(width: 8),
-                              ],
-                              Expanded(child: Text(_markingRead ? '正在标为已读…' : '${_selected.length} 本', maxLines: 1, softWrap: false, overflow: TextOverflow.fade)),
+                              AppCollapse(
+                                visible: _markingRead,
+                                axis: Axis.horizontal,
+                                duration: AppMotion.fast,
+                                child: const Padding(
+                                  padding: EdgeInsets.only(right: 8),
+                                  child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                                ),
+                              ),
+                              Expanded(
+                                child: AppCrossfade(
+                                  alignment: Alignment.centerLeft,
+                                  duration: AppMotion.fast,
+                                  child: Text(
+                                    _markingRead ? '正在标为已读…' : '${_selected.length} 本',
+                                    key: ValueKey(_markingRead ? 'marking' : 'n:${_selected.length}'),
+                                    maxLines: 1,
+                                    softWrap: false,
+                                    overflow: TextOverflow.fade,
+                                    style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()]),
+                                  ),
+                                ),
+                              ),
                             ],
                           ),
                         ),
                         // 和 Mihon 一样只放图标（长按看名字），文字按钮一行放不下
                         IconButton(tooltip: hz(context, '全选'), icon: const Icon(Icons.select_all), onPressed: () => setState(() => _selected.addAll(books.map((b) => b.aid)))),
-                        if (_selected.length == 1) IconButton(tooltip: hz(context, '改名'), icon: const Icon(Icons.drive_file_rename_outline), onPressed: _rename),
-                        if (_selected.length == 1) IconButton(tooltip: hz(context, '封面'), icon: const Icon(Icons.image_outlined), onPressed: _pickCover),
+                        AppCollapse(
+                          visible: _selected.length == 1,
+                          axis: Axis.horizontal,
+                          duration: AppMotion.fast,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(tooltip: hz(context, '改名'), icon: const Icon(Icons.drive_file_rename_outline), onPressed: _rename),
+                              IconButton(tooltip: hz(context, '封面'), icon: const Icon(Icons.image_outlined), onPressed: _pickCover),
+                            ],
+                          ),
+                        ),
                         IconButton(tooltip: hz(context, '分类'), icon: const Icon(Icons.label_outline), onPressed: _setCats),
                         IconButton(tooltip: hz(context, '移出书架'), icon: const Icon(Icons.delete_outline), onPressed: _remove),
                         PopupMenuButton<VoidCallback>(
@@ -569,6 +623,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
                     ),
                   ),
                 ),
+              ),
             ],
           ),
         ),
@@ -669,26 +724,40 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
       );
     }
     // 紧凑：书名压在封面底部的渐变上
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onLongPress: () => _toggle(b.aid),
-        onSecondaryTap: () => _toggle(b.aid),
-        onTap: () => _tap(b),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            _ShelfBookCover(aid: b.aid, fallbackImg: b.img, decodeSize: coverSize),
-            DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(10),
-                gradient: const LinearGradient(begin: Alignment.center, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black87]),
+    final isDesktop = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.macOS ||
+            defaultTargetPlatform == TargetPlatform.windows ||
+            defaultTargetPlatform == TargetPlatform.linux);
+    return AppPressScale(
+      scale: 0.968,
+      hoverScale: isDesktop ? 1.014 : 1.0,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onLongPress: () => _toggle(b.aid),
+          onSecondaryTap: () => _toggle(b.aid),
+          onTap: () => _tap(b),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              _ShelfBookCover(aid: b.aid, fallbackImg: b.img, decodeSize: coverSize),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  gradient: const LinearGradient(begin: Alignment.center, end: Alignment.bottomCenter, colors: [Colors.transparent, Colors.black87]),
+                ),
               ),
-            ),
-            Positioned(left: 6, right: resume == null ? 6 : 40, bottom: 6, child: Text(b.shown, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12, height: 1.25))),
-            if (badge != null) Positioned(top: 6, right: 6, child: badge),
-            if (resume != null) Positioned(right: 0, bottom: 0, child: resume),
-          ],
+              Positioned(left: 6, right: resume == null ? 6 : 40, bottom: 6, child: Text(b.shown, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 12, height: 1.25))),
+              Positioned(
+                top: 6,
+                right: 6,
+                child: AppIconSwap(
+                  child: badge != null ? KeyedSubtree(key: ValueKey(_selected.contains(b.aid)), child: badge) : const SizedBox.shrink(key: ValueKey('empty')),
+                ),
+              ),
+              if (resume != null) Positioned(right: 0, bottom: 0, child: resume),
+            ],
+          ),
         ),
       ),
     );
@@ -697,13 +766,21 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
   /// 卷册：第一卷封面在最前，右边露出后面几卷真封面的一窄条边（卷越多条数越多，单卷没有），书名和读到第几卷在封面下面。
   Widget _stackTile(LibBook b, {required Size coverSize}) {
     final badge = _badge(b);
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(
-        onTap: () => _selected.isEmpty ? _openAndRefresh(Routes.volumes(b.aid)) : _toggle(b.aid),
-        onLongPress: () => _toggle(b.aid),
-        onSecondaryTap: () => _toggle(b.aid),
-        child: _ShelfStackTile(book: b, catId: widget.catId, activeTab: widget.activeTab, badge: badge, coverSize: coverSize),
+    final isDesktop = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.macOS ||
+            defaultTargetPlatform == TargetPlatform.windows ||
+            defaultTargetPlatform == TargetPlatform.linux);
+    return AppPressScale(
+      scale: 0.968,
+      hoverScale: isDesktop ? 1.014 : 1.0,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => _selected.isEmpty ? _openAndRefresh(Routes.volumes(b.aid)) : _toggle(b.aid),
+          onLongPress: () => _toggle(b.aid),
+          onSecondaryTap: () => _toggle(b.aid),
+          child: _ShelfStackTile(book: b, catId: widget.catId, activeTab: widget.activeTab, badge: badge, coverSize: coverSize),
+        ),
       ),
     );
   }
@@ -712,14 +789,20 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
     final p = ReadingProgress.of(b.aid);
     final n = _unread(b.aid);
     final cached = ChapterCache.count(b.aid);
+    final isSelected = _selected.contains(b.aid);
+    final resume = _resume(b);
     return GestureDetector(
       onSecondaryTap: () => _toggle(b.aid),
       child: ListTile(
-        selected: _selected.contains(b.aid),
+        selected: isSelected,
         leading: SizedBox(width: 40, height: 54, child: _ShelfBookCover(aid: b.aid, fallbackImg: b.img, decodeSize: const Size(40, 54))),
         title: Text(b.shown, maxLines: 2, overflow: TextOverflow.ellipsis),
         subtitle: Text([if (n > 0) '未读 $n 章', if (cached > 0) '已缓存 $cached 章', if (b.done) '已完结', if (p == null) '还没读'].join(' · ')),
-        trailing: _selected.contains(b.aid) ? Icon(Icons.check_circle, color: Theme.of(context).colorScheme.primary) : _resume(b),
+        trailing: AppIconSwap(
+          child: isSelected
+              ? Icon(Icons.check_circle, key: const ValueKey('sel'), color: Theme.of(context).colorScheme.primary)
+              : (resume != null ? KeyedSubtree(key: const ValueKey('res'), child: resume) : const SizedBox.shrink(key: ValueKey('none'))),
+        ),
         onTap: () => _tap(b),
         onLongPress: () => _toggle(b.aid),
       ),
@@ -728,6 +811,7 @@ class _ShelfState extends ConsumerState<_Shelf> with AutomaticKeepAliveClientMix
 
   /// 自定义排序：列表形式，拖动右侧把手调整，每个分类单独记顺序。
   Widget _reorderable(List<LibBook> books, {required bool autoSwitched, required double topPadding}) => ReorderableListView.builder(
+    key: PageStorageKey('shelf:${widget.catId}:custom'),
     padding: EdgeInsets.fromLTRB(0, topPadding, 0, 24),
     header: autoSwitched ? const XNote('自定义排序下自动切换为列表视图，按住右侧把手可拖动调整顺序。') : null,
     itemCount: books.length,

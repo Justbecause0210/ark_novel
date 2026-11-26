@@ -51,16 +51,7 @@ Future<void> flushCoverColors() async {
   if (_pendingCoverColors.isEmpty || !MetaCache.isOpen) return;
   final batch = Map<String, int>.from(_pendingCoverColors);
   _pendingCoverColors.clear();
-  final box = MetaCache.box;
-  final prev = Map<String, Object?>.from((box.get('ccolor') as Map?) ?? const {});
-  for (final e in batch.entries) {
-    prev.remove(e.key);
-    prev[e.key] = e.value;
-  }
-  while (prev.length > 400) {
-    prev.remove(prev.keys.first);
-  }
-  await box.put('ccolor', prev);
+  await MetaCache.putCoverColors(batch);
 }
 
 void _queueCoverColor(String url, int argb) {
@@ -78,8 +69,7 @@ void _queueCoverColor(String url, int argb) {
 Color? savedCoverColor(String url) {
   final pending = _pendingCoverColors[url];
   if (pending != null) return Color(pending);
-  if (!MetaCache.isOpen) return null;
-  final v = (MetaCache.box.get('ccolor') as Map?)?[url] as int?;
+  final v = MetaCache.peekCoverColor(url);
   return v == null ? null : Color(v);
 }
 

@@ -228,10 +228,12 @@ class _BgmImportSheetState extends ConsumerState<_BgmImportSheet> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text('从 Bangumi 导入角色', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700)),
-                        if (_importing && _importStatus.isNotEmpty)
-                          Text(_importStatus, style: theme.textTheme.bodySmall?.copyWith(color: scheme.primary))
-                        else if (_enriching && _enrichTotal > 0)
-                          Text('正在补全简体中文名与称呼（$_enrichDone/$_enrichTotal）…', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant)),
+                        AppCollapse(
+                          visible: (_importing && _importStatus.isNotEmpty) || (_enriching && _enrichTotal > 0),
+                          child: _importing && _importStatus.isNotEmpty
+                              ? Text(_importStatus, style: theme.textTheme.bodySmall?.copyWith(color: scheme.primary, fontFeatures: const [FontFeature.tabularFigures()]))
+                              : Text('正在补全简体中文名与称呼（$_enrichDone/$_enrichTotal）…', style: theme.textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant, fontFeatures: const [FontFeature.tabularFigures()])),
+                        ),
                       ],
                     ),
                   ),
@@ -243,30 +245,34 @@ class _BgmImportSheetState extends ConsumerState<_BgmImportSheet> {
                 ],
               ),
             ),
-            if (_loading || _enriching || _importing) const LinearProgressIndicator(minHeight: 2),
+            AppCollapse(visible: _loading || _enriching || _importing, child: const LinearProgressIndicator(minHeight: 2)),
             Expanded(
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator())
-                  : _error != null
-                  ? Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(_error!, textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
-                            const SizedBox(height: 12),
-                            OutlinedButton(onPressed: () => _load(forceRefresh: true), child: const Text('重试')),
-                          ],
+              child: AppCrossfade(
+                fill: true,
+                child: _loading
+                    ? const Center(key: ValueKey('loading'), child: CircularProgressIndicator())
+                    : _error != null
+                    ? Center(
+                        key: const ValueKey('error'),
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(_error!, textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
+                              const SizedBox(height: 12),
+                              OutlinedButton(onPressed: () => _load(forceRefresh: true), child: const Text('重试')),
+                            ],
+                          ),
                         ),
-                      ),
-                    )
-                  : _chars.isEmpty
-                  ? Center(child: Text('Bangumi 暂未收录本书角色', style: TextStyle(color: scheme.onSurfaceVariant)))
-                  : ListView.builder(
-                      controller: scroll,
-                      itemCount: _chars.length,
-                      itemBuilder: (context, i) {
+                      )
+                    : _chars.isEmpty
+                    ? Center(key: const ValueKey('empty'), child: Text('Bangumi 暂未收录本书角色', style: TextStyle(color: scheme.onSurfaceVariant)))
+                    : ListView.builder(
+                        key: const ValueKey('list'),
+                        controller: scroll,
+                        itemCount: _chars.length,
+                        itemBuilder: (context, i) {
                         final c = _chars[i];
                         final imported = _alreadyImported(c);
                         final checked = _selected.contains(c.id);
@@ -322,6 +328,7 @@ class _BgmImportSheetState extends ConsumerState<_BgmImportSheet> {
                         );
                       },
                     ),
+              ),
             ),
             const Divider(height: 1),
             Padding(

@@ -31,6 +31,18 @@ List<double>? combineReaderColorMatrix({required double warm, required bool gray
   return m;
 }
 
+/// 纯文字暖色护眼直算颜色（与 `combineReaderColorMatrix(warm: warm, grayscale: false, invert: false)` 数学等价）：
+/// `R' = R, G' = G * (1 - 0.6 * warm), B' = B * (1 - 1.4 * warm)`。
+Color applyReaderWarmColor(Color c, double warm) {
+  if (warm <= 0) return c;
+  return Color.from(
+    alpha: c.a,
+    red: c.r,
+    green: (c.g * (1 - 0.6 * warm)).clamp(0.0, 1.0),
+    blue: (c.b * (1 - 1.4 * warm)).clamp(0.0, 1.0),
+  );
+}
+
 /// 滚轮 / macOS 触控板惯性防连翻过滤器：
 /// 1. 同一手势内累计位移达到阈值才触发一次翻页，避免微小抖动误触；
 /// 2. 触发后进入单次手势锁：只要事件间隔小于 [gestureGap]、方向不变且未出现明显的新一轮加速峰值，
@@ -112,10 +124,17 @@ Future<Content> _fetchChapterRaw(
   String aid,
   String cid, {
   CancelToken? cancelToken,
+  bool allowChallengeFallback = true,
   VoidCallback? onCloudflare,
 }) async {
   try {
-    final html = await client.getPage(urls.chapterContent(aid, cid), charsetParam: false, referer: urls.catalogue(aid), cancelToken: cancelToken);
+    final html = await client.getPage(
+      urls.chapterContent(aid, cid),
+      charsetParam: false,
+      referer: urls.catalogue(aid),
+      cancelToken: cancelToken,
+      allowChallengeFallback: allowChallengeFallback,
+    );
     final content = Wenku8Parser.chapterContent(html);
     if (!isLockedContent(content) || !unlock.enabled) return content;
     return await unlock.chapter(aid, cid, () => catalogue(cancelToken));
@@ -125,13 +144,37 @@ Future<Content> _fetchChapterRaw(
   }
 }
 
+const _maxKeptChapters = 4;
+const _chapterKeepAliveDuration = Duration(seconds: 90);
+final _keptChapters = <(String, String), ({Object link, VoidCallback close, Timer timer})>{};
+
+/// 收缩章节内存保活队列：[clearAll] 为 true（如内存压力告警）时关闭全部保活章节；
+/// 为 false（如退出阅读器）时仅保留最新 1 章，其余立即关闭释放。
+void trimReaderChapterCache({bool clearAll = false}) {
+  final keep = clearAll ? 0 : 1;
+  final toClose = <({Object link, VoidCallback close, Timer timer})>[];
+  while (_keptChapters.length > keep) {
+    final oldestKey = _keptChapters.keys.first;
+    toClose.add(_keptChapters.remove(oldestKey)!);
+  }
+  for (final entry in toClose) {
+    entry.timer.cancel();
+    entry.close();
+  }
+}
+
 /// 章节：先查离线缓存，再联网（支持切章/退出自动取消在途请求）；套用替换规则、统一缩进后算出高亮位置。
-/// 读过的章节在内存里留 3 分钟（预加载的下一章、来回翻章都不用重新取），之后释放。
+/// 读过的章节在内存里最多同时保活 4 章、每章 90 秒（预加载的下一章、来回翻章都不用重新取），超限或到期自动释放。
 final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, String)>((ref, key) async {
   final cancel = CancelToken();
+  Object? linkToken;
   Timer? timer;
   ref.onDispose(() {
     timer?.cancel();
+    final cur = _keptChapters[key];
+    if (cur != null && identical(cur.link, linkToken)) {
+      _keptChapters.remove(key);
+    }
     if (!cancel.isCancelled) cancel.cancel('chapter disposed');
   });
   final hantOn = ref.watch(readerPrefsProvider.select((p) => p.hant));
@@ -167,9 +210,31 @@ final chapterProvider = FutureProvider.autoDispose.family<Chapter, (String, Stri
       } catch (_) {}
     }
   }
-  // 请求完成后再保活 3 分钟：加载中若用户切章或退出，autoDispose 会立刻触发上面的 CancelToken 取消网络请求
-  final link = ref.keepAlive();
-  timer = Timer(const Duration(minutes: 3), link.close);
+  // 请求完成后加入有界保活队列（上限 4 章、每章 90 秒）：加载中若用户切章或退出，autoDispose 会立刻触发上面的 CancelToken 取消网络请求
+  if (!cancel.isCancelled) {
+    final prev = _keptChapters.remove(key);
+    if (prev != null) {
+      prev.timer.cancel();
+      prev.close();
+    }
+    final link = ref.keepAlive();
+    linkToken = link;
+    final keptTimer = Timer(_chapterKeepAliveDuration, () {
+      final cur = _keptChapters[key];
+      if (cur != null && identical(cur.link, link)) {
+        _keptChapters.remove(key);
+      }
+      link.close();
+    });
+    timer = keptTimer;
+    _keptChapters[key] = (link: link, close: link.close, timer: keptTimer);
+    while (_keptChapters.length > _maxKeptChapters) {
+      final oldestKey = _keptChapters.keys.first;
+      final oldest = _keptChapters.remove(oldestKey)!;
+      oldest.timer.cancel();
+      oldest.close();
+    }
+  }
   // 繁体：先转正文，规则也转成繁体再套，简体、繁体下做的替换和高亮都能匹配上
   final hant = hantOn ? await Hant.load() : null;
   final rules = hant == null ? null : [for (final r in ReplaceRules.allView()) r.copyWith(pattern: hant.convert(r.pattern), replacement: hant.convert(r.replacement))];
@@ -191,7 +256,7 @@ Future<(int, int)?> bookmarkPage(WidgetRef ref, BuildContext context, String aid
   final hit = _bookmarkPages.remove(key);
   final future = hit ?? _bookmarkPage(ref, aid, cid, title, offset, prefs, size, view);
   _bookmarkPages[key] = future;
-  if (_bookmarkPages.length > 100) _bookmarkPages.remove(_bookmarkPages.keys.first);
+  if (_bookmarkPages.length > 32) _bookmarkPages.remove(_bookmarkPages.keys.first);
   return future;
 }
 
@@ -200,10 +265,11 @@ final _bookmarkPages = <Object, Future<(int, int)?>>{};
 /// 同一章、同样版面的分页结果（一章有好几个书签时只排一次版）
 final _bookmarkStarts = <Object, List<int>>{};
 
-/// 内存压力告警时清空书签页码与分页缓存，释放非活跃章节内存。
+/// 内存压力告警时清空书签页码、分页与章节保活缓存，释放非活跃章节内存。
 void clearReaderBookmarkCaches() {
   _bookmarkPages.clear();
   _bookmarkStarts.clear();
+  trimReaderChapterCache(clearAll: true);
 }
 
 Future<(int, int)?> _bookmarkPage(WidgetRef ref, String aid, String cid, String title, int offset, ReaderPrefs prefs, Size size, EdgeInsets view) async {
@@ -218,12 +284,12 @@ Future<(int, int)?> _bookmarkPage(WidgetRef ref, String aid, String cid, String 
   final starts = c.text.trim().isEmpty
       ? const <int>[]
       : (_bookmarkStarts[startsKey] ??= paginate(c.text, style, box, strut: readerStrut(style), firstTop: headingHeight(title, style, box.width), paragraphSpacing: prefs.paragraphSpacing));
-  if (_bookmarkStarts.length > 8) _bookmarkStarts.remove(_bookmarkStarts.keys.first);
+  if (_bookmarkStarts.length > 4) _bookmarkStarts.remove(_bookmarkStarts.keys.first);
   final total = starts.length + c.images.length;
   if (total == 0) return null;
   final page = offset > c.text.length ? math.min(starts.length + offset - c.text.length - 1, total - 1) : (starts.isEmpty ? 0 : pageOfOffset(starts, offset));
   // 双页时卷首多一页封面（和正文一样，取不到封面图就没有这一页）
-  final cover = cols == 2 && volumeCoverOf(ref, aid, cid, ref.read(novelProvider(aid)).value?.detail.imgUrl ?? '') != null ? 1 : 0;
+  final cover = cols == 2 && volumeCoverOf(ref, aid, cid, ref.read(readerNovelProvider(aid)).value?.detail.imgUrl ?? '') != null ? 1 : 0;
   return ((page + cover) ~/ cols + 1, (total + cover + cols - 1) ~/ cols);
 }
 

@@ -263,20 +263,23 @@ class _CharacterEditorSheetState extends ConsumerState<_CharacterEditorSheet> {
                   OutlinedButton(onPressed: _addAlias, child: const Text('添加')),
                 ],
               ),
-              if (_aliases.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 6,
-                  children: [
-                    for (final a in _aliases)
-                      InputChip(
-                        label: Text(a),
-                        onDeleted: () => setState(() => _aliases.remove(a)),
-                      ),
-                  ],
+              AppCollapse(
+                visible: _aliases.isNotEmpty,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      for (final a in _aliases)
+                        InputChip(
+                          label: Text(a),
+                          onDeleted: () => setState(() => _aliases.remove(a)),
+                        ),
+                    ],
+                  ),
                 ),
-              ],
+              ),
               const SizedBox(height: 12),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -285,15 +288,18 @@ class _CharacterEditorSheetState extends ConsumerState<_CharacterEditorSheet> {
                 value: _highlight,
                 onChanged: (v) => setState(() => _highlight = v),
               ),
-              if (_highlight) ...[
-                const SizedBox(height: 6),
-                ColorPickerField(
-                  color: _color,
-                  highlight: true,
-                  sample: _name.text.trim().isEmpty ? '人物名' : _name.text.trim(),
-                  onChanged: (c) => setState(() => _color = c),
+              AppCollapse(
+                visible: _highlight,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: ColorPickerField(
+                    color: _color,
+                    highlight: true,
+                    sample: _name.text.trim().isEmpty ? '人物名' : _name.text.trim(),
+                    onChanged: (c) => setState(() => _color = c),
+                  ),
                 ),
-              ],
+              ),
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -401,34 +407,39 @@ class _BookIllustrationPickerPageState extends ConsumerState<_BookIllustrationPi
       appBar: AppBar(title: const Text('从本书插图选择')),
       body: FutureBuilder<List<String>>(
         future: _images,
-        builder: (context, snap) {
-          if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-          final urls = snap.data!;
-          if (urls.isEmpty) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Text('暂无已缓存的本书插图。\n阅读过插图章节或缓存本书后即可在此选择。', textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
-              ),
-            );
-          }
-          return GridView.builder(
-            padding: const EdgeInsets.all(16),
-            gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(maxCrossAxisExtent: 140, mainAxisSpacing: 10, crossAxisSpacing: 10, childAspectRatio: 0.78),
-            itemCount: urls.length,
-            itemBuilder: (context, i) => InkWell(
-              borderRadius: BorderRadius.circular(10),
-              onTap: () => Navigator.pop(context, urls[i]),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: ColoredBox(
-                  color: scheme.surfaceContainer,
-                  child: NetImage(urls[i], fit: BoxFit.cover),
+        builder: (context, snap) => AppCrossfade(
+          fill: true,
+          child: !snap.hasData
+              ? const Center(key: ValueKey('loading'), child: CircularProgressIndicator())
+              : snap.data!.isEmpty
+              ? Center(
+                  key: const ValueKey('empty'),
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text('暂无已缓存的本书插图。\n阅读过插图章节或缓存本书后即可在此选择。', textAlign: TextAlign.center, style: TextStyle(color: scheme.onSurfaceVariant)),
+                  ),
+                )
+              : GridView.builder(
+                  key: const ValueKey('grid'),
+                  padding: const EdgeInsets.all(16),
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(maxCrossAxisExtent: 140, mainAxisSpacing: 10, crossAxisSpacing: 10, childAspectRatio: 0.78),
+                  itemCount: snap.data!.length,
+                  itemBuilder: (context, i) => AppPressScale(
+                    scale: 0.96,
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: () => Navigator.pop(context, snap.data![i]),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: ColoredBox(
+                          color: scheme.surfaceContainer,
+                          child: NetImage(snap.data![i], fit: BoxFit.cover),
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          );
-        },
+        ),
       ),
     );
   }

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../cache.dart';
 import '../export_book.dart';
 import '../library.dart' show LibraryStore;
+import '../motion.dart';
 import '../routes.dart';
 import '../widgets.dart';
 import 'novel_page.dart';
@@ -64,9 +65,9 @@ class _CacheBookPageState extends ConsumerState<CacheBookPage> {
                       ],
                     ),
                     const SizedBox(height: 12),
-                    LinearProgressIndicator(value: all.isEmpty ? 0 : cached / all.length, minHeight: 4, borderRadius: BorderRadius.circular(2)),
+                    AppProgressBar(value: all.isEmpty ? 0 : cached / all.length, minHeight: 4, borderRadius: 2),
                     const SizedBox(height: 6),
-                    Text('已缓存 $cached/${all.length} 章 · ${ChapterCache.sizeLabel(widget.aid)}${running ? ' · 下载中' : ''}${task?.error != null ? ' · ${task!.error}' : ''}'),
+                    Text('已缓存 $cached/${all.length} 章 · ${ChapterCache.sizeLabel(widget.aid)}${running ? ' · 下载中' : ''}${task?.error != null ? ' · ${task!.error}' : ''}', style: const TextStyle(fontFeatures: [FontFeature.tabularFigures()])),
                   ],
                 ),
               ),
