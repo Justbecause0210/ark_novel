@@ -101,10 +101,16 @@ class _BookSearchSheet extends ConsumerStatefulWidget {
 }
 
 class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
+  static const _progressThrottle = Duration(milliseconds: 110);
+
   late final TextEditingController _controller = TextEditingController(text: widget.initialQuery);
   late BookSearchScope _scope;
   late bool _isRegex = widget.initialRegex;
   Timer? _debounce;
+  Timer? _progressTimer;
+  DateTime? _lastProgressFlushAt;
+  BookSearchProgress? _pendingProgress;
+  final List<BookSearchHit> _pendingHits = [];
   BookSearchCancelToken? _cancel;
   bool _searching = false;
   int _scanned = 0;
@@ -112,8 +118,11 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
   int _totalHits = 0;
   bool _truncated = false;
   String? _error;
-  List<BookSearchHit> _hits = const [];
-  List<_SearchRow> _rows = const [];
+  final List<BookSearchHit> _hits = [];
+  final List<_SearchRow> _rows = [];
+  String? _lastGroupCid;
+  int _lastGroupHeaderIndex = -1;
+  int _lastGroupCount = 0;
 
   bool get _hasCurrent => widget.currentCid != null && widget.currentCid!.isNotEmpty;
 
@@ -134,6 +143,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
   @override
   void dispose() {
     _debounce?.cancel();
+    _clearPendingProgress();
     _cancel?.cancel();
     _controller.dispose();
     super.dispose();
@@ -146,26 +156,65 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
     });
   }
 
-  List<_SearchRow> _buildRows(List<BookSearchHit> hits) {
-    final rows = <_SearchRow>[];
-    var i = 0;
-    while (i < hits.length) {
-      final first = hits[i];
-      var j = i + 1;
-      while (j < hits.length && hits[j].cid == first.cid) {
-        j++;
+  void _clearPendingProgress() {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    _pendingProgress = null;
+    _pendingHits.clear();
+    _lastProgressFlushAt = null;
+  }
+
+  void _resetResults() {
+    _hits.clear();
+    _rows.clear();
+    _lastGroupCid = null;
+    _lastGroupHeaderIndex = -1;
+    _lastGroupCount = 0;
+  }
+
+  /// 按章节分组 O(Δ) 增量追加新命中行，不重扫历史命中与历史分组。
+  void _appendHits(List<BookSearchHit> newHits) {
+    if (newHits.isEmpty) return;
+    for (final hit in newHits) {
+      _hits.add(hit);
+      if (_lastGroupCid == hit.cid && _lastGroupHeaderIndex >= 0) {
+        _lastGroupCount++;
+        final prev = _rows[_lastGroupHeaderIndex] as _GroupHeaderRow;
+        _rows[_lastGroupHeaderIndex] = _GroupHeaderRow(volTitle: prev.volTitle, chapterTitle: prev.chapterTitle, count: _lastGroupCount);
+      } else {
+        _lastGroupCid = hit.cid;
+        _lastGroupHeaderIndex = _rows.length;
+        _lastGroupCount = 1;
+        _rows.add(_GroupHeaderRow(volTitle: hit.volTitle, chapterTitle: hit.chapterTitle, count: 1));
       }
-      rows.add(_GroupHeaderRow(volTitle: first.volTitle, chapterTitle: first.chapterTitle, count: j - i));
-      for (var k = i; k < j; k++) {
-        rows.add(_HitRow(hits[k]));
-      }
-      i = j;
+      _rows.add(_HitRow(hit));
     }
-    return rows;
+  }
+
+  void _flushPendingProgress() {
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    final p = _pendingProgress;
+    if (p == null && _pendingHits.isEmpty) return;
+    _pendingProgress = null;
+    final batch = _pendingHits.isEmpty ? const <BookSearchHit>[] : List<BookSearchHit>.of(_pendingHits);
+    _pendingHits.clear();
+    _lastProgressFlushAt = DateTime.now();
+    if (!mounted) return;
+    setState(() {
+      if (p != null) {
+        _scanned = p.scannedChapters;
+        _total = p.totalChapters;
+        _totalHits = p.totalHits;
+        _truncated = p.truncated;
+      }
+      _appendHits(batch);
+    });
   }
 
   Future<void> _runSearch() async {
     _debounce?.cancel();
+    _clearPendingProgress();
     _cancel?.cancel();
     final q = _controller.text.trim();
     if (q.isEmpty) {
@@ -176,8 +225,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
         _totalHits = 0;
         _truncated = false;
         _error = null;
-        _hits = const [];
-        _rows = const [];
+        _resetResults();
       });
       return;
     }
@@ -191,8 +239,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
       _total = 0;
       _totalHits = 0;
       _truncated = false;
-      _hits = const [];
-      _rows = const [];
+      _resetResults();
     });
 
     Hant? hant;
@@ -215,18 +262,28 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
       cancelToken: token,
       onProgress: (p) {
         if (!mounted || token.isCancelled) return;
-        setState(() {
-          _scanned = p.scannedChapters;
-          _total = p.totalChapters;
-          _totalHits = p.totalHits;
-          _truncated = p.truncated;
-          _hits = p.hits;
-          _rows = _buildRows(p.hits);
-        });
+        _pendingProgress = p;
+        if (p.newHits.isNotEmpty) _pendingHits.addAll(p.newHits);
+        final now = DateTime.now();
+        final last = _lastProgressFlushAt;
+        if (last == null || now.difference(last) >= _progressThrottle) {
+          _flushPendingProgress();
+        } else if (_progressTimer == null) {
+          final remain = _progressThrottle - now.difference(last);
+          _progressTimer = Timer(remain, () {
+            if (!mounted || token.isCancelled) return;
+            _flushPendingProgress();
+          });
+        }
       },
     );
 
     if (!mounted || token.isCancelled) return;
+    _progressTimer?.cancel();
+    _progressTimer = null;
+    _pendingProgress = null;
+    final leftover = _pendingHits.isEmpty ? const <BookSearchHit>[] : List<BookSearchHit>.of(_pendingHits);
+    _pendingHits.clear();
     setState(() {
       _searching = false;
       _scanned = result.scannedChapters;
@@ -234,8 +291,10 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
       _totalHits = result.totalHits;
       _truncated = result.truncated;
       _error = result.error;
-      _hits = result.hits;
-      _rows = _buildRows(result.hits);
+      if (leftover.isNotEmpty) _appendHits(leftover);
+      if (_hits.length < result.hits.length) {
+        _appendHits(result.hits.sublist(_hits.length));
+      }
     });
   }
 
@@ -376,6 +435,7 @@ class _BookSearchSheetState extends ConsumerState<_BookSearchSheet> {
                   child: TextButton(
                     onPressed: () {
                       _cancel?.cancel();
+                      _flushPendingProgress();
                       setState(() => _searching = false);
                     },
                     child: const Text('停止'),
