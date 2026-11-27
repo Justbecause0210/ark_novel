@@ -118,6 +118,8 @@ class Wenku8Client {
     if (!gate.isCompleted) gate.complete();
   }
 
+  static final _cookieEscapeRe = RegExp(r'[ ",;\\]');
+
   /// 把 `a=1;b=2` 形式的 cookie 字符串解析成 [Cookie] 列表，转义 `dart:io` 不接受的字符。
   static List<Cookie> parseCookieString(String cookie) {
     final cookies = <Cookie>[];
@@ -125,7 +127,7 @@ class Wenku8Client {
       final kv = e.split('=');
       try {
         // dart:io 的 Cookie 不允许值里有空格、引号、逗号、分号、反斜杠（例如阅读记录 cookie 里的逗号），转义后再放进去
-        cookies.add(Cookie(kv[0].trim(), kv.sublist(1).join('=').replaceAllMapped(RegExp(r'[ ",;\\]'), (m) => '%${m[0]!.codeUnitAt(0).toRadixString(16).toUpperCase()}')));
+        cookies.add(Cookie(kv[0].trim(), kv.sublist(1).join('=').replaceAllMapped(_cookieEscapeRe, (m) => '%${m[0]!.codeUnitAt(0).toRadixString(16).toUpperCase()}')));
       } on FormatException {
         // 名字里有 dart:io 不认的字符：只跳过这一个，别让整批都放不进去
       }
@@ -732,9 +734,11 @@ class _ThrottleInterceptor extends Interceptor {
     return diff > const Duration(seconds: 120) ? const Duration(seconds: 120) : diff;
   }
 
+  static final _httpDateRe = RegExp(r'^[A-Za-z]{3},\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+GMT$');
+
   static DateTime? _parseHttpDate(String s) {
     // RFC 7231 IMF-fixdate: "Sun, 06 Nov 1994 08:49:37 GMT"
-    final m = RegExp(r'^[A-Za-z]{3},\s+(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\s+GMT$').firstMatch(s);
+    final m = _httpDateRe.firstMatch(s);
     if (m == null) return null;
     const months = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12};
     final month = months[m[2]!.toLowerCase()];

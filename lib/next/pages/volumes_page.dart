@@ -57,6 +57,18 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
   Size? _carouselCoverSize;
   final _precachedVols = <String>{};
   int _lastPrecachedCur = -1;
+  List<CatVolume>? _cachedCatalogue;
+  Map<String, String> _cachedChapterTitles = const {};
+
+  Map<String, String> _chapterTitlesOf(List<CatVolume>? catalogue) {
+    if (catalogue == null || catalogue.isEmpty) return const {};
+    if (identical(_cachedCatalogue, catalogue)) return _cachedChapterTitles;
+    _cachedCatalogue = catalogue;
+    return _cachedChapterTitles = {
+      for (final cv in catalogue)
+        for (final c in cv.chapters) c.cid: c.title,
+    };
+  }
 
   void _precacheAround(int center, List<Vol> vols, String Function(Vol) coverOf) {
     final size = _carouselCoverSize;
@@ -66,7 +78,9 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
       for (final idx in [center + d, center - d]) {
         if (idx < 0 || idx >= vols.length) continue;
         final url = coverOf(vols[idx]);
-        if (url.isEmpty || !_precachedVols.add(url)) continue;
+        if (url.isEmpty || _precachedVols.contains(url)) continue;
+        if (_precachedVols.length >= 128) _precachedVols.remove(_precachedVols.first);
+        _precachedVols.add(url);
         NetImage.precache(context, url, size).ignore();
       }
     }
@@ -350,22 +364,6 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
           _open = false;
         }),
       );
-      final volList = _VolList(
-        aid: aid,
-        vols: vols,
-        cur: cur,
-        wide: wide,
-        coverOf: coverOf,
-        onClose: () => setState(() => _list = false),
-        onPick: (i) {
-          setState(() => _list = false);
-          if (AppMotion.reduce(context)) {
-            _pc.jumpToPage(i);
-          } else {
-            _pc.animateToPage(i, duration: Duration(milliseconds: math.min(250 + 40 * (i - cur).abs(), 700)), curve: AppMotion.curve);
-          }
-        },
-      );
       final scrubber = vols.length > 6
           ? ExcludeFocus(
               child: SliderTheme(
@@ -402,30 +400,46 @@ class _VolumesPageState extends ConsumerState<VolumesPage> with SingleTickerProv
           child: _Summary(aid: aid, vol: v, index: cur, count: vols.length, direction: _dir),
         ),
       );
-      final details = _Details(
-        key: ValueKey(v.title),
-        aid: aid,
-        vol: v,
-        index: cur,
-        wide: wide,
-        book: title,
-        bg: base,
-        onClose: () => setState(() => _open = false),
-        onCache: (cids) {
-          final chs = [for (final cv in novel?.catalogue ?? const <CatVolume>[]) ...cv.chapters];
-          final picked = [for (final c in chs) if (cids.contains(c.cid)) c];
-          if (picked.isEmpty || novel == null) return;
-          ref.read(downloadProvider.notifier).start(aid, novel.detail.title, picked, total: chs.length, img: novel.detail.imgUrl, firstCid: chs.first.cid);
-          ScaffoldMessenger.of(context)
-            ..hideCurrentSnackBar()
-            ..showSnackBar(SnackBar(content: Text(picked.length == 1 ? '已开始缓存《${picked.first.title}》' : '已开始缓存 ${picked.length} 章')));
-        },
-        chapterTitles: {
-          for (final cv in novel?.catalogue ?? const <CatVolume>[])
-            for (final c in cv.chapters) c.cid: c.title,
-        },
-      );
-      final Widget? panel = _open ? details : (_list ? volList : null);
+      // 收起态不再提前构建隐藏的 _Details 和 _VolList，仅在真正展开对应面板时按需构建
+      final Widget? panel = _open
+          ? _Details(
+              key: ValueKey(v.title),
+              aid: aid,
+              vol: v,
+              index: cur,
+              wide: wide,
+              book: title,
+              bg: base,
+              onClose: () => setState(() => _open = false),
+              onCache: (cids) {
+                final chs = [for (final cv in novel?.catalogue ?? const <CatVolume>[]) ...cv.chapters];
+                final picked = [for (final c in chs) if (cids.contains(c.cid)) c];
+                if (picked.isEmpty || novel == null) return;
+                ref.read(downloadProvider.notifier).start(aid, novel.detail.title, picked, total: chs.length, img: novel.detail.imgUrl, firstCid: chs.first.cid);
+                ScaffoldMessenger.of(context)
+                  ..hideCurrentSnackBar()
+                  ..showSnackBar(SnackBar(content: Text(picked.length == 1 ? '已开始缓存《${picked.first.title}》' : '已开始缓存 ${picked.length} 章')));
+              },
+              chapterTitles: _chapterTitlesOf(novel?.catalogue),
+            )
+          : (_list
+                ? _VolList(
+                    aid: aid,
+                    vols: vols,
+                    cur: cur,
+                    wide: wide,
+                    coverOf: coverOf,
+                    onClose: () => setState(() => _list = false),
+                    onPick: (i) {
+                      setState(() => _list = false);
+                      if (AppMotion.reduce(context)) {
+                        _pc.jumpToPage(i);
+                      } else {
+                        _pc.animateToPage(i, duration: Duration(milliseconds: math.min(250 + 40 * (i - cur).abs(), 700)), curve: AppMotion.curve);
+                      }
+                    },
+                  )
+                : null);
       // 竖屏：封面区上滑展开底部详情和目录，下滑收起；
       // 横屏（宽屏）：详情在右侧并排，封面区上下滑 / 滚轮直接切换上一卷、下一卷
       Widget swipe(Widget child) => Listener(

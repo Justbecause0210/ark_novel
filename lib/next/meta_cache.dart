@@ -9,6 +9,10 @@ class MetaCache {
 
   static const boxName = 'meta_cache';
   static const int _hotLimit = 12;
+  static const _migratedKey = '__migrated_from_session__';
+
+  static bool _compactionStrategy(int entries, int deletedEntries) =>
+      deletedEntries >= 50 || (entries > 0 && deletedEntries > 20 && deletedEntries / entries > 0.2);
 
   static BoxBase? _boundBox;
   static int _gen = 0;
@@ -80,7 +84,7 @@ class MetaCache {
     if (cache == null) {
       final reg = _tryRegularBox();
       if (reg != null) await reg.close();
-      cache = await Hive.openLazyBox(boxName);
+      cache = await Hive.openLazyBox(boxName, compactionStrategy: _compactionStrategy);
     }
     _syncLifecycle();
     await migrateFromSession();
@@ -90,8 +94,8 @@ class MetaCache {
   }
 
   /// 将 `session` 中残留的 `bgm:*`、`bgm_*`、`ccolor` 迁入 `meta_cache` 并从 `session` 删除。
-  /// 旧版备份恢复后重启也会自动走此逻辑，无需特殊迁移脚本。
-  static Future<int> migrateFromSession() async {
+  /// 完成后在 `meta_cache` 写入迁移完成标记（不污染 `session` 键空间），后续冷启动 O(1) 跳过全表扫 `session.keys`。
+  static Future<int> migrateFromSession({bool force = false}) async {
     if (!Hive.isBoxOpen(boxName) || !Hive.isBoxOpen('session')) return 0;
     _syncLifecycle();
     final session = Hive.box('session');
@@ -99,8 +103,8 @@ class MetaCache {
     final reg = lazy == null ? _tryRegularBox() : null;
     final BoxBase? cache = lazy ?? reg;
     if (cache == null) return 0;
+    if (!force && cache.containsKey(_migratedKey)) return 0;
     final keys = session.keys.whereType<String>().where(isCacheKey).toList();
-    if (keys.isEmpty) return 0;
     for (final k in keys) {
       if (!cache.containsKey(k)) {
         final v = session.get(k);
@@ -114,8 +118,89 @@ class MetaCache {
         }
       }
     }
-    await session.deleteAll(keys);
+    if (keys.isNotEmpty) await session.deleteAll(keys);
+    if (lazy != null) {
+      await lazy.put(_migratedKey, true);
+    } else {
+      await reg!.put(_migratedKey, true);
+    }
     return keys.length;
+  }
+
+  /// 清理 `meta_cache` 中超期且不在保留集合中的 `bgm_info:` / `bgm_chars:` 条目并整理磁盘文件。
+  static Future<int> pruneStale({Set<String> keepAids = const {}, Duration maxAge = const Duration(days: 90), int? nowMs}) async {
+    if (!Hive.isBoxOpen(boxName)) return 0;
+    _syncLifecycle();
+    final lazy = _tryLazyBox();
+    final reg = lazy == null ? _tryRegularBox() : null;
+    final BoxBase? cache = lazy ?? reg;
+    if (cache == null) return 0;
+    final cutoff = (nowMs ?? DateTime.now().millisecondsSinceEpoch) - maxAge.inMilliseconds;
+    final staleKeys = <String>[];
+    for (final k in cache.keys.whereType<String>().toList()) {
+      final String aid;
+      if (k.startsWith('bgm_info:')) {
+        aid = k.substring(9);
+      } else if (k.startsWith('bgm_chars:')) {
+        aid = k.substring(10);
+      } else {
+        continue;
+      }
+      if (keepAids.contains(aid)) continue;
+      final v = lazy != null ? await lazy.get(k) : reg!.get(k);
+      final t = v is Map ? ((v['t'] as num?)?.toInt() ?? 0) : 0;
+      if (t <= 0 || t < cutoff) staleKeys.add(k);
+    }
+    if (staleKeys.isEmpty) return 0;
+    for (final k in staleKeys) {
+      _hotMaps.remove(k);
+    }
+    if (lazy != null) {
+      await lazy.deleteAll(staleKeys);
+      await lazy.compact();
+    } else {
+      await reg!.deleteAll(staleKeys);
+      await reg.compact();
+    }
+    return staleKeys.length;
+  }
+
+  /// 仅从 `meta_cache` 读取内部辅助 Map（如 WebDAV ETag 缓存），绝不回退或写入 `session` Box。
+  static Future<Map?> getMetaOnlyMap(String key) async {
+    if (!Hive.isBoxOpen(boxName)) return null;
+    _syncLifecycle();
+    final lazy = _tryLazyBox();
+    if (lazy != null) {
+      final v = await lazy.get(key);
+      return v is Map ? v : null;
+    }
+    final reg = _tryRegularBox();
+    final v = reg?.get(key);
+    return v is Map ? v : null;
+  }
+
+  /// 仅向 `meta_cache` 写入内部辅助 Map（如 WebDAV ETag 缓存），绝不回退写入 `session` Box。
+  static Future<void> putMetaOnlyMap(String key, Map value) async {
+    if (!Hive.isBoxOpen(boxName)) return;
+    _syncLifecycle();
+    final lazy = _tryLazyBox();
+    if (lazy != null) {
+      await lazy.put(key, value);
+    } else {
+      await _tryRegularBox()?.put(key, value);
+    }
+  }
+
+  /// 仅从 `meta_cache` 删除指定内部辅助键。
+  static Future<void> deleteMetaOnly(String key) async {
+    if (!Hive.isBoxOpen(boxName)) return;
+    _syncLifecycle();
+    final lazy = _tryLazyBox();
+    if (lazy != null) {
+      await lazy.delete(key);
+    } else {
+      await _tryRegularBox()?.delete(key);
+    }
   }
 
   /// 同步读取已缓存的封面主色 ARGB 值。

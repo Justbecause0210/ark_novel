@@ -82,10 +82,12 @@ void _installErrorHooks() {
 Future<void> _bootstrap() async {
   final SessionStore store;
   try {
-    store = await SessionStore.open();
-    // 字体在后台加载，不挡着第一帧（阅读页用自选字体时会等它，见 FontStore.ready）
+    // SessionStore.open(openMetaCache: false) 严格在所有 Hive.openBox 之前执行 Backup.apply，并打开核心 session Box；
+    // 随后并发初始化可再生缓存与离线章节索引，缩短冷启动磁盘 I/O 等待。
+    store = await SessionStore.open(openMetaCache: false);
+    // 字体在后台按需加载（仅 r.font == 2 时读盘，见 FontStore.loadSaved）
     FontStore.loadSaved().ignore();
-    await ChapterCache.open();
+    await Future.wait<Object?>([MetaCache.open(), ChapterCache.open()]);
   } catch (e, st) {
     // 本地数据库打不开（文件损坏、磁盘满）：以前只会停在启动图，现在把原因显示出来并提供安全自愈
     debugPrint('启动失败：$e\n$st');

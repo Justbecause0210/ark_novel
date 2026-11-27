@@ -115,7 +115,18 @@ class _LoginPageState extends ConsumerState<LoginPage> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Align(alignment: Alignment.centerLeft, child: ClipRRect(borderRadius: BorderRadius.circular(18), child: Image.asset('assets/images/logo.png', height: 72))),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: Builder(
+                        builder: (context) {
+                          final px = (72 * MediaQuery.devicePixelRatioOf(context)).round();
+                          return Image.asset('assets/images/logo.png', height: 72, cacheWidth: px, cacheHeight: px);
+                        },
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 28),
                   Text('登录', style: theme.textTheme.displaySmall),
                   const SizedBox(height: 10),

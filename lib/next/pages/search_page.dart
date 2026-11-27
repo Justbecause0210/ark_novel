@@ -153,7 +153,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                               emptyTitle: '没有找到相关小说',
                               emptyDetail: '换个关键词试试，或切换上方的「书名 / 作者」',
                               sourceHtml: () => lastFailedHtml,
-                              fetch: (page) => api.search(_keyword!, byAuthor: _byAuthor, page: page),
+                              fetchWithCancel: (page, cancelToken) => api.search(_keyword!, byAuthor: _byAuthor, page: page, cancelToken: cancelToken),
                             ),
                           ),
                   ),

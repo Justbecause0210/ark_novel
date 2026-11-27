@@ -59,14 +59,12 @@ class UpdateStore {
 
   static Map get _known => (_box.get('updates:known') as Map?) ?? {};
 
-  static Future<void> save(Map<String, int> known, List<Map> feed, {required Map<String, int> at}) async {
-    await _box.put('updates:known', known);
-    await _box.put('updates', feed.take(300).toList());
-    await _box.put('updates:check', DateTime.now().millisecondsSinceEpoch);
-    for (final e in at.entries) {
-      await _box.put('updates:at:${e.key}', e.value);
-    }
-  }
+  static Future<void> save(Map<String, int> known, List<Map> feed, {required Map<String, int> at}) => _box.putAll({
+    'updates:known': known,
+    'updates': feed.take(300).toList(),
+    'updates:check': DateTime.now().millisecondsSinceEpoch,
+    for (final e in at.entries) 'updates:at:${e.key}': e.value,
+  });
 
   /// 只存基准，不算检查完成。
   static Future<void> saveBaseline(Map<String, int> known) => _box.put('updates:known', known);

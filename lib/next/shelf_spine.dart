@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart' show PointerDeviceKind, PointerHoverEvent, PointerScrollEvent, PointerScrollInertiaCancelEvent, PointerSignalEvent;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/scheduler.dart' show Ticker;
@@ -307,7 +308,9 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
       for (final idx in d == 0 ? [center] : [center + d, center - d]) {
         if (idx < 0 || idx >= widget.books.length) continue;
         final url = widget.coverOf(widget.books[idx]);
-        if (url.isEmpty || !_precached.add(url)) continue;
+        if (url.isEmpty || _precached.contains(url)) continue;
+        if (_precached.length >= 128) _precached.remove(_precached.first);
+        _precached.add(url);
         NetImage.precache(context, url, size).ignore();
       }
     }
@@ -532,6 +535,39 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
     final cur = _cur.clamp(0, books.length - 1);
     final curBook = books[cur];
     final persp = 1 / (_h * 3.8);
+    // 在 AnimatedBuilder 外预计算未读数、卷数、角标与静态书脊体，避免滑动/悬停每帧重复计算与重建书脊印刷体
+    final approxSpan = ((stageW / 2 + _d * 1.1) / math.max(_ws + _gap, 1.0)).ceil() + 3;
+    final preLo = math.max(0, cur - approxSpan);
+    final preHi = math.min(books.length - 1, cur + approxSpan);
+    final unreadCounts = <String, int>{};
+    final volumeCounts = <String, int>{};
+    final badges = <String, Widget?>{};
+    final spineBodies = <String, Widget>{};
+    for (var i = preLo; i <= preHi; i++) {
+      final b = books[i];
+      final unread = widget.unreadOf?.call(b) ?? 0;
+      final volCount = widget.volumeCountOf?.call(b) ?? 0;
+      unreadCounts[b.aid] = unread;
+      volumeCounts[b.aid] = volCount;
+      spineBodies[b.aid] = _StaticSpineBody(
+        book: b,
+        coverOf: widget.coverOf,
+        unreadCount: unread,
+        volumeCount: volCount,
+        spineWidth: _ws,
+      );
+    }
+    Widget spineBodyFor(LibBook b) => spineBodies.putIfAbsent(
+      b.aid,
+      () => _StaticSpineBody(
+        book: b,
+        coverOf: widget.coverOf,
+        unreadCount: unreadCounts.putIfAbsent(b.aid, () => widget.unreadOf?.call(b) ?? 0),
+        volumeCount: volumeCounts.putIfAbsent(b.aid, () => widget.volumeCountOf?.call(b) ?? 0),
+        spineWidth: _ws,
+      ),
+    );
+    Widget? badgeFor(LibBook b) => badges.containsKey(b.aid) ? badges[b.aid] : (badges[b.aid] = widget.badgeOf(b));
     // 舞台对外只暴露一个稳定的 Semantics 节点，屏蔽内部窄页 PageView 高频增删/重挂，规避 macOS AXNode 闪退
     return Semantics(
       button: true,
@@ -566,7 +602,7 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
                         return Stack(
                           alignment: Alignment.center,
                           clipBehavior: Clip.none,
-                          children: [for (final i in shown) _cuboidBook(i, i - p, persp)],
+                          children: [for (final i in shown) _cuboidBook(i, i - p, persp, spineBodyFor, badgeFor)],
                         );
                       },
                     ),
@@ -599,7 +635,13 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
 
   /// 一本书的双面 3D 盒子：书脊面在正面（z = -d/2），封面在右侧面（x = +ws/2 绕 Y 轴转 -90°）。
   /// 整盒绕 Y 轴旋转 `0 -> +90°` 时，书脊平滑隐去，封面沿同一条折脊边自然转到正面面向读者。
-  Widget _cuboidBook(int i, double r, double persp) {
+  Widget _cuboidBook(
+    int i,
+    double r,
+    double persp,
+    Widget Function(LibBook) spineBodyFor,
+    Widget? Function(LibBook) badgeFor,
+  ) {
     final book = widget.books[i];
     final lift = _reduceMotion ? 0.0 : (_lifts[i] ?? 0.0);
     final pose = ShelfSpineLayout.pose(r, _h, _ws, _d, _gap, lift: lift, tiltY: _tiltY, reduceMotion: _reduceMotion);
@@ -618,7 +660,7 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
     // 避开接近 0°/90° 的极窄亚像素边缘，消除 3D 翻出首帧的细黑条闪烁
     final showSpine = math.cos(pose.rotY) > 0.035;
     final showCover = math.sin(pose.rotY) > 0.04;
-    final badge = pose.o > 0.65 ? widget.badgeOf(book) : null;
+    final badge = pose.o > 0.65 ? badgeFor(book) : null;
 
     Widget? spineFace;
     if (showSpine) {
@@ -630,11 +672,7 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
           width: _ws,
           height: _h,
           child: _BookSpine(
-            book: book,
-            coverOf: widget.coverOf,
-            unreadCount: widget.unreadOf?.call(book) ?? 0,
-            volumeCount: widget.volumeCountOf?.call(book) ?? 0,
-            spineWidth: _ws,
+            body: spineBodyFor(book),
             shade: pose.spineShade,
             selected: selected,
             lifted: lift > 0.05,
@@ -810,7 +848,7 @@ class _ShelfSpineViewState extends State<ShelfSpineView> with SingleTickerProvid
   }
 }
 
-/// 书脊模式专用的正面封面：不透明暖纸背板 + 仅在抽出后浮现的柔和投影 + 锐利 3px 实体书角，杜绝 3D 翻转途中闪黑影。
+/// 书脊模式专用的正面封面：不透明暖纸背板 + 独立 RepaintBoundary 模糊阴影与静态封面 + 外层动态压暗遮罩，杜绝 3D 翻转途中每帧重绘模糊与闪黑影。
 class _SpineCoverFace extends StatelessWidget {
   const _SpineCoverFace({
     required this.aid,
@@ -832,61 +870,75 @@ class _SpineCoverFace extends StatelessWidget {
   Widget build(BuildContext context) {
     const radius = BorderRadius.all(Radius.circular(3));
     final dark = Theme.of(context).brightness == Brightness.dark;
+    final primary = Theme.of(context).colorScheme.primary;
     final backing = _spinePalette(aid, url.isEmpty ? null : savedCoverColor(url), dark).bg;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        borderRadius: radius,
-        boxShadow: shadowAlpha > 0.01
-            ? [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: shadowAlpha),
-                  blurRadius: 28,
-                  spreadRadius: -6,
-                  offset: const Offset(0, 18),
-                ),
-              ]
-            : null,
-      ),
-      child: ClipRRect(
-        borderRadius: radius,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            // 不透明背板放在 ClipRRect 内且 CoverImage 关掉内部圆角与浅白底衬，彻底消除四角漏黑点与裁剪底边漏白
-            ColoredBox(color: backing),
-            CoverImage(url, decodeSize: decodeSize, borderRadius: 0, backgroundColor: backing),
-            // 封面左侧极淡的书脊装订压痕，和转过去的书脊自然衔接
-            Positioned(
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: 8,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [Colors.black.withValues(alpha: 0.22), Colors.white.withValues(alpha: 0.08), Colors.transparent],
-                    stops: const [0.0, 0.35, 1.0],
-                  ),
-                ),
-              ),
-            ),
-            if (shade > 0.005) ColoredBox(color: Colors.black.withValues(alpha: shade)),
-            IgnorePointer(
-              child: AnimatedOpacity(
-                opacity: selected ? 1.0 : 0.0,
-                duration: AppMotion.dur(context, AppMotion.fast),
-                curve: AppMotion.curve,
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    borderRadius: radius,
-                    border: Border.all(color: Theme.of(context).colorScheme.primary, width: 3),
-                  ),
-                ),
-              ),
+    final baseShadow = dark ? 0.52 : 0.34;
+    final shadowOpacity = (shadowAlpha / baseShadow).clamp(0.0, 1.0);
+    final shadowBox = RepaintBoundary(
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: radius,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: baseShadow),
+              blurRadius: 28,
+              spreadRadius: -6,
+              offset: const Offset(0, 18),
             ),
           ],
         ),
       ),
+    );
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (shadowOpacity >= 0.995)
+          shadowBox
+        else if (shadowOpacity > 0.01)
+          Opacity(opacity: shadowOpacity, child: shadowBox),
+        RepaintBoundary(
+          child: ClipRRect(
+            borderRadius: radius,
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                // 不透明背板放在 ClipRRect 内且 CoverImage 关掉内部圆角与浅白底衬，彻底消除四角漏黑点与裁剪底边漏白
+                ColoredBox(color: backing),
+                CoverImage(url, decodeSize: decodeSize, borderRadius: 0, backgroundColor: backing),
+                // 封面左侧极淡的书脊装订压痕，和转过去的书脊自然衔接
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: 8,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [Colors.black.withValues(alpha: 0.22), Colors.white.withValues(alpha: 0.08), Colors.transparent],
+                        stops: const [0.0, 0.35, 1.0],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (shade > 0.005)
+          DecoratedBox(
+            decoration: BoxDecoration(borderRadius: radius, color: Colors.black.withValues(alpha: shade)),
+          ),
+        IgnorePointer(
+          child: AnimatedContainer(
+            duration: AppMotion.dur(context, AppMotion.fast),
+            curve: AppMotion.curve,
+            decoration: BoxDecoration(
+              borderRadius: radius,
+              border: Border.all(color: selected ? primary : primary.withValues(alpha: 0), width: 3),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -925,22 +977,18 @@ const _bunkoRichColors = [
   return (bg: richBg, ink: warmInk, accent: warmInk, isPaper: false);
 }
 
-/// 程序化实体印刷书脊：
+/// 静态书脊印刷体（独立 RepaintBoundary，不接收每帧变化的 `shade`/`lifted`/`standingFactor`）：
 /// 1. 深彩油墨脊与暖米纸脊交错；
 /// 2. 顶部封面满宽出血插图 + 底部柔化渐变自然融入书脊底色；
-/// 3. 中部大字号高对比竖排衬线/文楷书名；
+/// 3. 中部单层 CustomPaint 竖排衬线/文楷书名；
 /// 4. 底部 1px 印刷方框标 + 左右立体书盒折痕与纸边厚度感。
-class _BookSpine extends ConsumerWidget {
-  const _BookSpine({
+class _StaticSpineBody extends ConsumerWidget {
+  const _StaticSpineBody({
     required this.book,
     required this.coverOf,
     required this.unreadCount,
     required this.volumeCount,
     this.spineWidth,
-    required this.shade,
-    required this.selected,
-    required this.lifted,
-    required this.standingFactor,
   });
 
   final LibBook book;
@@ -948,10 +996,6 @@ class _BookSpine extends ConsumerWidget {
   final int unreadCount;
   final int volumeCount;
   final double? spineWidth;
-  final double shade;
-  final bool selected;
-  final bool lifted;
-  final double standingFactor;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -968,8 +1012,7 @@ class _BookSpine extends ConsumerWidget {
     final bleedDecodeSize = spineWidth != null ? Size(spineWidth!, spineWidth! / 0.78) : null;
     const radius = BorderRadius.all(Radius.circular(2.5));
 
-    // 静态印刷内容单独包进 RepaintBoundary；动态阴影、压暗层与选中框放在外层，避免滑动/悬停每帧重绘离屏纹理
-    final staticBody = RepaintBoundary(
+    return RepaintBoundary(
       child: ClipRRect(
         borderRadius: radius,
         child: Stack(
@@ -1061,13 +1104,11 @@ class _BookSpine extends ConsumerWidget {
                   // 为顶部出血插图留出安全高度，同时允许标题从插图羽化边缘自然接续
                   const AspectRatio(aspectRatio: 0.86, child: SizedBox.shrink()),
                   Expanded(
-                    child: Center(
-                      child: _VerticalSpineTitle(
-                        title: book.shown,
-                        color: pal.ink,
-                        fontFamily: titleFamily,
-                        fontFamilyFallback: titleFallback,
-                      ),
+                    child: _VerticalSpineTitle(
+                      title: book.shown,
+                      color: pal.ink,
+                      fontFamily: titleFamily,
+                      fontFamilyFallback: titleFallback,
                     ),
                   ),
                   const SizedBox(height: 6),
@@ -1105,10 +1146,33 @@ class _BookSpine extends ConsumerWidget {
         ),
       ),
     );
+  }
+}
 
+/// 书脊动态外层：只承载每帧变化的投影、受光压暗遮罩与选中描边，复用外层传入的静态书脊印刷体 [body]。
+class _BookSpine extends StatelessWidget {
+  const _BookSpine({
+    required this.body,
+    required this.shade,
+    required this.selected,
+    required this.lifted,
+    required this.standingFactor,
+  });
+
+  final Widget body;
+  final double shade;
+  final bool selected;
+  final bool lifted;
+  final double standingFactor;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dark = theme.brightness == Brightness.dark;
+    final primary = theme.colorScheme.primary;
+    const radius = BorderRadius.all(Radius.circular(2.5));
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: pal.bg,
         borderRadius: radius,
         boxShadow: standingFactor > 0.2
             ? [
@@ -1123,21 +1187,18 @@ class _BookSpine extends ConsumerWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          staticBody,
+          body,
           if (shade > 0.005)
             DecoratedBox(
               decoration: BoxDecoration(borderRadius: radius, color: Colors.black.withValues(alpha: shade)),
             ),
           IgnorePointer(
-            child: AnimatedOpacity(
-              opacity: selected ? 1.0 : 0.0,
+            child: AnimatedContainer(
               duration: AppMotion.dur(context, AppMotion.fast),
               curve: AppMotion.curve,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  borderRadius: radius,
-                  border: Border.all(color: scheme.primary, width: 2.5),
-                ),
+              decoration: BoxDecoration(
+                borderRadius: radius,
+                border: Border.all(color: selected ? primary : primary.withValues(alpha: 0), width: 2.5),
               ),
             ),
           ),
@@ -1169,8 +1230,8 @@ const _verticalPunct = <String, String>{
   '…': '⋮',
 };
 
-/// 书脊竖排书名：CJK 字符直排，标点映射为竖排形态，连续拉丁/数字横转 90° 贴合实体轻小说书脊排法，超出高度自动省略不溢出。
-class _VerticalSpineTitle extends StatelessWidget {
+/// 书脊竖排书名：单层 CustomPaint + 缓存 TextPainter 绘制，CJK 直排、竖排标点映射、连续拉丁/数字横转 90°、超出自动补 `⋮`，并支持界面繁简转换。
+class _VerticalSpineTitle extends StatefulWidget {
   const _VerticalSpineTitle({required this.title, required this.color, this.fontFamily, this.fontFamilyFallback});
 
   final String title;
@@ -1209,58 +1270,217 @@ class _VerticalSpineTitle extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final tokens = _tokenize(title);
-    if (tokens.isEmpty) return const SizedBox.shrink();
-    return LayoutBuilder(
-      builder: (context, c) {
-        final availH = c.maxHeight;
-        // 字号饱满有力，避免书脊上密密麻麻看不清
-        final fontSize = (c.maxWidth * 0.44).clamp(12.5, 17.0);
-        final charH = fontSize * 1.16;
-        final style = TextStyle(
-          color: color,
-          fontSize: fontSize,
-          fontWeight: FontWeight.w700,
-          height: 1.08,
-          fontFamily: fontFamily,
-          fontFamilyFallback: fontFamilyFallback,
-        );
+  State<_VerticalSpineTitle> createState() => _VerticalSpineTitleState();
+}
 
-        final widgets = <Widget>[];
-        var used = 0.0;
-        var truncated = false;
-        for (var i = 0; i < tokens.length; i++) {
-          final tok = tokens[i];
-          final isLatin = tok.length > 1 || (tok.codeUnitAt(0) < 128 && _asciiRun.hasMatch(tok));
-          final estH = isLatin ? math.min(tok.length * fontSize * 0.62 + 4, availH * 0.42) : charH;
-          final remaining = i < tokens.length - 1 ? charH : 0.0;
-          if (used + estH + remaining > availH) {
-            truncated = true;
-            break;
-          }
-          used += estH;
-          if (isLatin) {
-            widgets.add(
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 1.5),
-                child: RotatedBox(
-                  quarterTurns: 1,
-                  child: Text(tok, maxLines: 1, overflow: TextOverflow.ellipsis, style: style.copyWith(fontSize: fontSize * 0.88, letterSpacing: 0.5)),
-                ),
-              ),
-            );
-          } else {
-            widgets.add(Text(tok, maxLines: 1, style: style));
-          }
-        }
-        if (truncated && availH >= charH) {
-          widgets.add(Text('⋮', style: style.copyWith(color: color.withValues(alpha: 0.72))));
-        }
-        return ClipRect(
-          child: Column(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: widgets),
-        );
-      },
+class _SpineGlyph {
+  const _SpineGlyph(this.painter, this.rotated, this.height);
+
+  final TextPainter painter;
+  final bool rotated;
+  final double height;
+}
+
+class _SpineTitleLayoutCache {
+  String _title = '';
+  Color _color = Colors.transparent;
+  String? _fontFamily;
+  List<String>? _fontFamilyFallback;
+  Size _size = Size.zero;
+  TextScaler _textScaler = TextScaler.noScaling;
+  TextDirection _textDirection = TextDirection.ltr;
+  List<_SpineGlyph> glyphs = const [];
+  double totalHeight = 0;
+
+  void ensure({
+    required String title,
+    required Color color,
+    required String? fontFamily,
+    required List<String>? fontFamilyFallback,
+    required Size size,
+    required TextScaler textScaler,
+    required TextDirection textDirection,
+  }) {
+    if (_title == title &&
+        _color == color &&
+        _fontFamily == fontFamily &&
+        listEquals(_fontFamilyFallback, fontFamilyFallback) &&
+        _size == size &&
+        _textScaler == textScaler &&
+        _textDirection == textDirection) {
+      return;
+    }
+    dispose();
+    _title = title;
+    _color = color;
+    _fontFamily = fontFamily;
+    _fontFamilyFallback = fontFamilyFallback == null ? null : List<String>.of(fontFamilyFallback);
+    _size = size;
+    _textScaler = textScaler;
+    _textDirection = textDirection;
+
+    final availW = size.width;
+    final availH = size.height;
+    final tokens = _VerticalSpineTitle._tokenize(title);
+    if (availW <= 0 || availH <= 0 || tokens.isEmpty) {
+      glyphs = const [];
+      totalHeight = 0;
+      return;
+    }
+
+    // 字号饱满有力，避免书脊上密密麻麻看不清
+    final fontSize = (availW * 0.44).clamp(12.5, 17.0);
+    final charH = fontSize * 1.16;
+    final style = TextStyle(
+      color: color,
+      fontSize: fontSize,
+      fontWeight: FontWeight.w700,
+      height: 1.08,
+      fontFamily: fontFamily,
+      fontFamilyFallback: fontFamilyFallback,
+    );
+    final latinStyle = style.copyWith(fontSize: fontSize * 0.88, letterSpacing: 0.5);
+    final maxLatinLen = math.max(1.0, availH * 0.42);
+
+    final out = <_SpineGlyph>[];
+    var used = 0.0;
+    var truncated = false;
+    for (var i = 0; i < tokens.length; i++) {
+      final tok = tokens[i];
+      final isLatin = tok.length > 1 || (tok.codeUnitAt(0) < 128 && _VerticalSpineTitle._asciiRun.hasMatch(tok));
+      final tp = TextPainter(
+        text: TextSpan(text: tok, style: isLatin ? latinStyle : style),
+        textDirection: textDirection,
+        textScaler: textScaler,
+        maxLines: 1,
+        ellipsis: isLatin ? '…' : null,
+      );
+      if (isLatin) {
+        tp.layout(maxWidth: maxLatinLen);
+      } else {
+        tp.layout();
+      }
+      final itemH = isLatin ? tp.width + 3.0 : math.max(tp.height, fontSize * 1.08);
+      final remaining = i < tokens.length - 1 ? charH : 0.0;
+      if (used + itemH + remaining > availH) {
+        tp.dispose();
+        truncated = true;
+        break;
+      }
+      used += itemH;
+      out.add(_SpineGlyph(tp, isLatin, itemH));
+    }
+    if (truncated && availH >= charH) {
+      final ellip = TextPainter(
+        text: TextSpan(text: '⋮', style: style.copyWith(color: color.withValues(alpha: 0.72))),
+        textDirection: textDirection,
+        textScaler: textScaler,
+        maxLines: 1,
+      )..layout();
+      final itemH = math.max(ellip.height, fontSize * 1.08);
+      used += itemH;
+      out.add(_SpineGlyph(ellip, false, itemH));
+    }
+    glyphs = out;
+    totalHeight = used;
+  }
+
+  void dispose() {
+    for (final g in glyphs) {
+      g.painter.dispose();
+    }
+    glyphs = const [];
+    totalHeight = 0;
+    _size = Size.zero;
+  }
+}
+
+class _VerticalSpineTitleState extends State<_VerticalSpineTitle> {
+  final _cache = _SpineTitleLayoutCache();
+
+  @override
+  void dispose() {
+    _cache.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final displayTitle = hz(context, widget.title);
+    if (displayTitle.trim().isEmpty) return const SizedBox.shrink();
+    return SizedBox.expand(
+      child: CustomPaint(
+        painter: _VerticalSpineTitlePainter(
+          cache: _cache,
+          title: displayTitle,
+          color: widget.color,
+          fontFamily: widget.fontFamily,
+          fontFamilyFallback: widget.fontFamilyFallback,
+          textScaler: MediaQuery.textScalerOf(context),
+          textDirection: Directionality.of(context),
+        ),
+      ),
     );
   }
+}
+
+class _VerticalSpineTitlePainter extends CustomPainter {
+  const _VerticalSpineTitlePainter({
+    required this.cache,
+    required this.title,
+    required this.color,
+    required this.fontFamily,
+    required this.fontFamilyFallback,
+    required this.textScaler,
+    required this.textDirection,
+  });
+
+  final _SpineTitleLayoutCache cache;
+  final String title;
+  final Color color;
+  final String? fontFamily;
+  final List<String>? fontFamilyFallback;
+  final TextScaler textScaler;
+  final TextDirection textDirection;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    cache.ensure(
+      title: title,
+      color: color,
+      fontFamily: fontFamily,
+      fontFamilyFallback: fontFamilyFallback,
+      size: size,
+      textScaler: textScaler,
+      textDirection: textDirection,
+    );
+    final glyphs = cache.glyphs;
+    if (glyphs.isEmpty) return;
+    canvas.save();
+    canvas.clipRect(Offset.zero & size);
+    var y = math.max(0.0, (size.height - cache.totalHeight) / 2);
+    for (final g in glyphs) {
+      final tp = g.painter;
+      if (g.rotated) {
+        canvas.save();
+        canvas.translate(size.width / 2, y + g.height / 2);
+        canvas.rotate(math.pi / 2);
+        tp.paint(canvas, Offset(-tp.width / 2, -tp.height / 2));
+        canvas.restore();
+      } else {
+        tp.paint(canvas, Offset((size.width - tp.width) / 2, y + (g.height - tp.height) / 2));
+      }
+      y += g.height;
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_VerticalSpineTitlePainter old) =>
+      old.title != title ||
+      old.color != color ||
+      old.fontFamily != fontFamily ||
+      !listEquals(old.fontFamilyFallback, fontFamilyFallback) ||
+      old.textScaler != textScaler ||
+      old.textDirection != textDirection;
 }

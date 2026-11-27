@@ -6,7 +6,6 @@ import 'package:flutter/services.dart' show LogicalKeyboardKey, SystemNavigator;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
-import 'package:home_widget/home_widget.dart';
 
 import '../../models/common/wenku8_node.dart';
 import '../app_prefs.dart';
@@ -17,6 +16,7 @@ import '../image_cache.dart';
 import '../incognito.dart';
 import '../library.dart';
 import '../main.dart' show evictInactiveImageCache;
+import '../meta_cache.dart';
 import '../motion.dart';
 import '../reading_widget.dart';
 import '../routes.dart';
@@ -62,6 +62,7 @@ class HomeShell extends ConsumerStatefulWidget {
 
 class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserver {
   Timer? _timer;
+  Timer? _syncAutoTimer;
   DateTime _lastBack = DateTime(0);
   bool _reconnecting = false;
 
@@ -69,14 +70,10 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
   Timer? _widgetTimer;
   ValueListenable<Box>? _widgetWatch;
   ValueListenable<Box>? _unreadWatch;
-  StreamSubscription<Uri?>? _widgetClicks;
+  StreamSubscription<Uri>? _widgetClicks;
   static bool _widgetLaunchHandled = false;
 
   StatefulNavigationShell get shell => widget.shell;
-
-  void _onUnreadChanged() {
-    if (mounted) setState(() {});
-  }
 
   void _onShellLibraryChanged() {
     if (!mounted) return;
@@ -120,11 +117,14 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     LibraryStore.removedElsewhere.addListener(_onRemovedElsewhere);
     shellLibraryPage.addListener(_onShellLibraryChanged);
     if (Hive.isBoxOpen('session')) {
-      _unreadWatch = Hive.box('session').listenable(keys: ['updates', 'updates:seen'])..addListener(_onUnreadChanged);
+      _unreadWatch = Hive.box('session').listenable(keys: ['updates', 'updates:seen']);
     }
     WidgetsBinding.instance.addPostFrameCallback((_) => _onRemovedElsewhere()); // 主界面重建前就记下的
     Future.microtask(_syncAndCheck);
-    Sync.auto();
+    // 延后 2 秒触发 WebDAV 自动同步，避免与首屏封面解码和登录恢复竞争主线程与网络（退后台时已有兜底）
+    _syncAutoTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) Sync.auto(adapter: ref.read(sharedHttpAdapterProvider));
+    });
     // 空闲时提前加载 imgsr 目录索引，避免首次加载超分封面在热路径扫盘
     if (!isWebPreview && ImageStore.srSupported) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -135,21 +135,21 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     _maintenance = Timer(const Duration(seconds: 6), _tidy);
     _timer = Timer.periodic(const Duration(hours: 1), (_) {
       _checkUpdates();
-      Sync.auto();
+      Sync.auto(adapter: ref.read(sharedHttpAdapterProvider));
     });
     if (ReadingWidget.supported) {
       _widgetWatch = Hive.box('session').listenable(keys: ['history2', 'updates', 'updates:seen'])..addListener(_scheduleWidget);
       Volumes.changes.addListener(_scheduleWidget); // 封面取到了、换了
       _scheduleWidget();
       if (!_widgetLaunchHandled) {
-        HomeWidget.initiallyLaunchedFromHomeWidget().then((uri) {
+        ReadingWidget.initialUri().then((uri) {
           // 主界面可能刚建好又被换掉（登录状态变化），等真正处理了才记下
           if (!mounted || _widgetLaunchHandled) return;
           _widgetLaunchHandled = true;
           _openFromWidget(uri);
         }, onError: (_) {});
       }
-      _widgetClicks = HomeWidget.widgetClicked.listen(_openFromWidget, onError: (_) {});
+      _widgetClicks = ReadingWidget.clicked.listen(_openFromWidget, onError: (_) {});
     }
   }
 
@@ -166,6 +166,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     // 先删挑封面剩下的图，再压剩下的，省得压了又删
     store.dropLowQualityOnce().then((_) => store.trim()).then((_) => covers.dropSkippedOnce(aids)).then((_) => store.shrinkOld()).ignore();
     cleared.then((_) => ChapterCache.compressOld()).ignore();
+    MetaCache.pruneStale(keepAids: aids.toSet()).ignore();
   }
 
   void _scheduleWidget() {
@@ -196,10 +197,10 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     shellLibraryPage.removeListener(_onShellLibraryChanged);
     _libraryInShell = false;
     _timer?.cancel();
+    _syncAutoTimer?.cancel();
     _maintenance?.cancel();
     _widgetTimer?.cancel();
     _widgetWatch?.removeListener(_scheduleWidget);
-    _unreadWatch?.removeListener(_onUnreadChanged);
     Volumes.changes.removeListener(_scheduleWidget);
     _widgetClicks?.cancel();
     super.dispose();
@@ -211,10 +212,10 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
     final mobile = defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS;
     if (state == AppLifecycleState.paused || (state == AppLifecycleState.inactive && !mobile)) {
       ref.read(sessionProvider.notifier).persistCookies();
-      Sync.auto();
+      Sync.auto(adapter: ref.read(sharedHttpAdapterProvider));
       if (ReadingWidget.supported) _pushWidget();
     } else if (state == AppLifecycleState.resumed) {
-      Sync.auto();
+      Sync.auto(adapter: ref.read(sharedHttpAdapterProvider));
       final s = ref.read(sessionProvider);
       if (s is SessionLoggedIn && s.offline && !s.needsVerify) {
         unawaited(ref.read(sessionProvider.notifier).restore(silent: true));
@@ -303,10 +304,13 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
       final wasOffline = prev is! SessionLoggedIn || prev.offline;
       if (wasOffline && next is SessionLoggedIn && !next.offline) _syncAndCheck();
     });
-    final session = ref.watch(sessionProvider);
-    final needsVerify = (session is SessionLoggedIn && session.needsVerify) || (session is SessionLoggedOut && session.needsVerify);
-    final offline = (session is SessionLoggedIn && session.offline) || needsVerify;
-    final unread = UpdateStore.unread();
+    final (:offline, :needsVerify) = ref.watch(
+      sessionProvider.select((session) {
+        final needsVerify = (session is SessionLoggedIn && session.needsVerify) || (session is SessionLoggedOut && session.needsVerify);
+        final offline = (session is SessionLoggedIn && session.offline) || needsVerify;
+        return (offline: offline, needsVerify: needsVerify);
+      }),
+    );
     final palette = appPalettes[ref.watch(paletteProvider)];
     final incognito = ref.watch(incognitoProvider);
     final theme = Theme.of(context);
@@ -330,7 +334,15 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
 
     Widget icon(int i, bool selected) {
       final art = rawIcon(i, selected);
-      return _items[i].$3 == '更新' && unread > 0 ? Badge(label: Text('$unread'), child: art) : art;
+      if (_items[i].$3 != '更新' || _unreadWatch == null) return art;
+      return ValueListenableBuilder<Box>(
+        valueListenable: _unreadWatch!,
+        child: art,
+        builder: (_, _, child) {
+          final unread = UpdateStore.unread();
+          return unread > 0 ? Badge(label: Text('$unread'), child: child) : child!;
+        },
+      );
     }
 
     final body = Column(
@@ -557,7 +569,7 @@ class _HomeShellState extends ConsumerState<HomeShell> with WidgetsBindingObserv
               label: item.$3,
               selected: cur == i,
               icon: rawIcon(i, cur == i),
-              badge: item.$3 == '更新' && unread > 0 ? '$unread' : null,
+              badge: item.$3 == '更新' && _unreadWatch != null ? _SourceUnreadBadge(_unreadWatch!) : null,
               onTap: () => _go(i),
             ),
           const _SourceSection('资料库'),
@@ -757,7 +769,7 @@ class _SourceItem extends StatefulWidget {
   final bool selected;
   final Widget icon;
   final VoidCallback onTap;
-  final String? badge;
+  final Widget? badge;
 
   @override
   State<_SourceItem> createState() => _SourceItemState();
@@ -812,23 +824,45 @@ class _SourceItemState extends State<_SourceItem> {
                       child: Text(widget.label, maxLines: 1, overflow: TextOverflow.ellipsis),
                     ),
                   ),
-                  AppCollapse(
-                    visible: widget.badge != null,
-                    axis: Axis.horizontal,
-                    duration: AppMotion.fast,
-                    reverseDuration: AppMotion.instant,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
-                      decoration: BoxDecoration(color: scheme.primary, borderRadius: BorderRadius.circular(9)),
-                      child: Text(widget.badge ?? '', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: scheme.onPrimary, fontFeatures: const [FontFeature.tabularFigures()])),
-                    ),
-                  ),
+                  if (widget.badge != null) widget.badge!,
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 宽侧栏「更新」行的未读角标：独立订阅 Hive 未读键，避免未读数变化时重建整棵 [HomeShell]。
+class _SourceUnreadBadge extends StatelessWidget {
+  const _SourceUnreadBadge(this.listenable);
+
+  final ValueListenable<Box> listenable;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return ValueListenableBuilder<Box>(
+      valueListenable: listenable,
+      builder: (_, _, _) {
+        final unread = UpdateStore.unread();
+        return AppCollapse(
+          visible: unread > 0,
+          axis: Axis.horizontal,
+          duration: AppMotion.fast,
+          reverseDuration: AppMotion.instant,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+            decoration: BoxDecoration(color: scheme.primary, borderRadius: BorderRadius.circular(9)),
+            child: Text(
+              unread > 0 ? '$unread' : '',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: scheme.onPrimary, fontFeatures: const [FontFeature.tabularFigures()]),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -906,13 +940,16 @@ class _SidebarAccount extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final session = ref.watch(sessionProvider);
+    final (:username, :offline) = ref.watch(
+      sessionProvider.select(
+        (s) => s is SessionLoggedIn ? (username: s.user.username, offline: s.offline) : (username: null, offline: false),
+      ),
+    );
     final incognito = ref.watch(incognitoProvider);
     final scheme = Theme.of(context).colorScheme;
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final user = session is SessionLoggedIn ? session.user : null;
     // 名字下面只在有状态时才显示一行：没登录、离线、无痕模式
-    final sub = user == null ? '点击登录' : (incognito ? '无痕模式中' : (session is SessionLoggedIn && session.offline ? '离线' : null));
+    final sub = username == null ? '点击登录' : (incognito ? '无痕模式中' : (offline ? '离线' : null));
     final info = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
       child: Row(
@@ -924,7 +961,7 @@ class _SidebarAccount extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(user?.username ?? '未登录', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: scheme.onSurface)),
+                Text(username ?? '未登录', maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: scheme.onSurface)),
                 if (sub != null) Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: incognito ? scheme.primary : scheme.onSurfaceVariant)),
               ],
             ),
@@ -932,7 +969,7 @@ class _SidebarAccount extends ConsumerWidget {
         ],
       ),
     );
-    final account = user == null
+    final account = username == null
         ? InkWell(borderRadius: BorderRadius.circular(8), onTap: () => context.push(Routes.login), child: info)
         : PopupMenuButton<String>(
             tooltip: hz(context, '账号'),

@@ -15,7 +15,7 @@ import '../read_state.dart';
 import '../stats.dart';
 import '../theme.dart';
 import '../volume_covers.dart';
-import '../volumes.dart' show Volumes, volumeChangesProvider;
+import '../volumes.dart' show Volumes, volumeChangeForProvider;
 import '../widgets.dart';
 import 'cover_picker_page.dart';
 import '../text.dart';
@@ -77,8 +77,8 @@ class _ReportPageState extends ConsumerState<ReportPage> {
 
   @override
   Widget build(BuildContext context) {
-    ref.watch(volumeChangesProvider);
     final aid = widget.aid;
+    ref.watch(volumeChangeForProvider(aid));
     final info = ReadingStats.info(aid);
     final vols = Volumes.of(aid);
     final queue = ref.read(volumeCoverQueueProvider);
@@ -237,6 +237,29 @@ class _ReportPageState extends ConsumerState<ReportPage> {
       ),
     );
 
+    final blurHeight = bookWidth * 4 / 3 + 260;
+    // 顶部模糊底图降采样并用 RepaintBoundary 移出颜色过渡重绘范围，避免切卷渐变期间每帧重算高斯模糊
+    final blurredBg = Positioned(
+      top: 0,
+      left: 0,
+      right: 0,
+      height: blurHeight,
+      child: ClipRect(
+        child: RepaintBoundary(
+          child: AnimatedSwitcher(
+            duration: _capturing ? Duration.zero : AppMotion.dur(context, AppMotion.ambient),
+            switchInCurve: AppMotion.curve,
+            switchOutCurve: AppMotion.exit,
+            child: ImageFiltered(
+              key: ValueKey(cover),
+              imageFilter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
+              child: Opacity(opacity: 0.6, child: NetImage(cover, thumbnail: true, maxDecodeWidth: 160)),
+            ),
+          ),
+        ),
+      ),
+    );
+
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: SystemUiOverlayStyle.light,
       child: Scaffold(
@@ -264,32 +287,15 @@ class _ReportPageState extends ConsumerState<ReportPage> {
                   builder: (context, color, child) => Stack(
                     children: [
                       Positioned.fill(child: ColoredBox(color: color!)),
-                      // 顶部：放大模糊的封面，往下渐变到背景色
+                      blurredBg,
                       Positioned(
                         top: 0,
                         left: 0,
                         right: 0,
-                        height: bookWidth * 4 / 3 + 260,
-                        child: ClipRect(
-                          child: Stack(
-                            fit: StackFit.expand,
-                            children: [
-                              AnimatedSwitcher(
-                                duration: _capturing ? Duration.zero : AppMotion.dur(context, AppMotion.ambient),
-                                switchInCurve: AppMotion.curve,
-                                switchOutCurve: AppMotion.exit,
-                                child: ImageFiltered(
-                                  key: ValueKey(cover),
-                                  imageFilter: ui.ImageFilter.blur(sigmaX: 30, sigmaY: 30),
-                                  child: Opacity(opacity: 0.6, child: NetImage(cover)),
-                                ),
-                              ),
-                              DecoratedBox(
-                                decoration: BoxDecoration(
-                                  gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [color.withValues(alpha: 0.15), color.withValues(alpha: 0.6), color]),
-                                ),
-                              ),
-                            ],
+                        height: blurHeight,
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [color.withValues(alpha: 0.15), color.withValues(alpha: 0.6), color]),
                           ),
                         ),
                       ),

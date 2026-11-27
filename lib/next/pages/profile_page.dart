@@ -78,17 +78,17 @@ class AccountAvatar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final session = ref.watch(sessionProvider);
+    final user = ref.watch(sessionProvider.select((s) => s is SessionLoggedIn ? (username: s.user.username, avatar: s.user.avatar) : null));
     final custom = ref.watch(avatarProvider);
     final theme = Theme.of(context);
-    final user = session is SessionLoggedIn ? session.user : null;
     final name = user?.username ?? '未登录';
     final useCustom = custom != null && !isWebPreview;
+    final decodePx = (radius * 2 * MediaQuery.devicePixelRatioOf(context)).ceil().clamp(64, 512);
     final initial = Text(name.characters.firstOrNull ?? '?', style: radius >= 24 ? theme.textTheme.titleLarge : TextStyle(fontSize: radius * 0.85, fontWeight: FontWeight.w600));
     return CircleAvatar(
       radius: radius,
       backgroundColor: theme.colorScheme.surfaceContainerHigh,
-      foregroundImage: useCustom ? FileImage(File(custom)) : null,
+      foregroundImage: useCustom ? ResizeImage.resizeIfNeeded(decodePx, null, FileImage(File(custom))) : null,
       // 网站头像走 App 的图片通道（Flutter 自带的 NetworkImage 会被 Cloudflare 403）；取不到时露出下面的首字
       child: useCustom || user == null || user.avatar.isEmpty
           ? initial
@@ -96,7 +96,7 @@ class AccountAvatar extends ConsumerWidget {
               fit: StackFit.expand,
               children: [
                 Center(child: initial),
-                ClipOval(child: NetImage(user.avatar.replaceFirst('http://', 'https://'))),
+                ClipOval(child: NetImage(user.avatar.replaceFirst('http://', 'https://'), decodeSize: Size.square(radius * 2))),
               ],
             ),
     );
@@ -108,11 +108,14 @@ class ProfilePage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final session = ref.watch(sessionProvider);
+    final user = ref.watch(
+      sessionProvider.select(
+        (s) => s is SessionLoggedIn ? (uid: s.user.uid, username: s.user.username, userLevel: s.user.userLevel, offline: s.offline) : null,
+      ),
+    );
     final palette = appPalettes[ref.watch(paletteProvider)];
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final user = session is SessionLoggedIn ? session.user : null;
 
     final name = user?.username ?? '未登录';
     final sub = user == null
@@ -120,7 +123,7 @@ class ProfilePage extends ConsumerWidget {
         : [
             'UID ${user.uid}',
             if (user.userLevel.isNotEmpty) user.userLevel,
-            if (session is SessionLoggedIn && session.offline) '离线',
+            if (user.offline) '离线',
           ].join(' · ');
     const avatar = AccountAvatar();
 

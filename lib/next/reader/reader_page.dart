@@ -17,6 +17,7 @@ import '../../data/wenku8/wenku8_urls.dart';
 import '../../models/cat_chapter.dart';
 import '../../models/cat_volume.dart';
 import '../../models/content.dart';
+import '../app.dart' show NextApp;
 import '../app_prefs.dart';
 import '../book_search.dart';
 export '../book_search.dart' show halfWidth;
@@ -100,7 +101,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _background = state != AppLifecycleState.resumed;
-    if (_background) _autoScroll.stop();
+    if (_background) {
+      _autoScroll.stop();
+      ReadingProgress.flush();
+    }
     if (!_background) {
       _watch.start();
     } else if (!_tts.isListening) {
@@ -140,7 +144,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   final _nav = ReaderNav();
   late final ReaderTtsController _tts;
   late final ReaderAutoScrollController _autoScroll;
-  ReaderPaceSnapshot _pace = const ReaderPaceSnapshot();
+  ReaderPaceSnapshot? _pace;
   int _settingsTab = 0;
   ({String cid, int start, int end})? _searchFlash;
   Timer? _searchFlashTimer;
@@ -205,6 +209,13 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   double? _bright;
   static const _screen = MethodChannel('ark/screen');
 
+  void _applyBrightness(double want) {
+    if (_bright != want) {
+      _bright = want;
+      _screen.invokeMethod('setBrightness', {'value': want}).ignore();
+    }
+  }
+
   void _applyChrome(ReaderPrefs p) {
     if (_keepOn != p.keepScreenOn) {
       _keepOn = p.keepScreenOn;
@@ -213,12 +224,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     if (_full != p.fullscreen) {
       _full = p.fullscreen;
       _setUi();
-    }
-    // 自定义亮度：-1 是交还给系统（原生那边只有安卓实现，别的平台调用失败就算了）
-    final want = p.customBrightness ? p.brightness : -1.0;
-    if (_bright != want) {
-      _bright = want;
-      _screen.invokeMethod('setBrightness', {'value': want}).ignore();
     }
   }
 
@@ -249,8 +254,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   @override
   void initState() {
     super.initState();
+    NextApp.markReaderActive(true);
     final initPrefs = ref.read(readerPrefsProvider);
-    _pace = ReaderPaceSnapshot.capture();
+    if (initPrefs.font == 2) FontStore.ensureLoaded().ignore();
     _autoScroll = ReaderAutoScrollController(
       createTicker: createTicker,
       initialSpeed: initPrefs.autoScrollSpeed,
@@ -277,6 +283,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       onSpeedChanged: (v) => ref.read(readerPrefsProvider.notifier).update(ref.read(readerPrefsProvider).copyWith(autoScrollSpeed: v)),
       onTurnSecondsChanged: (v) => ref.read(readerPrefsProvider.notifier).update(ref.read(readerPrefsProvider).copyWith(autoTurnSeconds: v)),
       onReachedBookEnd: () {
+        ReadingProgress.flush();
         if (mounted) ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(content: Text('已读到最后，自动阅读已停止'), duration: Duration(seconds: 2)));
       },
     );
@@ -339,7 +346,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       });
     }
     WidgetsBinding.instance.addObserver(this);
-    _applyChrome(ref.read(readerPrefsProvider));
+    _applyChrome(initPrefs);
+    _applyBrightness(initPrefs.customBrightness ? initPrefs.brightness : -1.0);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       try {
@@ -404,6 +412,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   void _toggleAutoScroll(ReaderPrefs prefs) {
     if (_autoScroll.isActive) {
       _autoScroll.stop();
+      ReadingProgress.flush();
       return;
     }
     if (_tts.isSpeaking) _tts.stop();
@@ -424,6 +433,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
 
   @override
   void dispose() {
+    NextApp.markReaderActive(false);
     _routeAnim?.removeStatusListener(_onRouteStatus);
     _routeAnim = null;
     if (!_preloadCancel.isCancelled) _preloadCancel.cancel('reader disposed');
@@ -453,6 +463,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       LibraryController.resumeBackground();
     }
     trimReaderChapterCache();
+    ReaderBackground.evictTextureCache();
+    clearVolumeEtaCache();
     FontStore.ready.removeListener(_onFontReady);
     HighlightStore.changes.removeListener(_onHighlightsChanged);
     _screen.invokeMethod('setBrightness', {'value': -1.0}).ignore();
@@ -469,6 +481,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     _tts.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _flushStats();
+    ReadingProgress.flush();
     Sync.auto();
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -570,7 +583,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       if (t != null) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t), duration: const Duration(seconds: 2)));
     }
     _flushStats(); // 离开这章前把时间记到这章
-    _pace = ReaderPaceSnapshot.capture();
+    _pace = null;
+    clearVolumeEtaCache();
     if (!keepTts && _tts.isSpeaking) _tts.stop();
     if (keepAutoScroll || _autoScroll.isStepping) {
       _autoScroll.notifyChapterSwitched();
@@ -584,6 +598,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     final finished = forward && !leavingLocked && Volumes.indexOf(widget.aid, cid) != Volumes.indexOf(widget.aid, _cid) ? _justFinished() : null;
     if (forward && !leavingLocked) _markRead();
     ReadingProgress.save(widget.aid, cid, offset == kToEnd ? 0 : offset);
+    ReadingProgress.flush();
     final order = ref.read(readerNovelProvider(widget.aid)).value?.catalogue.expand((v) => v.chapters).map((c) => c.cid).toList() ?? const <String>[];
     if (finished != null) WidgetsBinding.instance.addPostFrameCallback((_) => _celebrate(finished, hasNext: true));
     setState(() {
@@ -715,6 +730,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     _tts.onUserOffsetChanged(offset, currentText: () => ref.read(chapterProvider((widget.aid, _cid))).value?.text ?? '');
   }
 
+  static final _wsRe = RegExp(r'[\s　]+');
+
   // ---- 书签 ----
   Future<void> _addBookmark({String? selection}) async {
     final text = ref.read(chapterProvider((widget.aid, _cid))).value?.text ?? '';
@@ -727,7 +744,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       excerpt = selection.trim();
       if (excerpt.length > 40) excerpt = excerpt.substring(0, 40);
     } else {
-      excerpt = text.substring(at, (at + 40).clamp(0, text.length)).replaceAll(RegExp(r'[\s　]+'), ' ').trim();
+      excerpt = text.substring(at, (at + 40).clamp(0, text.length)).replaceAll(_wsRe, ' ').trim();
     }
     final added = await Bookmarks.toggle(widget.aid, _bookTitle ?? '', _cid, _chapterTitle, at, excerpt);
     if (mounted) {
@@ -740,7 +757,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   bool get _hasSelection => (_selected ?? '').isNotEmpty;
 
   /// 选中的文字变成正则：空白（含缩进、换行）都换成 `\s*`，这样跨段选中也能匹配原文。
-  static String _patternOf(String selected) => selected.split(RegExp(r'[\s　]+')).where((e) => e.isNotEmpty).map(RegExp.escape).join(r'\s*');
+  static String _patternOf(String selected) => selected.split(_wsRe).where((e) => e.isNotEmpty).map(RegExp.escape).join(r'\s*');
 
   /// 只保留我们需要的几项，不带系统自带的全选、分享、搜索、翻译。
   Widget _selectionMenu(BuildContext context, SelectableRegionState state) => AdaptiveTextSelectionToolbar.buttonItems(
@@ -964,8 +981,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   @override
   Widget build(BuildContext context) {
     ref.listen(incognitoProvider, (_, _) => _tick());
+    ref.listen<double>(
+      readerPrefsProvider.select((p) => p.customBrightness ? p.brightness : -1.0),
+      (_, want) => _applyBrightness(want),
+    );
     final incognito = ref.watch(incognitoProvider);
-    final prefs = ref.watch(readerPrefsProvider);
+    // 排除 dim 与 brightness，避免拖亮度滑块时重建整页阅读器（dim 由独立 _ReaderDimOverlay 局部消费）
+    final prefs = ref.watch(
+      readerPrefsProvider.select((p) => p.dim == 0 && p.brightness == 0.5 ? p : p.copyWith(dim: 0, brightness: 0.5)),
+    );
     final bgImagePath = ref.watch(readerBgImageProvider);
     _autoScroll.syncPrefs(mode: prefs.mode, scrollSpeed: prefs.autoScrollSpeed, turnSeconds: prefs.autoTurnSeconds);
     _syncVolumeKeys(prefs.volumeKeys);
@@ -985,12 +1009,12 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     final basePalette = readerPaletteOf(prefs, appTheme.colorScheme);
     final baseHeading = readerHeadingAccent(context, prefs, basePalette);
     final fallbackCover = novel?.detail.imgUrl ?? '';
-    final hasCustomBgImg = bgImagePath != null && bgImagePath.isNotEmpty;
-    final hasDualCover = _coverOf(_cid, prefs, fallbackCover) != null ||
-        (prev != null && _coverOf(prev.cid, prefs, fallbackCover) != null) ||
-        (next != null && _coverOf(next.cid, prefs, fallbackCover) != null);
-    // 纯文字且无背景图/卷封面、未开灰度/反色时，直接将暖色折算进阅读调色板，省掉全屏 ColorFiltered saveLayer 离屏帧缓冲
-    final directWarm = prefs.warm > 0 && !prefs.grayscale && !prefs.invert && images.isEmpty && !hasCustomBgImg && !hasDualCover;
+    // 仅开启暖色护眼（未开灰度/反色）时始终将暖色直算到文字与背景色，仅对插图、卷封面和背景图片施加局部 ColorFiltered，
+    // 彻底消除带插图章或双页跨卷章退化为全屏 ColorFiltered saveLayer 的问题
+    final directWarm = prefs.warm > 0 && !prefs.grayscale && !prefs.invert;
+    final imageWarmFilter = directWarm
+        ? ColorFilter.matrix(combineReaderColorMatrix(warm: prefs.warm, grayscale: false, invert: false)!)
+        : null;
     final palette = directWarm
         ? ReaderPalette(applyReaderWarmColor(basePalette.bg, prefs.warm), applyReaderWarmColor(basePalette.fg, prefs.warm))
         : basePalette;
@@ -1024,7 +1048,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     _chapterTitle = title;
     final f = FontStore.resolve(prefs.font);
     final style = readerStyle(prefs, palette.fg, family: f.family, fallback: f.fallback);
-    final noted = RuleNotes.of(widget.aid).keys.toSet();
+    final noted = RuleNotes.keysView(widget.aid);
     final addon = ref.watch(unlockAddonProvider);
     final bottomPad = MediaQuery.viewPaddingOf(context).bottom;
     final topPad = MediaQuery.viewPaddingOf(context).top;
@@ -1034,23 +1058,31 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       texture: prefs.bgTexture,
       imagePath: bgImagePath,
       imageOpacity: prefs.bgImageOpacity,
+      imageColorFilter: imageWarmFilter,
     );
     final hasCustomBg = readerBg.hasCustomLayer;
-    final bgKey = Object.hash(prefs.bgTexture, bgImagePath, prefs.bgImageOpacity, _searchFlash?.cid, _searchFlash?.start);
+    final pageCurlOwnsBg = prefs.mode >= 2 && content.hasValue && !(prefs.font == 2 && !FontStore.ready.value);
+    final bgKey = Object.hash(prefs.bgTexture, bgImagePath, prefs.bgImageOpacity, directWarm ? prefs.warm : 0.0, _searchFlash?.cid, _searchFlash?.start);
+    final chromeNeedsEta = prefs.headerLeft == ReaderChromeField.volumeEta ||
+        prefs.headerRight == ReaderChromeField.volumeEta ||
+        prefs.footerLeft == ReaderChromeField.volumeEta ||
+        prefs.footerRight == ReaderChromeField.volumeEta;
     final chromeConfig = ReaderChromeConfig(
       headerLeft: prefs.headerLeft,
       headerRight: prefs.headerRight,
       footerLeft: prefs.footerLeft,
       footerRight: prefs.footerRight,
       bookTitle: _bodyTitle(_bookTitle ?? ''),
-      volumeEta: (frac) => resolveVolumeEtaText(
-        aid: widget.aid,
-        cid: _cid,
-        currentChapterChars: content.value?.text.length ?? 0,
-        chapterFraction: frac,
-        volumeProgress: _volumeProgress(frac),
-        pace: _pace,
-      ),
+      volumeEta: chromeNeedsEta
+          ? (frac) => resolveVolumeEtaText(
+                aid: widget.aid,
+                cid: _cid,
+                currentChapterChars: content.value?.text.length ?? 0,
+                chapterFraction: frac,
+                volumeProgress: _volumeProgress(frac),
+                pace: _pace ??= ReaderPaceSnapshot.capture(),
+              )
+          : null,
     );
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -1081,7 +1113,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                 Stack(
                   key: GlobalObjectKey(_nav),
                   children: [
-                    Positioned.fill(child: readerBg),
+                    // 翻页模式启用 PageCurl 且页内自带背景时，底层只放轻量纯色兜底加载/错误态，避免叠两层 ReaderBackground
+                    Positioned.fill(child: pageCurlOwnsBg ? ColoredBox(color: palette.bg) : readerBg),
                     _chapterSwitch(
                       prefs,
                       KeyedSubtree(
@@ -1172,6 +1205,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     marked: () => Bookmarks.has(widget.aid, _cid, _offset),
                                     onUserInteract: _autoScroll.pauseByUser,
                                     showHeader: prefs.showStatus && chromeConfig.hasHeader,
+                                    imageColorFilter: imageWarmFilter,
                                   )
                                 : PagedBody(
                                     key: key,
@@ -1202,6 +1236,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                                     background: palette.bg,
                                     pageBackground: hasCustomBg ? readerBg : null,
                                     backgroundKey: bgKey,
+                                    imageColorFilter: imageWarmFilter,
                                     chromeConfig: chromeConfig,
                                     onUserInteract: _autoScroll.pauseByUser,
                                     color: palette.fg,
@@ -1274,8 +1309,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                         volumeProgress: _volumeProgress,
                         volumeEta: chromeConfig.volumeEta,
                       ),
-                    // 亮度遮罩：盖住正文和页脚，不盖菜单栏和朗读/自动阅读条，不挡点击
-                    if (prefs.dim > 0) Positioned.fill(key: const ValueKey('reader_dim'), child: IgnorePointer(child: ColoredBox(color: Colors.black.withValues(alpha: prefs.dim)))),
+                    // 亮度遮罩：独立 Consumer 仅监听 dim，盖住正文和页脚，不盖菜单栏和朗读/自动阅读条，不挡点击
+                    const Positioned.fill(key: ValueKey('reader_dim'), child: _ReaderDimOverlay()),
                     // 翻页模式自动翻页的极细底部倒计时进度条
                     Positioned(
                       key: const ValueKey('reader_auto_turn_progress'),
@@ -1335,311 +1370,287 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
                         ),
                       ),
                     ),
-                    // 顶部菜单栏：滑动 + 渐隐平滑过渡（固定 Key 防止条件插入的悬浮条导致与底部栏错位复用动画状态）
+                    // 顶部菜单栏：滑动 + 渐隐过渡，退场完成后彻底卸载子节点
                     Positioned(
                       key: const ValueKey('reader_top_bar'),
                       top: 0,
                       left: 0,
                       right: 0,
-                      child: ExcludeSemantics(
-                        excluding: !_bar,
-                        child: IgnorePointer(
-                          ignoring: !_bar,
-                          child: AnimatedSlide(
-                            offset: _bar ? Offset.zero : const Offset(0, -1),
-                            duration: AppMotion.dur(context, _bar ? AppMotion.standard : AppMotion.fast),
-                            curve: _bar ? AppMotion.decelerate : AppMotion.exit,
-                            child: AnimatedOpacity(
-                              opacity: _bar ? 1 : 0,
-                              duration: AppMotion.dur(context, AppMotion.fast),
-                              curve: AppMotion.curve,
-                              child: AnimatedContainer(
-                                duration: AppMotion.dur(context, AppMotion.standard),
-                                curve: AppMotion.curve,
-                                decoration: BoxDecoration(
-                                  color: palette.bg,
-                                  border: Border(bottom: BorderSide(color: palette.fg.withValues(alpha: 0.12))), // 不要阴影：阴影会把正文一行字切成两半
-                                ),
-                                child: Material(
-                                  type: MaterialType.transparency,
-                                  child: SafeArea(
-                                    bottom: false,
-                                    child: Row(
+                      child: _ReaderSlideBar(
+                        visible: _bar,
+                        hiddenOffset: const Offset(0, -1),
+                        builder: (context) => AnimatedContainer(
+                          duration: AppMotion.dur(context, AppMotion.standard),
+                          curve: AppMotion.curve,
+                          decoration: BoxDecoration(
+                            color: palette.bg,
+                            border: Border(bottom: BorderSide(color: palette.fg.withValues(alpha: 0.12))), // 不要阴影：阴影会把正文一行字切成两半
+                          ),
+                          child: Material(
+                            type: MaterialType.transparency,
+                            child: SafeArea(
+                              bottom: false,
+                              child: Row(
+                                children: [
+                                  IconButton(tooltip: hz(context, '返回'), icon: Icon(Icons.arrow_back, color: palette.fg), onPressed: _leaveReader),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        IconButton(tooltip: hz(context, '返回'), icon: Icon(Icons.arrow_back, color: palette.fg), onPressed: _leaveReader),
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            mainAxisSize: MainAxisSize.min,
-                                            children: [
-                                              Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: appTheme.textTheme.titleMedium?.copyWith(color: palette.fg)),
-                                              if (_bookTitle != null) Text(_bookTitle!, maxLines: 1, overflow: TextOverflow.ellipsis, style: appTheme.textTheme.bodySmall?.copyWith(color: palette.fg.withValues(alpha: 0.6))),
-                                            ],
-                                          ),
-                                        ),
-                                        if (incognito)
-                                          Padding(
-                                            padding: const EdgeInsets.only(right: 4),
-                                            child: Container(
-                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                              decoration: BoxDecoration(color: palette.fg.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(999)),
-                                              child: Row(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  Icon(Icons.visibility_off_outlined, size: 13, color: palette.fg.withValues(alpha: 0.75)),
-                                                  const SizedBox(width: 4),
-                                                  Text('无痕', style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.75))),
-                                                ],
-                                              ),
-                                            ),
-                                          ),
-                                        IconButton(
-                                          tooltip: hz(context, '书内搜索'),
-                                          visualDensity: VisualDensity.compact,
-                                          icon: Icon(Icons.search, size: 22, color: palette.fg),
-                                          onPressed: () => _openSearchSheet(novel?.catalogue ?? const [], palette, accent),
-                                        ),
-                                        IconButton(
-                                          tooltip: hz(context, '人物词典'),
-                                          visualDensity: VisualDensity.compact,
-                                          icon: Icon(Icons.people_outline, size: 22, color: palette.fg),
-                                          onPressed: _openCharactersPage,
-                                        ),
-                                        const SizedBox(width: 4),
+                                        Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: appTheme.textTheme.titleMedium?.copyWith(color: palette.fg)),
+                                        if (_bookTitle != null) Text(_bookTitle!, maxLines: 1, overflow: TextOverflow.ellipsis, style: appTheme.textTheme.bodySmall?.copyWith(color: palette.fg.withValues(alpha: 0.6))),
                                       ],
                                     ),
                                   ),
-                                ),
+                                  if (incognito)
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 4),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                        decoration: BoxDecoration(color: palette.fg.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(999)),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(Icons.visibility_off_outlined, size: 13, color: palette.fg.withValues(alpha: 0.75)),
+                                            const SizedBox(width: 4),
+                                            Text('无痕', style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.75))),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  IconButton(
+                                    tooltip: hz(context, '书内搜索'),
+                                    visualDensity: VisualDensity.compact,
+                                    icon: Icon(Icons.search, size: 22, color: palette.fg),
+                                    onPressed: () => _openSearchSheet(novel?.catalogue ?? const [], palette, accent),
+                                  ),
+                                  IconButton(
+                                    tooltip: hz(context, '人物词典'),
+                                    visualDensity: VisualDensity.compact,
+                                    icon: Icon(Icons.people_outline, size: 22, color: palette.fg),
+                                    onPressed: _openCharactersPage,
+                                  ),
+                                  const SizedBox(width: 4),
+                                ],
                               ),
                             ),
                           ),
                         ),
                       ),
                     ),
-                    // 底部菜单栏：滑动 + 渐隐平滑过渡
+                    // 底部菜单栏：滑动 + 渐隐过渡，退场完成后彻底卸载（避免日常翻页时屏幕外 Slider 重建）
                     Positioned(
                       key: const ValueKey('reader_bottom_bar'),
                       bottom: 0,
                       left: 0,
                       right: 0,
-                      child: ExcludeSemantics(
-                        excluding: !_bar,
-                        child: IgnorePointer(
-                          ignoring: !_bar,
-                          child: AnimatedSlide(
-                            offset: _bar ? Offset.zero : const Offset(0, 1),
-                            duration: AppMotion.dur(context, _bar ? AppMotion.standard : AppMotion.fast),
-                            curve: _bar ? AppMotion.decelerate : AppMotion.exit,
-                            child: AnimatedOpacity(
-                              opacity: _bar ? 1 : 0,
-                              duration: AppMotion.dur(context, AppMotion.fast),
-                              curve: AppMotion.curve,
-                              child: AnimatedContainer(
-                                duration: AppMotion.dur(context, AppMotion.standard),
-                                curve: AppMotion.curve,
-                                decoration: BoxDecoration(
-                                  color: palette.bg,
-                                  border: Border(top: BorderSide(color: palette.fg.withValues(alpha: 0.12))),
-                                ),
-                                child: Material(
-                                  type: MaterialType.transparency,
-                                  child: SafeArea(
-                                    top: false,
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        ValueListenableBuilder<bool>(
-                                          valueListenable: _tts.active,
-                                          builder: (_, speaking, _) => ListenableBuilder(
-                                            listenable: _autoScroll,
-                                            builder: (_, _) => AppCollapse(
-                                              visible: speaking || _autoScroll.isActive,
-                                              duration: AppMotion.fast,
-                                              reverseDuration: AppMotion.fast,
-                                              child: speaking
-                                                  ? ReaderTtsBar(
-                                                      tts: _tts,
-                                                      palette: palette,
-                                                      accent: accent,
-                                                      embedded: true,
-                                                      onOpenSettings: () => _openTtsSheet(palette, accent),
-                                                    )
-                                                  : ReaderAutoScrollBar(
-                                                      controller: _autoScroll,
-                                                      palette: palette,
-                                                      accent: accent,
-                                                      embedded: true,
-                                                    ),
-                                            ),
-                                          ),
-                                        ),
-                                      // 拖的是本章的页（滚动模式是本章的比例），拖的时候上面显示章节名和页码，松手跳过去；跨章用两边的按钮或目录
-                                      if (content.hasValue)
-                                        ValueListenableBuilder<(int, int)>(
-                                          valueListenable: _nav.page,
-                                          builder: (context, pg, _) => ValueListenableBuilder<double?>(
-                                            valueListenable: _slide,
-                                            builder: (context, slide, _) {
-                                              final paged = prefs.mode != 0;
-                                              final c = content.value!;
-                                              final len = c.text.length;
-                                              final imgs = c.images.length;
-                                              final total = paged ? pg.$2 : 100;
-                                              final cur = paged
-                                                  ? pg.$1
-                                                  : (len > 0
-                                                        ? (_pos.value * 100 ~/ len).clamp(0, 100)
-                                                        : (imgs > 1 && _pos.value > 0 ? ((_pos.value - 1) * 100 ~/ (imgs - 1)).clamp(0, 100) : 0));
-                                              final shown = (slide ?? cur.toDouble()).round();
-                                              final label = paged ? '${shown + 1} / $total' : '$shown%';
-                                              return Column(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  Padding(
-                                                    padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-                                                    child: Row(
-                                                      children: [
-                                                          Expanded(
-                                                            child: Text(
-                                                              slide == null ? label : '$title · $label',
-                                                              textAlign: _back == null || slide != null ? TextAlign.center : TextAlign.start,
-                                                              maxLines: 1,
-                                                              overflow: TextOverflow.ellipsis,
-                                                              style: appTheme.textTheme.bodySmall?.copyWith(
-                                                                color: palette.fg.withValues(alpha: slide == null ? 0.6 : 1),
-                                                                fontWeight: slide == null ? null : FontWeight.w600,
-                                                                fontFeatures: const [FontFeature.tabularFigures()],
-                                                              ),
-                                                            ),
-                                                          ),
-                                                          AppCollapse(
-                                                            visible: _back != null && slide == null,
-                                                            axis: Axis.horizontal,
-                                                            duration: AppMotion.fast,
-                                                            child: _back == null
-                                                                ? const SizedBox.shrink()
-                                                                : ConstrainedBox(
-                                                                    constraints: const BoxConstraints(maxWidth: 220),
-                                                                    child: TextButton.icon(
-                                                                      style: TextButton.styleFrom(foregroundColor: palette.fg, visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 10), side: BorderSide(color: palette.fg.withValues(alpha: 0.25))),
-                                                                      onPressed: _returnBack,
-                                                                      icon: const Icon(Icons.undo_rounded, size: 16),
-                                                                      label: Text(_back!.cid == _cid ? '返回${_back!.label}' : '返回「${_back!.title}」', maxLines: 1, overflow: TextOverflow.ellipsis),
-                                                                    ),
-                                                                  ),
-                                                          ),
-                                                      ],
-                                                    ),
-                                                  ),
-                                                  Row(
-                                                    children: [
-                                                      IconButton(
-                                                        tooltip: hz(context, '上一章'),
-                                                        color: palette.fg,
-                                                        disabledColor: palette.fg.withValues(alpha: 0.3),
-                                                        icon: const Icon(Icons.skip_previous_rounded),
-                                                        onPressed: prev == null
-                                                            ? null
-                                                            : () {
-                                                                _markBack();
-                                                                _go(prev.cid);
-                                                              },
-                                                      ),
-                                                      Expanded(
-                                                        child: total > 1
-                                                            ? SliderTheme(
-                                                                data: _menuSlider(context, accent, palette),
-                                                                child: Slider(
-                                                                  min: 0,
-                                                                  max: (total - 1).toDouble(),
-                                                                  divisions: paged ? total - 1 : null,
-                                                                  value: (slide ?? cur.toDouble()).clamp(0, total - 1).toDouble(),
-                                                                  onChanged: (v) => _slide.value = v,
-                                                                  onChangeEnd: (v) {
-                                                                    _slide.value = null;
-                                                                    _markBack();
-                                                                    _beginScrub(); // 跳页（含仿真翻页动画完成时）触发的保存进度不收起菜单
-                                                                    paged ? _nav.toPage?.call(v.round()) : _nav.toFraction?.call(v / 100);
-                                                                  },
-                                                                ),
-                                                              )
-                                                            : const SizedBox(height: 48),
-                                                      ),
-                                                      IconButton(
-                                                        tooltip: hz(context, '下一章'),
-                                                        color: palette.fg,
-                                                        disabledColor: palette.fg.withValues(alpha: 0.3),
-                                                        icon: const Icon(Icons.skip_next_rounded),
-                                                        onPressed: next == null
-                                                            ? null
-                                                            : () {
-                                                                _markBack();
-                                                                _go(next.cid);
-                                                              },
-                                                      ),
-                                                    ],
-                                                  ),
-                                                ],
-                                              );
-                                            },
-                                          ),
-                                        ),
-                                      ValueListenableBuilder<bool>(
-                                        valueListenable: _tts.active,
-                                        builder: (_, speaking, _) => ListenableBuilder(
-                                          listenable: _autoScroll,
-                                          builder: (_, _) {
-                                            final autoActive = _autoScroll.isActive;
-                                            return Row(
-                                              children: [
-                                                for (final item in <(IconData, String, VoidCallback, VoidCallback?)>[
-                                                  (Icons.format_list_bulleted_rounded, '目录', () => _openCatalogueSheet(novel?.catalogue ?? const [], palette, accent), null),
-                                                  (Bookmarks.has(widget.aid, _cid, _offset) ? Icons.bookmark : Icons.bookmark_border, '书签', _addBookmark, null),
-                                                  (
-                                                    autoActive ? Icons.stop_circle_outlined : Icons.slow_motion_video_rounded,
-                                                    autoActive ? '停自动' : '自动阅读',
-                                                    () => _toggleAutoScroll(prefs),
-                                                    null,
-                                                  ),
-                                                  (
-                                                    speaking ? Icons.stop_circle_outlined : Icons.record_voice_over_outlined,
-                                                    speaking ? '停止' : '朗读',
-                                                    () => speaking ? _tts.stop() : content.whenData(_startTts),
-                                                    () => _openTtsSheet(palette, accent),
-                                                  ),
-                                                  (Icons.settings_outlined, '设置', () => _openSettingsSheet(palette, accent), null),
-                                                ])
-                                                  Expanded(
-                                                    child: AppPressScale(
-                                                      scale: 0.92,
-                                                      child: InkWell(
-                                                        onTap: item.$3,
-                                                        onLongPress: item.$4,
-                                                        child: Padding(
-                                                          padding: const EdgeInsets.symmetric(vertical: 8),
-                                                          child: Column(
-                                                            mainAxisSize: MainAxisSize.min,
-                                                            children: [
-                                                              AppIconSwap(
-                                                                child: Icon(item.$1, key: ValueKey(item.$1), size: 21, weight: 300, color: palette.fg.withValues(alpha: 0.85)),
-                                                              ),
-                                                              const SizedBox(height: 3),
-                                                              Text(item.$2, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.65))),
-                                                            ],
-                                                          ),
+                      child: _ReaderSlideBar(
+                        visible: _bar,
+                        hiddenOffset: const Offset(0, 1),
+                        builder: (context) => AnimatedContainer(
+                          duration: AppMotion.dur(context, AppMotion.standard),
+                          curve: AppMotion.curve,
+                          decoration: BoxDecoration(
+                            color: palette.bg,
+                            border: Border(top: BorderSide(color: palette.fg.withValues(alpha: 0.12))),
+                          ),
+                          child: Material(
+                            type: MaterialType.transparency,
+                            child: SafeArea(
+                              top: false,
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  ValueListenableBuilder<bool>(
+                                    valueListenable: _tts.active,
+                                    builder: (_, speaking, _) => ListenableBuilder(
+                                      listenable: _autoScroll,
+                                      builder: (_, _) => AppCollapse(
+                                        visible: speaking || _autoScroll.isActive,
+                                        duration: AppMotion.fast,
+                                        reverseDuration: AppMotion.fast,
+                                        child: speaking
+                                            ? ReaderTtsBar(
+                                                tts: _tts,
+                                                palette: palette,
+                                                accent: accent,
+                                                embedded: true,
+                                                onOpenSettings: () => _openTtsSheet(palette, accent),
+                                              )
+                                            : ReaderAutoScrollBar(
+                                                controller: _autoScroll,
+                                                palette: palette,
+                                                accent: accent,
+                                                embedded: true,
+                                              ),
+                                      ),
+                                    ),
+                                  ),
+                                  // 拖的是本章的页（滚动模式是本章的比例），拖的时候上面显示章节名和页码，松手跳过去；跨章用两边的按钮或目录
+                                  if (content.hasValue)
+                                    ValueListenableBuilder<(int, int)>(
+                                      valueListenable: _nav.page,
+                                      builder: (context, pg, _) => ValueListenableBuilder<double?>(
+                                        valueListenable: _slide,
+                                        builder: (context, slide, _) {
+                                          final paged = prefs.mode != 0;
+                                          final c = content.value!;
+                                          final len = c.text.length;
+                                          final imgs = c.images.length;
+                                          final total = paged ? pg.$2 : 100;
+                                          final cur = paged
+                                              ? pg.$1
+                                              : (len > 0
+                                                    ? (_pos.value * 100 ~/ len).clamp(0, 100)
+                                                    : (imgs > 1 && _pos.value > 0 ? ((_pos.value - 1) * 100 ~/ (imgs - 1)).clamp(0, 100) : 0));
+                                          final shown = (slide ?? cur.toDouble()).round();
+                                          final label = paged ? '${shown + 1} / $total' : '$shown%';
+                                          return Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Padding(
+                                                padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+                                                child: Row(
+                                                  children: [
+                                                    Expanded(
+                                                      child: Text(
+                                                        slide == null ? label : '$title · $label',
+                                                        textAlign: _back == null || slide != null ? TextAlign.center : TextAlign.start,
+                                                        maxLines: 1,
+                                                        overflow: TextOverflow.ellipsis,
+                                                        style: appTheme.textTheme.bodySmall?.copyWith(
+                                                          color: palette.fg.withValues(alpha: slide == null ? 0.6 : 1),
+                                                          fontWeight: slide == null ? null : FontWeight.w600,
+                                                          fontFeatures: const [FontFeature.tabularFigures()],
                                                         ),
                                                       ),
                                                     ),
+                                                    AppCollapse(
+                                                      visible: _back != null && slide == null,
+                                                      axis: Axis.horizontal,
+                                                      duration: AppMotion.fast,
+                                                      child: _back == null
+                                                          ? const SizedBox.shrink()
+                                                          : ConstrainedBox(
+                                                              constraints: const BoxConstraints(maxWidth: 220),
+                                                              child: TextButton.icon(
+                                                                style: TextButton.styleFrom(foregroundColor: palette.fg, visualDensity: VisualDensity.compact, padding: const EdgeInsets.symmetric(horizontal: 10), side: BorderSide(color: palette.fg.withValues(alpha: 0.25))),
+                                                                onPressed: _returnBack,
+                                                                icon: const Icon(Icons.undo_rounded, size: 16),
+                                                                label: Text(_back!.cid == _cid ? '返回${_back!.label}' : '返回「${_back!.title}」', maxLines: 1, overflow: TextOverflow.ellipsis),
+                                                              ),
+                                                            ),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                              Row(
+                                                children: [
+                                                  IconButton(
+                                                    tooltip: hz(context, '上一章'),
+                                                    color: palette.fg,
+                                                    disabledColor: palette.fg.withValues(alpha: 0.3),
+                                                    icon: const Icon(Icons.skip_previous_rounded),
+                                                    onPressed: prev == null
+                                                        ? null
+                                                        : () {
+                                                            _markBack();
+                                                            _go(prev.cid);
+                                                          },
                                                   ),
-                                              ],
-                                            );
-                                          },
-                                        ),
+                                                  Expanded(
+                                                    child: total > 1
+                                                        ? SliderTheme(
+                                                            data: _menuSlider(context, accent, palette),
+                                                            child: Slider(
+                                                              min: 0,
+                                                              max: (total - 1).toDouble(),
+                                                              divisions: paged ? total - 1 : null,
+                                                              value: (slide ?? cur.toDouble()).clamp(0, total - 1).toDouble(),
+                                                              onChanged: (v) => _slide.value = v,
+                                                              onChangeEnd: (v) {
+                                                                _slide.value = null;
+                                                                _markBack();
+                                                                _beginScrub(); // 跳页（含仿真翻页动画完成时）触发的保存进度不收起菜单
+                                                                paged ? _nav.toPage?.call(v.round()) : _nav.toFraction?.call(v / 100);
+                                                              },
+                                                            ),
+                                                          )
+                                                        : const SizedBox(height: 48),
+                                                  ),
+                                                  IconButton(
+                                                    tooltip: hz(context, '下一章'),
+                                                    color: palette.fg,
+                                                    disabledColor: palette.fg.withValues(alpha: 0.3),
+                                                    icon: const Icon(Icons.skip_next_rounded),
+                                                    onPressed: next == null
+                                                        ? null
+                                                        : () {
+                                                            _markBack();
+                                                            _go(next.cid);
+                                                          },
+                                                  ),
+                                                ],
+                                              ),
+                                            ],
+                                          );
+                                        },
                                       ),
-                                    ],
+                                    ),
+                                  ValueListenableBuilder<bool>(
+                                    valueListenable: _tts.active,
+                                    builder: (_, speaking, _) => ListenableBuilder(
+                                      listenable: _autoScroll,
+                                      builder: (_, _) {
+                                        final autoActive = _autoScroll.isActive;
+                                        return Row(
+                                          children: [
+                                            for (final item in <(IconData, String, VoidCallback, VoidCallback?)>[
+                                              (Icons.format_list_bulleted_rounded, '目录', () => _openCatalogueSheet(novel?.catalogue ?? const [], palette, accent), null),
+                                              (Bookmarks.has(widget.aid, _cid, _offset) ? Icons.bookmark : Icons.bookmark_border, '书签', _addBookmark, null),
+                                              (
+                                                autoActive ? Icons.stop_circle_outlined : Icons.slow_motion_video_rounded,
+                                                autoActive ? '停自动' : '自动阅读',
+                                                () => _toggleAutoScroll(prefs),
+                                                null,
+                                              ),
+                                              (
+                                                speaking ? Icons.stop_circle_outlined : Icons.record_voice_over_outlined,
+                                                speaking ? '停止' : '朗读',
+                                                () => speaking ? _tts.stop() : content.whenData(_startTts),
+                                                () => _openTtsSheet(palette, accent),
+                                              ),
+                                              (Icons.settings_outlined, '设置', () => _openSettingsSheet(palette, accent), null),
+                                            ])
+                                              Expanded(
+                                                child: AppPressScale(
+                                                  scale: 0.92,
+                                                  child: InkWell(
+                                                    onTap: item.$3,
+                                                    onLongPress: item.$4,
+                                                    child: Padding(
+                                                      padding: const EdgeInsets.symmetric(vertical: 8),
+                                                      child: Column(
+                                                        mainAxisSize: MainAxisSize.min,
+                                                        children: [
+                                                          AppIconSwap(
+                                                            child: Icon(item.$1, key: ValueKey(item.$1), size: 21, weight: 300, color: palette.fg.withValues(alpha: 0.85)),
+                                                          ),
+                                                          const SizedBox(height: 3),
+                                                          Text(item.$2, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11, color: palette.fg.withValues(alpha: 0.65))),
+                                                        ],
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        );
+                                      },
+                                    ),
                                   ),
-                                ),
-                              ),
+                                ],
                               ),
                             ),
                           ),
@@ -1676,6 +1687,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
   }
 
   /// 预加载后续单章：走后台低优队列，跳过已在途请求，退出阅读器自动取消。
+  /// 全程关闭 Cloudflare 过盾弹窗（含无痕模式预热下一章），避免后台预取突然弹盾。
   Future<void> _prefetchAhead(String cid, bool wifiOnly) async {
     if (!mounted || _preloadCancel.isCancelled) return;
     if (wifiOnly && !await onWifi()) {
@@ -1685,7 +1697,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
     if (!mounted || _preloadCancel.isCancelled) return;
     if (!_inFlightPrefetch.add(cid)) return;
     try {
-      if (!ChapterCache.has(widget.aid, cid) && !Incognito.on) {
+      if (Incognito.on) {
+        if (cid == _nextChapter?.cid) {
+          await runInBackground(() => prefetchChapterSilent(ref, widget.aid, cid));
+          if (mounted && !_preloadCancel.isCancelled) setState(() {});
+        }
+        return;
+      }
+      if (!ChapterCache.has(widget.aid, cid)) {
         final ticket = ChapterCache.ticket(widget.aid, cid);
         final raw = await runInBackground(
           () => _fetchChapterRaw(
@@ -1709,7 +1728,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       if (!mounted || _preloadCancel.isCancelled) return;
       // 仅紧邻的下一章需要预热进内存 chapterProvider 以便无缝翻章秒接；更远章节落盘即可，且不提前下载未来章插图集
       if (cid == _nextChapter?.cid) {
-        await runInBackground(() => ref.read(chapterProvider((widget.aid, cid)).future));
+        await runInBackground(() => prefetchChapterSilent(ref, widget.aid, cid));
         if (mounted && !_preloadCancel.isCancelled) setState(() {});
       }
     } catch (_) {
@@ -1757,7 +1776,6 @@ class _ReaderPageState extends ConsumerState<ReaderPage> with WidgetsBindingObse
       } finally {
         _inFlightPrefetch.remove(c.cid);
       }
-      await Future<void>.delayed(const Duration(milliseconds: 400));
     }
   }
 

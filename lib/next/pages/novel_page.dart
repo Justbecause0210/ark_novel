@@ -1,6 +1,7 @@
 import 'dart:async' show unawaited;
 import 'dart:math' as math;
 
+import 'package:dio/dio.dart' show CancelToken, DioException, DioExceptionType;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter/physics.dart' show SpringSimulation;
 import 'package:flutter/services.dart' show HapticFeedback, LogicalKeyboardKey;
@@ -21,6 +22,7 @@ import '../env.dart';
 import '../export_book.dart';
 import '../image_cache.dart';
 import '../library.dart';
+import '../main.dart' show evictInactiveImageCache;
 import '../motion.dart';
 import '../stats.dart';
 import '../volume_covers.dart';
@@ -57,7 +59,12 @@ bool isNovelCacheFresh(String base, String aid, {Duration ttl = novelCacheTtl, D
 final novelProvider = StreamProvider.autoDispose.family<NovelPage, String>((ref, aid) async* {
   final api = ref.watch(apiProvider);
   final base = siteBase(ref.watch(nodeProvider));
+  final cancelToken = CancelToken();
+  ref.onDispose(() {
+    if (!cancelToken.isCancelled) cancelToken.cancel('disposed');
+  });
   final saved = await api.saved(aid);
+  if (cancelToken.isCancelled) return;
   if (saved != null) {
     await Volumes.saveCatalogue(aid, saved.catalogue);
     await UpdateStore.noteKnownCount(aid, saved.catalogue.expand((v) => v.chapters).length);
@@ -65,7 +72,8 @@ final novelProvider = StreamProvider.autoDispose.family<NovelPage, String>((ref,
     if (isNovelCacheFresh(base, aid)) return;
   }
   try {
-    final fresh = await api.novel(aid);
+    final fresh = await api.novel(aid, cancelToken: cancelToken);
+    if (cancelToken.isCancelled) return;
     final d = fresh.detail;
     // 请求期间退出了详情页：这个 provider 已经销毁，不能再用 ref（书架那边的书名、封面等下次再记）
     if (ref.mounted) await ref.read(libraryProvider.notifier).noteDetail(aid, title: d.title, img: d.imgUrl, status: d.status);
@@ -74,7 +82,11 @@ final novelProvider = StreamProvider.autoDispose.family<NovelPage, String>((ref,
     // 读过的书补记书名（离线时读的统计里没有书名，会显示成"书号"）
     if (ReadingStats.perBook().containsKey(aid)) await ReadingStats.setMeta(aid, d.title, d.author, d.imgUrl);
     yield fresh;
+  } on DioException catch (e) {
+    if (e.type == DioExceptionType.cancel || cancelToken.isCancelled) return;
+    if (saved == null) rethrow;
   } catch (_) {
+    if (cancelToken.isCancelled) return;
     if (saved == null) rethrow;
   }
 });
@@ -92,13 +104,17 @@ final readerNovelProvider = FutureProvider.autoDispose.family<NovelPage, String>
   } catch (_) {
     return ref.watch(novelProvider(aid).future);
   }
+  final cancelToken = CancelToken();
+  ref.onDispose(() {
+    if (!cancelToken.isCancelled) cancelToken.cancel('disposed');
+  });
   final saved = await api.saved(aid);
   if (saved != null) {
     await Volumes.saveCatalogue(aid, saved.catalogue);
     await UpdateStore.noteKnownCount(aid, saved.catalogue.expand((v) => v.chapters).length);
     return saved;
   }
-  final fresh = await api.novel(aid);
+  final fresh = await api.novel(aid, cancelToken: cancelToken);
   final d = fresh.detail;
   if (ref.mounted) await ref.read(libraryProvider.notifier).noteDetail(aid, title: d.title, img: d.imgUrl, status: d.status);
   await Volumes.saveCatalogue(aid, fresh.catalogue);
@@ -151,13 +167,82 @@ class _BodyState extends ConsumerState<_Body> {
   final _focus = FocusNode(debugLabel: 'novel-catalogue');
   late ChapterListOptions _chl = ChapterListOptions.of(widget.aid);
   Map<String, int> _indexOf = const {};
+  List<CatChapter> _allChapters = const [];
+  List<CatChapter> _latestChapters = const [];
+  Map<String, String> _titleByCid = const {};
+
+  // 未读统计记忆化：仅当章节列表 / 已读视图 / 分卷快照变更时重算
+  List<CatChapter>? _unreadAllRef;
+  Set<String>? _unreadReadRef;
+  List<Vol>? _unreadVolsRef;
+  int _cachedUnread = 0;
+
+  // 简介溢出 TextPainter 记忆化
+  String? _introCacheText;
+  TextStyle? _introCacheStyle;
+  double? _introCacheWidth;
+  TextScaler? _introCacheScaler;
+  TextDirection? _introCacheDir;
+  bool _introCacheOver = false;
 
   String get aid => widget.aid;
   NovelPage get data => widget.data;
   late final VolumeCoverQueue _covers; // dispose 里不能再用 ref，先取好
 
   void _rebuildIndex() {
-    _indexOf = {for (final (i, c) in data.catalogue.expand((v) => v.chapters).indexed) c.cid: i + 1};
+    final all = <CatChapter>[];
+    final indexOf = <String, int>{};
+    final titleByCid = <String, String>{};
+    for (final v in data.catalogue) {
+      for (final c in v.chapters) {
+        all.add(c);
+        indexOf[c.cid] = all.length;
+        titleByCid[c.cid] = c.title;
+      }
+    }
+    _allChapters = all;
+    _latestChapters = all.length <= 3 ? all.reversed.toList() : all.sublist(all.length - 3).reversed.toList();
+    _indexOf = indexOf;
+    _titleByCid = titleByCid;
+    _unreadAllRef = null;
+  }
+
+  int _unreadCount(Set<String> read, List<Vol> vols) {
+    if (identical(_unreadAllRef, _allChapters) && identical(_unreadReadRef, read) && identical(_unreadVolsRef, vols)) {
+      return _cachedUnread;
+    }
+    final skippedIllus = {
+      for (final v in vols)
+        if (v.illus != null && v.textCids.isNotEmpty && v.textCids.every(read.contains) && !read.contains(v.illus)) v.illus!,
+    };
+    var count = 0;
+    for (final c in _allChapters) {
+      if (!read.contains(c.cid) && !skippedIllus.contains(c.cid)) count++;
+    }
+    _unreadAllRef = _allChapters;
+    _unreadReadRef = read;
+    _unreadVolsRef = vols;
+    _cachedUnread = count;
+    return count;
+  }
+
+  bool _introExceedsMaxLines(BuildContext context, String intro, TextStyle? style, double maxWidth) {
+    final text = hz(context, intro);
+    final scaler = MediaQuery.textScalerOf(context);
+    final dir = Directionality.of(context);
+    if (_introCacheText == text && _introCacheStyle == style && _introCacheWidth == maxWidth && _introCacheScaler == scaler && _introCacheDir == dir) {
+      return _introCacheOver;
+    }
+    final tp = TextPainter(text: TextSpan(text: text, style: style), maxLines: 5, textDirection: dir, textScaler: scaler)..layout(maxWidth: maxWidth);
+    final over = tp.didExceedMaxLines;
+    tp.dispose();
+    _introCacheText = text;
+    _introCacheStyle = style;
+    _introCacheWidth = maxWidth;
+    _introCacheScaler = scaler;
+    _introCacheDir = dir;
+    _introCacheOver = over;
+    return over;
   }
 
   void _initExpanded() {
@@ -246,7 +331,7 @@ class _BodyState extends ConsumerState<_Body> {
     ];
   }
 
-  String? _firstCid() => data.catalogue.expand((v) => v.chapters).firstOrNull?.cid;
+  String? _firstCid() => _allChapters.firstOrNull?.cid;
 
   void _openCoverViewer(BuildContext context, String cover) {
     final reduce = AppMotion.reduce(context);
@@ -257,14 +342,7 @@ class _BodyState extends ConsumerState<_Body> {
       barrierColor: Colors.transparent,
       transitionDuration: reduce ? Duration.zero : AppMotion.standard,
       pageBuilder: (ctx, _, _) => _CoverFullscreenDialog(url: cover, ref: ref),
-      transitionBuilder: (_, anim, _, child) {
-        if (reduce) return FadeTransition(opacity: anim, child: child);
-        final curved = CurvedAnimation(parent: anim, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit);
-        return FadeTransition(
-          opacity: curved,
-          child: ScaleTransition(scale: Tween<double>(begin: 0.94, end: 1.0).animate(curved), child: child),
-        );
-      },
+      transitionBuilder: (_, anim, _, child) => reduce ? FadeTransition(opacity: anim, child: child) : _CoverViewerTransition(animation: anim, child: child),
     );
   }
 
@@ -293,16 +371,12 @@ class _BodyState extends ConsumerState<_Body> {
     final cover = ref.read(volumeCoverQueueProvider).bookCover(aid, d.imgUrl);
     final inLib = ref.watch(libraryProvider.select((s) => s.books.containsKey(aid)));
     final progress = ReadingProgress.of(aid);
-    final all = data.catalogue.expand((v) => v.chapters).toList();
+    final all = _allChapters;
     final read = ReadState.readView(aid);
     final markedCids = Bookmarks.bookmarkedCids(aid);
     final doneVols = Volumes.done(aid);
-    final skippedIllus = {
-      for (final v in Volumes.of(aid))
-        if (v.illus != null && v.textCids.isNotEmpty && v.textCids.every(read.contains) && !read.contains(v.illus)) v.illus!,
-    };
-    final unread = all.where((c) => !read.contains(c.cid) && !skippedIllus.contains(c.cid)).length;
-    final latest = all.reversed.take(3).toList();
+    final unread = _unreadCount(read, Volumes.of(aid));
+    final latest = _latestChapters;
     final startCid = progress?.cid ?? _firstCid();
     final muted = theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant);
     final shownTitle = LibraryStore.shown(aid, d.title);
@@ -400,8 +474,8 @@ class _BodyState extends ConsumerState<_Body> {
                           children: [
                             Text(progress == null ? '开始阅读' : '继续阅读', style: const TextStyle(fontWeight: FontWeight.w700)),
                             // 读到哪一章写在按钮里，不用点进去才知道
-                            if (all.where((c) => c.cid == startCid).firstOrNull?.title case final t?)
-                              Text(t, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onPrimary.withValues(alpha: 0.8))),
+                            if (startCid != null && _titleByCid[startCid] != null)
+                              Text(_titleByCid[startCid]!, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.onPrimary.withValues(alpha: 0.8))),
                           ],
                         ),
                       ),
@@ -468,7 +542,7 @@ class _BodyState extends ConsumerState<_Body> {
               ),
             ),
           ),
-        _DownloadRow(aid: aid, title: d.title, data: data),
+        _DownloadRow(aid: aid, title: d.title, data: data, chapters: all),
         const SizedBox(height: 8),
         Card(
           child: Padding(
@@ -513,9 +587,7 @@ class _BodyState extends ConsumerState<_Body> {
           builder: (context, c) {
             final intro = d.introduce.trim().isEmpty ? '暂无简介' : d.introduce.trim();
             final style = theme.textTheme.bodyMedium?.copyWith(height: 1.6);
-            final tp = TextPainter(text: TextSpan(text: intro, style: style), maxLines: 5, textDirection: TextDirection.ltr, textScaler: MediaQuery.textScalerOf(context))..layout(maxWidth: c.maxWidth);
-            final over = tp.didExceedMaxLines;
-            tp.dispose();
+            final over = _introExceedsMaxLines(context, intro, style, c.maxWidth);
             return Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -829,7 +901,7 @@ class _BodyState extends ConsumerState<_Body> {
 
   /// 只选了一章时：它前面的所有章节标为已读（Mihon 的"标记前面的为已读"）
   Future<void> _markBefore() async {
-    final all = data.catalogue.expand((v) => v.chapters).toList();
+    final all = _allChapters;
     final i = all.indexWhere((c) => _picked.contains(c.cid));
     if (i > 0) await ReadState.setRead(aid, all.take(i).map((c) => c.cid), true);
     if (mounted) setState(_picked.clear);
@@ -839,6 +911,54 @@ class _BodyState extends ConsumerState<_Body> {
     await ReadState.setRead(aid, _picked, read);
     if (mounted) setState(_picked.clear);
   }
+}
+
+/// 封面全屏弹窗过渡：持有并释放 [CurvedAnimation]，避免每次弹窗动画帧泄漏监听。
+class _CoverViewerTransition extends StatefulWidget {
+  const _CoverViewerTransition({required this.animation, required this.child});
+
+  final Animation<double> animation;
+  final Widget child;
+
+  @override
+  State<_CoverViewerTransition> createState() => _CoverViewerTransitionState();
+}
+
+class _CoverViewerTransitionState extends State<_CoverViewerTransition> {
+  late CurvedAnimation _curved;
+  late Animation<double> _scale;
+
+  void _bind(Animation<double> animation) {
+    _curved = CurvedAnimation(parent: animation, curve: AppMotion.decelerate, reverseCurve: AppMotion.exit);
+    _scale = Tween<double>(begin: 0.94, end: 1.0).animate(_curved);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _bind(widget.animation);
+  }
+
+  @override
+  void didUpdateWidget(_CoverViewerTransition old) {
+    super.didUpdateWidget(old);
+    if (old.animation != widget.animation) {
+      _curved.dispose();
+      _bind(widget.animation);
+    }
+  }
+
+  @override
+  void dispose() {
+    _curved.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => FadeTransition(
+    opacity: _curved,
+    child: ScaleTransition(scale: _scale, child: widget.child),
+  );
 }
 
 /// 封面全屏查看：黑底、可双指/双击缩放，带分享和关闭按钮。
@@ -855,30 +975,36 @@ class _CoverFullscreenDialog extends StatefulWidget {
 class _CoverFullscreenDialogState extends State<_CoverFullscreenDialog> with TickerProviderStateMixin {
   final _transform = TransformationController();
   late final AnimationController _zoomAnim = AnimationController(vsync: this, duration: AppMotion.standard);
-  late final AnimationController _dragAnim = AnimationController.unbounded(vsync: this);
-  Animation<Matrix4>? _matrixAnim;
+  late final CurvedAnimation _zoomCurve = CurvedAnimation(parent: _zoomAnim, curve: AppMotion.curve);
+  late final AnimationController _dragAnim = AnimationController.unbounded(vsync: this, value: 0);
+  Matrix4Tween? _zoomTween;
   Offset _doubleTapPos = Offset.zero;
   bool _controls = true;
   bool _zoomed = false;
-  double _dragY = 0;
   int _dragGen = 0;
 
   @override
   void initState() {
     super.initState();
     _transform.addListener(_syncZoom);
-    _dragAnim.addListener(() {
-      if (mounted) setState(() => _dragY = _dragAnim.value);
-    });
+    _zoomCurve.addListener(_onZoomTick);
   }
 
   @override
   void dispose() {
+    _zoomCurve.removeListener(_onZoomTick);
+    _zoomCurve.dispose();
     _transform.removeListener(_syncZoom);
     _transform.dispose();
     _zoomAnim.dispose();
     _dragAnim.dispose();
+    evictInactiveImageCache();
     super.dispose();
+  }
+
+  void _onZoomTick() {
+    final tween = _zoomTween;
+    if (tween != null) _transform.value = tween.evaluate(_zoomCurve);
   }
 
   void _syncZoom() {
@@ -900,8 +1026,7 @@ class _CoverFullscreenDialogState extends State<_CoverFullscreenDialog> with Tic
       _transform.value = target;
       return;
     }
-    _matrixAnim = Matrix4Tween(begin: _transform.value.clone(), end: target).animate(CurvedAnimation(parent: _zoomAnim, curve: AppMotion.curve))
-      ..addListener(() => _transform.value = _matrixAnim!.value);
+    _zoomTween = Matrix4Tween(begin: _transform.value.clone(), end: target);
     _zoomAnim.forward(from: 0);
   }
 
@@ -909,13 +1034,14 @@ class _CoverFullscreenDialogState extends State<_CoverFullscreenDialog> with Tic
     if (_zoomed) return;
     _dragGen++;
     if (_dragAnim.isAnimating) _dragAnim.stop();
-    setState(() => _dragY = (_dragY + d.delta.dy).clamp(-60.0, 420.0));
+    _dragAnim.value = (_dragAnim.value + d.delta.dy).clamp(-60.0, 420.0);
   }
 
   void _onVerticalDragEnd(DragEndDetails d) {
     if (_zoomed) return;
+    final dragY = _dragAnim.value;
     final vy = d.velocity.pixelsPerSecond.dy;
-    if (_dragY > 110 || (_dragY > 36 && vy > 700)) {
+    if (dragY > 110 || (dragY > 36 && vy > 700)) {
       Navigator.of(context).maybePop();
       return;
     }
@@ -923,90 +1049,98 @@ class _CoverFullscreenDialogState extends State<_CoverFullscreenDialog> with Tic
   }
 
   void _springBack([double vy = 0]) {
-    if (_dragY == 0) return;
+    final dragY = _dragAnim.value;
+    if (dragY == 0) return;
     final gen = ++_dragGen;
     if (AppMotion.reduce(context)) {
-      setState(() => _dragY = 0);
+      _dragAnim.value = 0;
       return;
     }
-    _dragAnim.animateWith(SpringSimulation(AppMotion.smoothSpring, _dragY, 0, vy.clamp(-2400.0, 2400.0), tolerance: AppMotion.pixelTolerance)).then((_) {
-      if (mounted && gen == _dragGen && _dragY != 0) setState(() => _dragY = 0);
+    _dragAnim.animateWith(SpringSimulation(AppMotion.smoothSpring, dragY, 0, vy.clamp(-2400.0, 2400.0), tolerance: AppMotion.pixelTolerance)).then((_) {
+      if (mounted && gen == _dragGen && _dragAnim.value != 0) _dragAnim.value = 0;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final progress = (_dragY.clamp(0.0, 320.0) / 320.0).clamp(0.0, 1.0);
-    final bgAlpha = (1.0 - progress * 0.72).clamp(0.25, 1.0);
-    final dragScale = 1.0 - progress * 0.14;
-    final showControls = _controls && _dragY.abs() < 6;
-    return Material(
-      color: Colors.black.withValues(alpha: bgAlpha),
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _controls = !_controls),
-            onDoubleTapDown: (d) => _doubleTapPos = d.localPosition,
-            onDoubleTap: _toggleZoom,
-            onVerticalDragUpdate: _zoomed ? null : _onVerticalDragUpdate,
-            onVerticalDragEnd: _zoomed ? null : _onVerticalDragEnd,
-            onVerticalDragCancel: _zoomed ? null : _springBack,
-            child: Transform.translate(
-              offset: Offset(0, _dragY),
-              child: Transform.scale(
-                scale: dragScale,
-                child: InteractiveViewer(
-                  transformationController: _transform,
-                  panEnabled: _zoomed,
-                  minScale: 1.0,
-                  maxScale: 5.0,
-                  child: Center(child: NetImage(widget.url, fit: BoxFit.contain, full: true)),
+    final topInset = MediaQuery.paddingOf(context).top;
+    final viewer = InteractiveViewer(
+      transformationController: _transform,
+      panEnabled: _zoomed,
+      minScale: 1.0,
+      maxScale: 5.0,
+      child: Center(child: NetImage(widget.url, fit: BoxFit.contain, full: true)),
+    );
+    final actionButtons = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (!isWebPreview)
+          IconButton.filledTonal(
+            tooltip: hz(context, '保存或分享封面'),
+            style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
+            icon: const Icon(Icons.ios_share, size: 20),
+            onPressed: () async {
+              try {
+                final filePath = await widget.ref.read(imageStoreProvider).path(widget.url);
+                await SharePlus.instance.share(ShareParams(files: [XFile(filePath)]));
+              } catch (e) {
+                if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出图片失败：$e')));
+              }
+            },
+          ),
+        const SizedBox(width: 8),
+        IconButton.filledTonal(
+          tooltip: hz(context, '关闭'),
+          style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
+          icon: const Icon(Icons.close, size: 20),
+          onPressed: () => Navigator.pop(context),
+        ),
+      ],
+    );
+    return AnimatedBuilder(
+      animation: _dragAnim,
+      child: viewer,
+      builder: (context, child) {
+        final dragY = _dragAnim.value;
+        final progress = (dragY.clamp(0.0, 320.0) / 320.0).clamp(0.0, 1.0);
+        final bgAlpha = (1.0 - progress * 0.72).clamp(0.25, 1.0);
+        final dragScale = 1.0 - progress * 0.14;
+        final showControls = _controls && dragY.abs() < 6;
+        return Material(
+          color: Colors.black.withValues(alpha: bgAlpha),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => setState(() => _controls = !_controls),
+                onDoubleTapDown: (d) => _doubleTapPos = d.localPosition,
+                onDoubleTap: _toggleZoom,
+                onVerticalDragUpdate: _zoomed ? null : _onVerticalDragUpdate,
+                onVerticalDragEnd: _zoomed ? null : _onVerticalDragEnd,
+                onVerticalDragCancel: _zoomed ? null : _springBack,
+                child: Transform.translate(
+                  offset: Offset(0, dragY),
+                  child: Transform.scale(scale: dragScale, child: child),
                 ),
               ),
-            ),
-          ),
-          Positioned(
-            top: MediaQuery.paddingOf(context).top + 8,
-            right: 12,
-            child: IgnorePointer(
-              ignoring: !showControls,
-              child: AnimatedOpacity(
-                opacity: showControls ? 1.0 : 0.0,
-                duration: AppMotion.dur(context, AppMotion.fast),
-                curve: AppMotion.curve,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (!isWebPreview)
-                      IconButton.filledTonal(
-                        tooltip: hz(context, '保存或分享封面'),
-                        style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
-                        icon: const Icon(Icons.ios_share, size: 20),
-                        onPressed: () async {
-                          try {
-                            final filePath = await widget.ref.read(imageStoreProvider).path(widget.url);
-                            await SharePlus.instance.share(ShareParams(files: [XFile(filePath)]));
-                          } catch (e) {
-                            if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('导出图片失败：$e')));
-                          }
-                        },
-                      ),
-                    const SizedBox(width: 8),
-                    IconButton.filledTonal(
-                      tooltip: hz(context, '关闭'),
-                      style: IconButton.styleFrom(backgroundColor: Colors.black54, foregroundColor: Colors.white),
-                      icon: const Icon(Icons.close, size: 20),
-                      onPressed: () => Navigator.pop(context),
-                    ),
-                  ],
+              Positioned(
+                top: topInset + 8,
+                right: 12,
+                child: IgnorePointer(
+                  ignoring: !showControls,
+                  child: AnimatedOpacity(
+                    opacity: showControls ? 1.0 : 0.0,
+                    duration: AppMotion.dur(context, AppMotion.fast),
+                    curve: AppMotion.curve,
+                    child: actionButtons,
+                  ),
                 ),
               ),
-            ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -1080,15 +1214,15 @@ class _NovelSkeleton extends StatelessWidget {
 
 /// 缓存全本：显示已缓存章数，下载中显示进度并可取消。
 class _DownloadRow extends ConsumerWidget {
-  const _DownloadRow({required this.aid, required this.title, required this.data});
+  const _DownloadRow({required this.aid, required this.title, required this.data, required this.chapters});
 
   final String aid;
   final String title;
   final NovelPage data;
+  final List<CatChapter> chapters;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final chapters = data.catalogue.expand((v) => v.chapters).toList();
     final task = ref.watch(downloadProvider.select((m) => m[aid]));
     final cached = task?.done ?? ChapterCache.count(aid);
     final running = task?.running ?? false;

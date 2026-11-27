@@ -102,46 +102,92 @@ class HighlightStore {
 
   static final changes = ValueNotifier<int>(0);
 
-  static void notifyChanged() => changes.value++;
+  static final _unset = Object();
+  static Object? _cachedRaw = _unset;
+  static List<HighlightEntry> _cachedRawOrder = const [];
+  static List<HighlightEntry> _cachedAllSorted = const [];
+  static Map<String, List<HighlightEntry>> _cachedByAid = const {};
+  static Map<(String, String), List<HighlightEntry>> _cachedByChapter = const {};
+  static Map<String, HighlightEntry> _cachedById = const {};
 
-  static List<HighlightEntry> _rawAll() {
-    if (!Hive.isBoxOpen('session')) return <HighlightEntry>[];
+  static void _invalidateCache() {
+    _cachedRaw = _unset;
+    _cachedRawOrder = const [];
+    _cachedAllSorted = const [];
+    _cachedByAid = const {};
+    _cachedByChapter = const {};
+    _cachedById = const {};
+  }
+
+  static void notifyChanged() {
+    _invalidateCache();
+    changes.value++;
+  }
+
+  static void _ensureCache() {
+    if (!Hive.isBoxOpen('session')) {
+      _invalidateCache();
+      return;
+    }
     final raw = _box.get('highlights');
-    if (raw is! List) return <HighlightEntry>[];
-    final out = <HighlightEntry>[];
-    for (final item in raw) {
-      if (item is Map) {
-        final e = HighlightEntry.fromMap(item);
-        if (e != null) out.add(e);
+    if (identical(raw, _cachedRaw)) return;
+    final rawOrder = <HighlightEntry>[];
+    final byAid = <String, List<HighlightEntry>>{};
+    final byChapter = <(String, String), List<HighlightEntry>>{};
+    final byId = <String, HighlightEntry>{};
+    if (raw is List) {
+      for (final item in raw) {
+        if (item is Map) {
+          final e = HighlightEntry.fromMap(item);
+          if (e != null) {
+            rawOrder.add(e);
+            (byAid[e.aid] ??= <HighlightEntry>[]).add(e);
+            (byChapter[(e.aid, e.cid)] ??= <HighlightEntry>[]).add(e);
+            byId.putIfAbsent(e.id, () => e);
+          }
+        }
       }
     }
-    return out;
+    final allSorted = List<HighlightEntry>.of(rawOrder)..sort((a, b) => b.at.compareTo(a.at));
+    final frozenByAid = <String, List<HighlightEntry>>{};
+    for (final entry in byAid.entries) {
+      entry.value.sort((a, b) => b.at.compareTo(a.at));
+      frozenByAid[entry.key] = List<HighlightEntry>.unmodifiable(entry.value);
+    }
+    final frozenByChapter = <(String, String), List<HighlightEntry>>{};
+    for (final entry in byChapter.entries) {
+      entry.value.sort((a, b) => a.start != b.start ? a.start.compareTo(b.start) : a.end.compareTo(b.end));
+      frozenByChapter[entry.key] = List<HighlightEntry>.unmodifiable(entry.value);
+    }
+    _cachedRaw = raw;
+    _cachedRawOrder = List<HighlightEntry>.unmodifiable(rawOrder);
+    _cachedAllSorted = List<HighlightEntry>.unmodifiable(allSorted);
+    _cachedByAid = frozenByAid;
+    _cachedByChapter = frozenByChapter;
+    _cachedById = byId;
   }
 
   /// 全部划线或某本书的划线（按时间倒序）。
   static List<HighlightEntry> all([String? aid]) {
-    final list = aid == null ? _rawAll() : _rawAll().where((e) => e.aid == aid).toList();
-    list.sort((a, b) => b.at.compareTo(a.at));
-    return list;
+    _ensureCache();
+    return List<HighlightEntry>.of(aid == null ? _cachedAllSorted : (_cachedByAid[aid] ?? const []));
   }
 
-  /// 某章的全部划线（按起始偏移升序，供阅读器渲染和命中检测使用）。
+  /// 某章的全部划线（按起始偏移升序，O(1) 返回不可变列表，供阅读器渲染和命中检测使用）。
   static List<HighlightEntry> forChapter(String aid, String cid) {
-    final list = _rawAll().where((e) => e.aid == aid && e.cid == cid).toList();
-    list.sort((a, b) => a.start != b.start ? a.start.compareTo(b.start) : a.end.compareTo(b.end));
-    return list;
+    _ensureCache();
+    return _cachedByChapter[(aid, cid)] ?? const <HighlightEntry>[];
   }
 
   static HighlightEntry? byId(String id) {
-    for (final e in _rawAll()) {
-      if (e.id == id) return e;
-    }
-    return null;
+    _ensureCache();
+    return _cachedById[id];
   }
 
   /// 新增或更新一条划线。
   static Future<HighlightEntry> upsert(HighlightEntry entry) async {
-    final list = _rawAll();
+    _ensureCache();
+    final list = List<HighlightEntry>.of(_cachedRawOrder);
     final idx = list.indexWhere((e) => e.id == entry.id);
     if (idx >= 0) {
       list[idx] = entry;
@@ -149,6 +195,7 @@ class HighlightStore {
       list.insert(0, entry);
     }
     await _box.put('highlights', [for (final e in list) e.toMap()]);
+    _invalidateCache();
     changes.value++;
     return entry;
   }
@@ -184,12 +231,14 @@ class HighlightStore {
 
   /// 删除划线并写入同步墓碑 `hl:$id`。
   static Future<void> remove(String id) async {
-    final list = _rawAll();
+    _ensureCache();
+    final list = List<HighlightEntry>.of(_cachedRawOrder);
     final before = list.length;
     list.removeWhere((e) => e.id == id);
     if (list.length == before) return;
     await _box.put('highlights', [for (final e in list) e.toMap()]);
     await SyncMerge.tombstone(['hl:$id']);
+    _invalidateCache();
     changes.value++;
   }
 

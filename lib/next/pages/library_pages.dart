@@ -193,7 +193,14 @@ class CachePage extends ConsumerWidget {
                 padding: const EdgeInsets.all(32),
                 children: [
                   if (art != null)
-                    Padding(padding: const EdgeInsets.only(top: 24, bottom: 12), child: Image.asset(art.empty, height: 140))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 24, bottom: 12),
+                      child: Image.asset(
+                        art.empty,
+                        height: 140,
+                        cacheHeight: (140 * MediaQuery.devicePixelRatioOf(context)).round().clamp(140, 560),
+                      ),
+                    )
                   else
                     const SizedBox(height: 64),
                   Text('还没有缓存', textAlign: TextAlign.center, style: Theme.of(context).textTheme.titleLarge),

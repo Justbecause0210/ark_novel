@@ -36,6 +36,11 @@ class _Carousel extends StatelessWidget {
     final done = Volumes.done(aid);
     final read = ReadState.readView(aid);
     final reading = readingVolume(aid);
+    // 在 AnimatedBuilder 外预计算未开始读的卷集合，避免滑动每帧扫描章节列表
+    final untouchedVols = <int>{
+      for (var i = 0; i < vols.length; i++)
+        if (!vols[i].cids.any(read.contains)) i,
+    };
     return LayoutBuilder(
       builder: (context, c) {
         final h = c.maxHeight * 0.92;
@@ -68,27 +73,26 @@ class _Carousel extends StatelessWidget {
                           builder: (context) {
                             final d = i - p;
                             final a = d.abs();
-                            // 第一张错开大半个身位，再往后的只露一条边
-                            final dx = d.sign * (w * 0.55 * math.min(a, 1) + w * 0.16 * math.max(a - 1, 0));
-                            final v = vols[i];
-                            final untouched = !v.cids.any(read.contains);
                             // 最前面那卷是飞过来的封面，不用抽；后面的从露边的位置出发，露不出边的藏在封面后面淡入
                             final k = i - cur;
                             final from = i == cur ? null : stackPose(math.min(math.max(k, 0), edges), w);
-                            double lerp(double a, double b) => from == null ? b : a + (b - a) * q;
-                            final shade = math.min(a, 1.5) * 0.3;
-                            final card = RepaintBoundary(
-                              child: _VolumeCard(
-                                url: coverOf(v),
-                                width: w,
-                                done: done.containsKey(v.title),
-                                reading: i == reading,
-                                untouched: from == null && untouched,
-                                shade: lerp(from?.dim ?? 0, shade + (from != null && untouched ? 0.2 : 0)),
-                              ),
-                            );
                             final show = from == null ? 1.0 : (flying ? 0.0 : (k >= 1 && k <= edges ? 1.0 : q));
                             final effOpacity = (3.2 - a).clamp(0.0, 1.0) * show * (i == cur ? 1.0 : fade);
+                            if (effOpacity <= 0.005) return const SizedBox.shrink();
+                            // 第一张错开大半个身位，再往后的只露一条边
+                            final dx = d.sign * (w * 0.55 * math.min(a, 1) + w * 0.16 * math.max(a - 1, 0));
+                            final v = vols[i];
+                            final untouched = untouchedVols.contains(i);
+                            double lerp(double a, double b) => from == null ? b : a + (b - a) * q;
+                            final shade = math.min(a, 1.5) * 0.3;
+                            final card = _VolumeCard(
+                              url: coverOf(v),
+                              width: w,
+                              done: done.containsKey(v.title),
+                              reading: i == reading,
+                              untouched: from == null && untouched,
+                              shade: lerp(from?.dim ?? 0, shade + (from != null && untouched ? 0.2 : 0)),
+                            );
                             Widget item = Transform.translate(
                               offset: Offset(lerp(from?.dx ?? 0, dx), 0),
                               child: Transform.scale(
@@ -102,7 +106,7 @@ class _Carousel extends StatelessWidget {
                                     : card,
                               ),
                             );
-                            if (effOpacity < 0.999) item = Opacity(opacity: effOpacity, child: item);
+                            if (effOpacity < 0.995) item = Opacity(opacity: effOpacity, child: item);
                             return item;
                           },
                         ),
@@ -131,6 +135,7 @@ class _Carousel extends StatelessWidget {
 }
 
 /// 一卷的封面，带状态：读完了打勾，正在读的有"在读"标签，一章都没读的暗一点。
+/// 静态模糊阴影与封面各自独立 RepaintBoundary，动态压暗层放在封面边界之外，避免滑动每帧重绘模糊阴影与离屏光栅化封面。
 class _VolumeCard extends StatelessWidget {
   const _VolumeCard({required this.url, required this.width, required this.done, required this.reading, required this.untouched, required this.shade});
 
@@ -144,22 +149,41 @@ class _VolumeCard extends StatelessWidget {
   final double shade;
 
   @override
-  Widget build(BuildContext context) => Container(
-    width: width,
-    height: width / kCoverAspect,
-    decoration: BoxDecoration(
-      borderRadius: BorderRadius.circular(8),
-      boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.4), blurRadius: 24, offset: const Offset(0, 12))],
-    ),
-    child: ClipRRect(
-      borderRadius: BorderRadius.circular(8),
+  Widget build(BuildContext context) {
+    final h = width / kCoverAspect;
+    final radius = BorderRadius.circular(8);
+    final effShade = (shade + (untouched ? 0.2 : 0)).clamp(0.0, 0.75);
+    return SizedBox(
+      width: width,
+      height: h,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          ColoredBox(color: Colors.white.withValues(alpha: 0.15)),
-          if (TickerMode.valuesOf(context).enabled)
-            NetImage(url, decodeSize: Size(width, width / kCoverAspect), error: const Icon(Icons.menu_book_outlined, color: Colors.white54)),
-          ColoredBox(color: Colors.black.withValues(alpha: (shade + (untouched ? 0.2 : 0)).clamp(0, 0.75))),
+          RepaintBoundary(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: radius,
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.4), blurRadius: 24, offset: const Offset(0, 12))],
+              ),
+            ),
+          ),
+          RepaintBoundary(
+            child: ClipRRect(
+              borderRadius: radius,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ColoredBox(color: Colors.white.withValues(alpha: 0.15)),
+                  if (TickerMode.valuesOf(context).enabled)
+                    NetImage(url, decodeSize: Size(width, h), error: const Icon(Icons.menu_book_outlined, color: Colors.white54)),
+                ],
+              ),
+            ),
+          ),
+          if (effShade > 0.005)
+            DecoratedBox(
+              decoration: BoxDecoration(borderRadius: radius, color: Colors.black.withValues(alpha: effShade)),
+            ),
           if (reading)
             Positioned(
               top: 10,
@@ -187,8 +211,8 @@ class _VolumeCard extends StatelessWidget {
             ),
         ],
       ),
-    ),
-  );
+    );
+  }
 }
 
 String _progress(String aid, Vol v) {
@@ -319,130 +343,148 @@ class _DetailsState extends State<_Details> {
     final markedCids = Bookmarks.bookmarkedCids(aid);
     const muted = TextStyle(color: Colors.white60);
 
-    final list = ListView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-      children: [
-        Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-        const SizedBox(height: 2),
-        Row(
-          children: [
-            Expanded(child: Text(_progress(aid, v), style: muted.copyWith(fontSize: 12))),
-            AnimatedStarRating(
-              rating: rating,
-              starSize: 22,
-              itemSize: 40,
-              labelBuilder: (i) => hz(context, '$i 星评分'),
-              onChanged: (nextRating) async {
-                await Volumes.setRating(aid, v.title, nextRating);
-                if (mounted) setState(() {});
-              },
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        Row(
-          children: [
-            Expanded(
-              child: AppPressScale(
-                scale: 0.975,
-                child: FilledButton.icon(
-                  style: FilledButton.styleFrom(minimumSize: const Size(0, 40), textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                  onPressed: () => context.push(Routes.reader(aid, next)).then((_) {
-                    if (mounted) setState(() {});
-                  }),
-                  icon: const Icon(Icons.play_arrow, size: 20),
-                  label: Text(label),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            IconButton.outlined(
-              tooltip: hz(context, '简介与书评'),
-              visualDensity: VisualDensity.compact,
-              style: IconButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: const BorderSide(color: Colors.white38),
-              ),
-              onPressed: () => context.push(Routes.novel(aid)).then((_) {
-                if (mounted) setState(() {});
-              }),
-              icon: const Icon(Icons.info_outline, size: 20),
-            ),
-            const SizedBox(width: 6),
-            IconButton.outlined(
-              tooltip: hz(context, '换封面'),
-              visualDensity: VisualDensity.compact,
-              style: IconButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: const BorderSide(color: Colors.white38),
-              ),
-              onPressed: () => pickVolumeCover(context, aid, v),
-              icon: const Icon(Icons.image_outlined, size: 20),
-            ),
-            const SizedBox(width: 6),
-            IconButton.outlined(
-              tooltip: hz(context, '阅读报告'),
-              visualDensity: VisualDensity.compact,
-              style: IconButton.styleFrom(
-                foregroundColor: Colors.white,
-                side: const BorderSide(color: Colors.white38),
-              ),
-              onPressed: () => context.push(Routes.report(aid, vol: widget.index)),
-              icon: const Icon(Icons.insights, size: 20),
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        for (final (i, cid) in v.cids.indexed)
-          ChapterSwipe(
-            aid: aid,
-            book: widget.book,
-            cid: cid,
-            title: widget.chapterTitles[cid] ?? '第 ${i + 1} 章',
-            enabled: _picked.isEmpty,
-            backdrop: Color.alphaBlend(Colors.black.withValues(alpha: 0.18), widget.bg),
-            onChanged: () => setState(() {}),
-            onCache: () => widget.onCache([cid]),
-            child: GestureDetector(
-              onSecondaryTap: () => _pick(cid),
-              child: ListTile(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                // 默认给前面的图标留 40 宽再空 16，章节名左边空一大块
-                minLeadingWidth: 20,
-                horizontalTitleGap: 8,
-                leading: _picked.isNotEmpty
-                    ? Icon(_picked.contains(cid) ? Icons.check_box : Icons.check_box_outline_blank, size: 20, color: Colors.white70)
-                    : (read.contains(cid) ? const Icon(Icons.check, size: 16, color: Colors.white38) : const SizedBox(width: 16)),
-                title: Text(
-                  widget.chapterTitles[cid] ?? '第 ${i + 1} 章',
-                  style: TextStyle(
-                    color: cid == p?.cid ? Colors.white : (read.contains(cid) ? Colors.white38 : Colors.white70),
-                    fontWeight: cid == p?.cid ? FontWeight.w700 : null,
-                  ),
-                ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
+    final backdrop = Color.alphaBlend(Colors.black.withValues(alpha: 0.18), widget.bg);
+    final list = CustomScrollView(
+      slivers: [
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+          sliver: SliverToBoxAdapter(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 2),
+                Row(
                   children: [
-                    if (markedCids.contains(cid)) ...[
-                      const Icon(Icons.bookmark_rounded, size: 15, color: Color(0xFFFFC53D)),
-                      const SizedBox(width: 4),
-                    ],
-                    if (cid == p?.cid)
-                      const Text('读到这里', style: TextStyle(color: Colors.white, fontSize: 12))
-                    else if (ChapterCache.has(aid, cid))
-                      const Icon(Icons.download_for_offline_outlined, size: 15, color: Colors.white38),
+                    Expanded(child: Text(_progress(aid, v), style: muted.copyWith(fontSize: 12))),
+                    AnimatedStarRating(
+                      rating: rating,
+                      starSize: 22,
+                      itemSize: 40,
+                      labelBuilder: (i) => hz(context, '$i 星评分'),
+                      onChanged: (nextRating) async {
+                        await Volumes.setRating(aid, v.title, nextRating);
+                        if (mounted) setState(() {});
+                      },
+                    ),
                   ],
                 ),
-                onTap: _picked.isNotEmpty
-                    ? () => _pick(cid)
-                    : () => context.push(Routes.reader(aid, cid)).then((_) {
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: AppPressScale(
+                        scale: 0.975,
+                        child: FilledButton.icon(
+                          style: FilledButton.styleFrom(minimumSize: const Size(0, 40), textStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                          onPressed: () => context.push(Routes.reader(aid, next)).then((_) {
+                            if (mounted) setState(() {});
+                          }),
+                          icon: const Icon(Icons.play_arrow, size: 20),
+                          label: Text(label),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.outlined(
+                      tooltip: hz(context, '简介与书评'),
+                      visualDensity: VisualDensity.compact,
+                      style: IconButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white38),
+                      ),
+                      onPressed: () => context.push(Routes.novel(aid)).then((_) {
                         if (mounted) setState(() {});
                       }),
-                onLongPress: () => _pick(cid),
-              ),
+                      icon: const Icon(Icons.info_outline, size: 20),
+                    ),
+                    const SizedBox(width: 6),
+                    IconButton.outlined(
+                      tooltip: hz(context, '换封面'),
+                      visualDensity: VisualDensity.compact,
+                      style: IconButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white38),
+                      ),
+                      onPressed: () => pickVolumeCover(context, aid, v),
+                      icon: const Icon(Icons.image_outlined, size: 20),
+                    ),
+                    const SizedBox(width: 6),
+                    IconButton.outlined(
+                      tooltip: hz(context, '阅读报告'),
+                      visualDensity: VisualDensity.compact,
+                      style: IconButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white38),
+                      ),
+                      onPressed: () => context.push(Routes.report(aid, vol: widget.index)),
+                      icon: const Icon(Icons.insights, size: 20),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+          sliver: SliverList.builder(
+            itemCount: v.cids.length,
+            itemBuilder: (context, i) {
+              final cid = v.cids[i];
+              final chTitle = widget.chapterTitles[cid] ?? '第 ${i + 1} 章';
+              return ChapterSwipe(
+                aid: aid,
+                book: widget.book,
+                cid: cid,
+                title: chTitle,
+                enabled: _picked.isEmpty,
+                backdrop: backdrop,
+                onChanged: () => setState(() {}),
+                onCache: () => widget.onCache([cid]),
+                child: GestureDetector(
+                  onSecondaryTap: () => _pick(cid),
+                  child: ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    // 默认给前面的图标留 40 宽再空 16，章节名左边空一大块
+                    minLeadingWidth: 20,
+                    horizontalTitleGap: 8,
+                    leading: _picked.isNotEmpty
+                        ? Icon(_picked.contains(cid) ? Icons.check_box : Icons.check_box_outline_blank, size: 20, color: Colors.white70)
+                        : (read.contains(cid) ? const Icon(Icons.check, size: 16, color: Colors.white38) : const SizedBox(width: 16)),
+                    title: Text(
+                      chTitle,
+                      style: TextStyle(
+                        color: cid == p?.cid ? Colors.white : (read.contains(cid) ? Colors.white38 : Colors.white70),
+                        fontWeight: cid == p?.cid ? FontWeight.w700 : null,
+                      ),
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (markedCids.contains(cid)) ...[
+                          const Icon(Icons.bookmark_rounded, size: 15, color: Color(0xFFFFC53D)),
+                          const SizedBox(width: 4),
+                        ],
+                        if (cid == p?.cid)
+                          const Text('读到这里', style: TextStyle(color: Colors.white, fontSize: 12))
+                        else if (ChapterCache.has(aid, cid))
+                          const Icon(Icons.download_for_offline_outlined, size: 15, color: Colors.white38),
+                      ],
+                    ),
+                    onTap: _picked.isNotEmpty
+                        ? () => _pick(cid)
+                        : () => context.push(Routes.reader(aid, cid)).then((_) {
+                            if (mounted) setState(() {});
+                          }),
+                    onLongPress: () => _pick(cid),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
       ],
     );
 

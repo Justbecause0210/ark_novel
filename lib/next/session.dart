@@ -34,16 +34,20 @@ class SessionStore {
   final Box _box;
   static const _secure = FlutterSecureStorage(mOptions: MacOsOptions(usesDataProtectionKeychain: false)); // 没开发者签名的 Mac 版用不了新式钥匙串（-34018）
 
-  static Future<SessionStore> open() async {
-    if (!kIsWeb && Platform.isWindows) {
-      // Windows 默认会放进「文档」文件夹，改放 App 自己的数据目录
-      Hive.init((await Directory(p.join((await getApplicationSupportDirectory()).path, 'next')).create(recursive: true)).path);
-    } else {
+  static Future<SessionStore> open({bool openMetaCache = true}) async {
+    if (kIsWeb) {
       await Hive.initFlutter('next');
+    } else if (Platform.isWindows) {
+      // Windows 默认会放进「文档」文件夹，改放 App 自己的数据目录；复用同一次 supportDir 避免重复平台通道查询
+      final supportDir = (await getApplicationSupportDirectory()).path;
+      Hive.init((await Directory(p.join(supportDir, 'next')).create(recursive: true)).path);
+      await Backup.apply(supportDir);
+    } else {
+      final results = await Future.wait<Object?>([Hive.initFlutter('next'), getApplicationSupportDirectory()]);
+      await Backup.apply((results[1] as Directory).path);
     }
-    if (!kIsWeb) await Backup.applyPending();
     final sessionBox = await Hive.openBox('session');
-    await MetaCache.open();
+    if (openMetaCache) await MetaCache.open();
     return SessionStore._(sessionBox);
   }
 
@@ -136,10 +140,63 @@ class SessionStore {
     return i != null && i >= 0 && i < Wenku8Node.values.length ? Wenku8Node.values[i] : Wenku8Node.wwwWenku8Cc;
   }
 
-  /// 最近一次成功取到的用户页 HTML，断网时用它显示登录状态。
-  String? get userHtml => _box.get('userHtml') as String?;
+  /// 最近一次成功取到的用户页 HTML（兼容旧版本字符串格式；新版本在同一本地键存轻量结构化 Map）。
+  String? get userHtml {
+    final raw = _box.get('userHtml');
+    return raw is String ? raw : null;
+  }
 
   Future<void> setUserHtml(String? html) => html == null ? _box.delete('userHtml') : _box.put('userHtml', html);
+
+  /// 本地缓存的结构化用户信息：优先从轻量 Map 直接构造（免冷启动 HTML DOM 解析），
+  /// 若本地仍是旧版本 HTML 字符串则自动回退解析，保持完全向后兼容且复用已受备份守卫保护的 `userHtml` 本地键。
+  UserInfo? get cachedUser {
+    final raw = _box.get('userHtml');
+    if (raw is Map) return _decodeUser(raw);
+    if (raw is String) {
+      try {
+        return Wenku8Parser.userInfo(raw);
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  Future<void> setCachedUser(UserInfo? user) => user == null ? _box.delete('userHtml') : _box.put('userHtml', _encodeUser(user));
+
+  static Map<String, String> _encodeUser(UserInfo u) => {
+    'avatar': u.avatar,
+    'uid': u.uid,
+    'username': u.username,
+    'userLevel': u.userLevel,
+    'email': u.email,
+    'registerDate': u.registerDate,
+    'contribution': u.contribution,
+    'experience': u.experience,
+    'point': u.point,
+    'maxBookshelfNum': u.maxBookshelfNum,
+    'maxRecommendNum': u.maxRecommendNum,
+  };
+
+  static UserInfo? _decodeUser(Map raw) {
+    final uid = raw['uid'];
+    if (uid is! String || uid.isEmpty) return null;
+    String field(String k) => raw[k] is String ? raw[k] as String : '';
+    return UserInfo(
+      avatar: field('avatar'),
+      uid: uid,
+      username: field('username'),
+      userLevel: field('userLevel'),
+      email: field('email'),
+      registerDate: field('registerDate'),
+      contribution: field('contribution'),
+      experience: field('experience'),
+      point: field('point'),
+      maxBookshelfNum: field('maxBookshelfNum'),
+      maxRecommendNum: field('maxRecommendNum'),
+    );
+  }
 
   Future<void> setNode(Wenku8Node node) => _box.put('node', node.index);
 
@@ -416,6 +473,41 @@ class SessionLoggedIn extends SessionState {
 
   /// 离线的原因是被 Cloudflare 拦住：去验证一下就能恢复，不是真的没网
   final bool needsVerify;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SessionLoggedIn &&
+          other.offline == offline &&
+          other.needsVerify == needsVerify &&
+          other.user.uid == user.uid &&
+          other.user.username == user.username &&
+          other.user.avatar == user.avatar &&
+          other.user.userLevel == user.userLevel &&
+          other.user.email == user.email &&
+          other.user.registerDate == user.registerDate &&
+          other.user.contribution == user.contribution &&
+          other.user.experience == user.experience &&
+          other.user.point == user.point &&
+          other.user.maxBookshelfNum == user.maxBookshelfNum &&
+          other.user.maxRecommendNum == user.maxRecommendNum;
+
+  @override
+  int get hashCode => Object.hash(
+    offline,
+    needsVerify,
+    user.uid,
+    user.username,
+    user.avatar,
+    user.userLevel,
+    user.email,
+    user.registerDate,
+    user.contribution,
+    user.experience,
+    user.point,
+    user.maxBookshelfNum,
+    user.maxRecommendNum,
+  );
 }
 
 bool isCloudflare(Object e) => e is Cloudflare403Exception || e is CloudflareChallengeException;
@@ -485,14 +577,8 @@ class SessionController extends Notifier<SessionState> {
   Future<void> _cookieOp = Future<void>.value();
   bool _prunedCf = false;
 
-  static UserInfo? _tryParseUser(String? html) {
-    if (html == null) return null;
-    try {
-      return Wenku8Parser.userInfo(html);
-    } catch (_) {
-      return null;
-    }
-  }
+  static final _titleRe = RegExp(r'<title[^>]*>(.*?)</title>', caseSensitive: false, dotAll: true);
+  static final _wsRe = RegExp(r'\s+');
 
   @override
   SessionState build() {
@@ -503,7 +589,7 @@ class SessionController extends Notifier<SessionState> {
     // 本地就能定下来的直接给，第一帧就进主界面，不在启动页停：没登录 → 游客；有上次的账号信息 → 先当已登录，确认在后台做。
     // 只有存了 cookie 却没有账号信息（刚登录完就被杀掉）时才在启动页等确认
     if (_store.cookie == null) return const SessionLoggedOut();
-    final cached = _tryParseUser(_store.userHtml);
+    final cached = _store.cachedUser;
     return cached != null ? SessionLoggedIn(cached) : const SessionChecking();
   }
 
@@ -611,7 +697,7 @@ class SessionController extends Notifier<SessionState> {
         return null;
       }
       // 联网失败不等于没登录：有 cookie 和上次保存的账号信息就按离线登录处理
-      final cached = _tryParseUser(_store.userHtml);
+      final cached = _store.cachedUser;
       final verify = isCloudflare(e);
       state = cached == null ? SessionLoggedOut(needsVerify: verify) : SessionLoggedIn(cached, offline: true, needsVerify: verify);
       return _describeError(e);
@@ -701,13 +787,15 @@ class SessionController extends Notifier<SessionState> {
     final UserInfo user;
     try {
       user = Wenku8Parser.userInfo(html);
+    } on Wenku8LoginRequiredException {
+      // Wenku8Parser.userInfo 已经解析过一次 DOM 并判定 needsLoginDoc(doc)，直接透传避免重复 parse(html)
+      rethrow;
     } on Wenku8UnexpectedPageException {
-      if (Wenku8Parser.needsLogin(html)) rethrow;
-      final m = RegExp(r'<title[^>]*>(.*?)</title>', caseSensitive: false, dotAll: true).firstMatch(html);
-      final title = m?.group(1)?.replaceAll(RegExp(r'\s+'), ' ').trim() ?? '';
+      final m = _titleRe.firstMatch(html);
+      final title = m?.group(1)?.replaceAll(_wsRe, ' ').trim() ?? '';
       throw _OddUserPage(title);
     }
-    await _store.setUserHtml(html);
+    await _store.setCachedUser(user);
     return user;
   }
 
@@ -721,7 +809,7 @@ class SessionController extends Notifier<SessionState> {
       } catch (_) {}
     }
     // 书架这类账号私有的离线备份一并清掉，换账号不会看到上一个人的内容（还在确认登录时按上次保存的账号）
-    final uid = s is SessionLoggedIn ? s.user.uid : _tryParseUser(_store.userHtml)?.uid;
+    final uid = s is SessionLoggedIn ? s.user.uid : _store.cachedUser?.uid;
     if (uid != null && uid.isNotEmpty) await PageStore.removeScope(uid);
     await _clear();
     state = const SessionLoggedOut();
@@ -730,7 +818,7 @@ class SessionController extends Notifier<SessionState> {
   /// 注销或登录失效时清理 `jieqi*` 登录 cookie，保留有效 Cloudflare cookie。
   Future<void> _clear() => _serializeCookies(() async {
     await _store.setCookie(null);
-    await _store.setUserHtml(null);
+    await _store.setCachedUser(null);
     await _client.clearCookie();
     if (!isWebPreview) {
       for (final n in _nodeHosts) {

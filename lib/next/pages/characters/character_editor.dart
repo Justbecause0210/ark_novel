@@ -13,6 +13,8 @@ class _CharacterEditorSheet extends ConsumerStatefulWidget {
 }
 
 class _CharacterEditorSheetState extends ConsumerState<_CharacterEditorSheet> {
+  static final _aliasSplitRe = RegExp(r'[,，/、]');
+
   late final TextEditingController _name = TextEditingController(text: widget.initial?.name ?? '');
   late final TextEditingController _orig = TextEditingController(text: widget.initial?.originalName ?? '');
   late final TextEditingController _aliasInput = TextEditingController();
@@ -48,7 +50,7 @@ class _CharacterEditorSheetState extends ConsumerState<_CharacterEditorSheet> {
   void _addAlias() {
     final raw = _aliasInput.text.trim();
     if (raw.isEmpty) return;
-    for (final part in raw.split(RegExp(r'[,，/、]'))) {
+    for (final part in raw.split(_aliasSplitRe)) {
       final t = part.trim();
       if (t.isNotEmpty && t != _name.text.trim() && !_aliases.contains(t)) {
         _aliases.add(t);
@@ -433,7 +435,7 @@ class _BookIllustrationPickerPageState extends ConsumerState<_BookIllustrationPi
                         borderRadius: BorderRadius.circular(10),
                         child: ColoredBox(
                           color: scheme.surfaceContainer,
-                          child: NetImage(snap.data![i], fit: BoxFit.cover),
+                          child: NetImage(snap.data![i], fit: BoxFit.cover, thumbnail: true, decodeSize: const Size(140, 180), maxDecodeWidth: 480),
                         ),
                       ),
                     ),
@@ -457,32 +459,12 @@ class _AvatarCropPage extends StatefulWidget {
 
 class _AvatarCropPageState extends State<_AvatarCropPage> {
   final _tc = TransformationController();
-  late final Future<ui.Image> _decoded = _decode(widget.bytes);
-  ui.Image? _decodedImage;
-  bool _disposed = false;
+  late final Future<ui.Size> _imgSize = imageSize(widget.bytes);
   Size? _laidOut;
   bool _saving = false;
 
-  Future<ui.Image> _decode(Uint8List bytes) async {
-    final codec = await ui.instantiateImageCodec(bytes);
-    try {
-      final frame = await codec.getNextFrame();
-      if (_disposed) {
-        frame.image.dispose();
-        throw StateError('disposed');
-      }
-      _decodedImage = frame.image;
-      return frame.image;
-    } finally {
-      codec.dispose();
-    }
-  }
-
   @override
   void dispose() {
-    _disposed = true;
-    _decodedImage?.dispose();
-    _decodedImage = null;
     _tc.dispose();
     super.dispose();
   }
@@ -492,14 +474,19 @@ class _AvatarCropPageState extends State<_AvatarCropPage> {
     return Size(w * s, h * s);
   }
 
-  Future<void> _confirm(ui.Image img, double box) async {
+  Future<void> _confirm(ui.Size imgSize, double box) async {
     if (_saving) return;
     setState(() => _saving = true);
+    ui.Codec? codec;
+    ui.Image? img;
     ui.Picture? picture;
     ui.Image? outImg;
     var popped = false;
     try {
-      final child = _fill(img.width.toDouble(), img.height.toDouble(), box);
+      codec = await ui.instantiateImageCodec(widget.bytes);
+      final frame = await codec.getNextFrame();
+      img = frame.image;
+      final child = _fill(imgSize.width, imgSize.height, box);
       final scale = _tc.value.getMaxScaleOnAxis();
       final t = _tc.value.getTranslation();
       final left = (-t.x / scale / child.width).clamp(0.0, 1.0);
@@ -523,6 +510,8 @@ class _AvatarCropPageState extends State<_AvatarCropPage> {
     } finally {
       outImg?.dispose();
       picture?.dispose();
+      img?.dispose();
+      codec?.dispose();
       if (!popped && mounted) setState(() => _saving = false);
     }
   }
@@ -535,8 +524,8 @@ class _AvatarCropPageState extends State<_AvatarCropPage> {
       foregroundColor: Colors.white,
       title: const Text('裁剪头像', style: TextStyle(color: Colors.white)),
     ),
-    body: FutureBuilder<ui.Image>(
-      future: _decoded,
+    body: FutureBuilder<ui.Size>(
+      future: _imgSize,
       builder: (context, snap) {
         if (snap.hasError) {
           return Center(
@@ -551,12 +540,13 @@ class _AvatarCropPageState extends State<_AvatarCropPage> {
           );
         }
         if (!snap.hasData) return const Center(child: CircularProgressIndicator());
-        final img = snap.data!;
+        final imgSize = snap.data!;
+        final previewCacheW = math.min(imgSize.width.round(), 1440);
         return LayoutBuilder(
           builder: (context, c) {
             final box = math.min(c.maxWidth - 48, c.maxHeight - 120).clamp(160.0, 320.0);
             final frame = Size(box, box);
-            final child = _fill(img.width.toDouble(), img.height.toDouble(), box);
+            final child = _fill(imgSize.width, imgSize.height, box);
             if (_laidOut != frame) {
               _laidOut = frame;
               _tc.value = Matrix4.translationValues((box - child.width) / 2, (box - child.height) / 2, 0);
@@ -576,7 +566,10 @@ class _AvatarCropPageState extends State<_AvatarCropPage> {
                             minScale: 1,
                             maxScale: 6,
                             clipBehavior: Clip.none,
-                            child: SizedBox.fromSize(size: child, child: Image.memory(widget.bytes, fit: BoxFit.fill)),
+                            child: SizedBox.fromSize(
+                              size: child,
+                              child: Image.memory(widget.bytes, fit: BoxFit.fill, cacheWidth: previewCacheW > 0 ? previewCacheW : null),
+                            ),
                           ),
                           IgnorePointer(child: CustomPaint(size: frame, painter: _SquareFramePainter())),
                         ],
@@ -591,7 +584,7 @@ class _AvatarCropPageState extends State<_AvatarCropPage> {
                       const Expanded(child: Text('拖动、双指缩放框选头像区域', style: TextStyle(color: Colors.white70, fontSize: 13))),
                       FilledButton(
                         style: FilledButton.styleFrom(minimumSize: const Size(88, 44)),
-                        onPressed: _saving ? null : () => _confirm(img, box),
+                        onPressed: _saving ? null : () => _confirm(imgSize, box),
                         child: _saving ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('完成'),
                       ),
                     ],
